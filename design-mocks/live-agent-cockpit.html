@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Mortic Mock · Live Agent Cockpit</title>
+  <link rel="stylesheet" href="./mock.css" />
+</head>
+<body class="mock cockpit">
+  <main class="shell">
+    <header class="hero">
+      <div>
+        <p class="eyebrow">Transport: LiveKit WebRTC · Input: Push-to-talk</p>
+        <h1>Mortic live cockpit</h1>
+      </div>
+      <button class="danger">Interrupt</button>
+    </header>
+    <section class="status-grid">
+      <article class="tile ok"><span>Ready</span><strong>Scratch fork validated</strong><small>Source untouched · checkpoint saved</small></article>
+      <article class="tile busy"><span>Initializing</span><strong>Warming first response</strong><small>I am ready to continue work...</small></article>
+      <article class="tile live"><span>Listening</span><strong><i></i><i></i><i></i><i></i></strong><small>Mic armed · audio accepted only while held</small></article>
+      <article class="tile busy"><span>Transcribing</span><strong>2 segments</strong><small>first speech 420 ms · final 1.8 s</small></article>
+      <article class="tile busy"><span>Thinking</span><strong>Codex 3.2 s</strong><small>model wait visible</small></article>
+      <article class="tile live"><span>Speaking</span><strong>Inworld WS</strong><small>first audio 610 ms · no underruns</small></article>
+      <article class="tile warn"><span>Interrupted</span><strong>Speech stopped</strong><small>next turn safe</small></article>
+      <article class="tile bad"><span>Error</span><strong>Provider fallback</strong><small>Inworld failed · Browser ready</small></article>
+    </section>
+    <section class="layout">
+      <article class="panel transcript">
+        <h2>Conversation</h2>
+        <div class="user">Can you explain the context checkpoint risk?</div>
+        <div class="agent">The source thread stays untouched. Mortic only works on a disposable scratch fork, and handoff should prioritize what happened after the checkpoint.</div>
+        <details open><summary>READ notes</summary><p>- sourceThreadId and scratchThreadId are distinct.<br>- Handoff prioritizes post-checkpoint decisions, risks, tests, and conclusions.<br>- Inherited context is background only.</p></details>
+      </article>
+      <aside class="panel">
+        <h2>Handoff prompt</h2>
+        <textarea>Please implement the next step from the Mortic scratch: preserve source-thread safety, keep voice NDJSON valid, and verify segmented STT...</textarea>
+        <button>Copy prompt</button>
+      </aside>
+    </section>
+    <details class="diagnostics"><summary>Provider and transport health</summary><p>packet loss 0 · jitter 12 ms · round trip 38 ms · reconnects 0 · track live · muted false</p></details>
+  </main>
+</body>
+</html>

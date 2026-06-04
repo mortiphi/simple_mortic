@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Mortic Mock · Split Conversation Studio</title>
+  <link rel="stylesheet" href="./mock.css" />
+</head>
+<body class="mock studio">
+  <main class="shell">
+    <header class="hero">
+      <div>
+        <p class="eyebrow">Transport: Local Browser · Input: Live</p>
+        <h1>Conversation studio</h1>
+      </div>
+      <button>Start Live</button>
+    </header>
+    <section class="studio-grid">
+      <aside class="panel call">
+        <div class="orb"><span></span></div>
+        <h2>Agent state</h2>
+        <p>Listening now. Turn detection will submit only after voice activity ends.</p>
+        <div class="timeline">
+          <b>Ready</b><b>Listening</b><b>Transcribing</b><b>Thinking</b><b>Speaking</b>
+        </div>
+        <button class="danger">Interrupt</button>
+      </aside>
+      <article class="panel transcript">
+        <h2>Transcript and notes</h2>
+        <div class="agent">I would keep push-to-talk as the safe default and make live mode opt-in until VAD metrics are stable.</div>
+        <details><summary>READ notes</summary><p>- Live mode continuously accepts audio.<br>- Push-to-talk accepts audio only during explicit control.<br>- Both share the same transport abstraction.</p></details>
+        <div class="error">Error state: payload too large avoided by segment rollover.</div>
+      </article>
+      <aside class="panel">
+        <h2>Handoff</h2>
+        <textarea>Continue by validating WebRTC push-to-talk and live mode separately. Keep source-thread safety as the hard constraint...</textarea>
+      </aside>
+    </section>
+    <details class="diagnostics" open><summary>Collapsed diagnostics</summary><p>recording 12.4 s · segments 2 · bytes 812 KB · first speech 310 ms · final transcript 2.1 s</p></details>
+  </main>
+</body>
+</html>

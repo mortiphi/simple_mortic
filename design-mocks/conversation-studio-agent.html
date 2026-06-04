@@ -1,0 +1,207 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Mortic Mock · Conversation Studio Agent</title>
+  <link rel="stylesheet" href="./conversation-studio-agent.css" />
+</head>
+<body>
+  <main class="studio-shell">
+    <section class="studio-hero" aria-labelledby="mortic-title">
+      <div>
+        <p class="eyebrow">Mortic voice sidecar</p>
+        <h1 id="mortic-title">Speak to the scratch fork.</h1>
+      </div>
+      <div class="session-pill">
+        <span class="dot live-dot"></span>
+        <span>LiveKit WebRTC connected</span>
+      </div>
+    </section>
+
+    <section class="agent-stage" aria-label="Central speech agent">
+      <div class="stage-backdrop" aria-hidden="true"></div>
+
+      <aside class="left-dock glass-card" aria-label="Session routing">
+        <div class="dock-row">
+          <span>Transport</span>
+          <strong>LiveKit WebRTC</strong>
+          <small>room connected · mic muted until capture</small>
+        </div>
+        <div class="dock-row">
+          <span>Input control</span>
+          <div class="mode-toggle" aria-label="Input control">
+            <button class="selected">Push-to-talk</button>
+            <button>Live</button>
+          </div>
+        </div>
+        <div class="dock-row">
+          <span>Providers</span>
+          <strong>Inworld STT · Inworld WS</strong>
+          <small>ElevenLabs and Browser fallback ready</small>
+        </div>
+      </aside>
+
+      <section class="agent-core glass-card" aria-label="Voice agent state">
+        <div class="state-strip" aria-label="State examples">
+          <span class="state-chip ready">Ready</span>
+          <span class="state-chip warming">Warming</span>
+          <span class="state-chip listening">Listening</span>
+          <span class="state-chip transcribing">Transcribing</span>
+          <span class="state-chip thinking">Thinking</span>
+          <span class="state-chip speaking">Speaking</span>
+          <span class="state-chip interrupted">Interrupted</span>
+          <span class="state-chip error">Error</span>
+        </div>
+
+        <div class="orb-wrap speaking-state" aria-hidden="true">
+          <div class="orb-ring ring-one"></div>
+          <div class="orb-ring ring-two"></div>
+          <div class="matter-orb">
+            <span></span>
+            <i></i>
+          </div>
+          <div class="waveform">
+            <b></b><b></b><b></b><b></b><b></b><b></b><b></b><b></b><b></b>
+          </div>
+        </div>
+
+        <p class="agent-kicker">Speaking now</p>
+        <h2>Mortic is answering from the disposable scratch fork.</h2>
+        <p class="agent-copy">
+          The spoken answer is coming from <code>speak.text</code>. The readable notes stay collapsed until you need exact artifacts.
+        </p>
+
+        <div class="capture-dock" aria-label="Voice capture dock">
+          <button class="primary-action">
+            <span class="button-orb"></span>
+            Hold to talk
+          </button>
+          <button class="secondary-action">Live mode</button>
+          <button class="danger-action">Interrupt</button>
+          <textarea aria-label="Text fallback" placeholder="Type when voice is unavailable"></textarea>
+          <button class="send-action">Send</button>
+        </div>
+      </section>
+
+      <aside class="right-dock glass-card" aria-label="Handoff preview">
+        <div class="dock-row">
+          <span>Handoff</span>
+          <strong>Ready after 8 turns</strong>
+          <small>post-checkpoint actions only</small>
+        </div>
+        <div class="handoff-preview">
+          <p>Continue by testing the LiveKit transport separately from push-to-talk and live input control.</p>
+          <div class="handoff-actions">
+            <button>Copy short</button>
+            <button>Copy full</button>
+          </div>
+        </div>
+      </aside>
+    </section>
+
+    <section class="surface-grid" aria-label="Conversation surfaces">
+      <article class="conversation-panel glass-card">
+        <header class="panel-title">
+          <div>
+            <p class="eyebrow">Recent transcript</p>
+            <h2>Last exchange</h2>
+          </div>
+          <button>Expand transcript</button>
+        </header>
+
+        <div class="chat-stack">
+          <div class="bubble user-bubble">
+            <span>You</span>
+            <p>Should Live mode submit automatically, or should push-to-talk stay explicit?</p>
+          </div>
+          <div class="bubble agent-bubble">
+            <span>Mortic</span>
+            <p>Keep push-to-talk as the safe default. Live mode should be opt-in until turn detection proves it does not cut you off or leak old text.</p>
+            <details>
+              <summary>Read notes</summary>
+              <div class="notes-markdown">
+                <p><strong>Why:</strong> push-to-talk gives deterministic turn boundaries while Live mode depends on voice activity and transcript finalization.</p>
+                <ul>
+                  <li>Transport stays connected in both modes.</li>
+                  <li>Push-to-talk accepts audio only during explicit control.</li>
+                  <li>Live mode continuously accepts audio and relies on turn detection.</li>
+                </ul>
+              </div>
+            </details>
+          </div>
+          <div class="bubble status-bubble">
+            <span>Diagnostics</span>
+            <p>recording 12.4 s · segments 2 · final transcript 2.1 s · first audio 410 ms</p>
+          </div>
+        </div>
+      </article>
+
+      <aside class="read-panel glass-card">
+        <header class="panel-title">
+          <div>
+            <p class="eyebrow">READ notes</p>
+            <h2>Expandable screen detail</h2>
+          </div>
+          <button>Pin notes</button>
+        </header>
+        <details open>
+          <summary>Current implementation notes</summary>
+          <div class="notes-markdown">
+            <ul>
+              <li>Source thread remains untouched.</li>
+              <li>Voice turns go only to a validated scratch fork.</li>
+              <li>Text to speech reads only <code>speak.text</code>.</li>
+              <li>Markdown, paths, logs, sources, and exact commands render here.</li>
+            </ul>
+          </div>
+        </details>
+        <details>
+          <summary>Provider health</summary>
+          <div class="metric-grid">
+            <span>STT ready</span><strong>Inworld</strong>
+            <span>TTS ready</span><strong>Inworld WS</strong>
+            <span>Fallback</span><strong>ElevenLabs · Browser</strong>
+            <span>Transport</span><strong>LiveKit connected</strong>
+          </div>
+        </details>
+      </aside>
+
+      <aside class="handoff-panel glass-card">
+        <header class="panel-title">
+          <div>
+            <p class="eyebrow">Handoff</p>
+            <h2>Paste-ready next prompt</h2>
+          </div>
+          <button>Generate</button>
+        </header>
+        <div class="token-row">
+          <span>Short 114 tokens</span>
+          <span>Full 1,181 tokens</span>
+          <span>98% proxy saved</span>
+        </div>
+        <label>
+          <span>Short prompt</span>
+          <textarea>Continue by validating the new conversation studio UI as a central speech-agent interface, then port it to React without touching source-thread safety.</textarea>
+        </label>
+        <label>
+          <span>Full prompt</span>
+          <textarea>Continue from the Mortic redesign direction. Keep the central speech agent, collapsible transcript, expandable READ notes, and handoff panel. Preserve the scratch fork architecture and the two-line voice output contract.</textarea>
+        </label>
+      </aside>
+    </section>
+
+    <details class="diagnostics glass-card">
+      <summary>Collapsed diagnostics</summary>
+      <div class="diagnostic-grid">
+        <span>transport</span><strong>LiveKit WebRTC</strong>
+        <span>input</span><strong>push-to-talk</strong>
+        <span>agent</span><strong>speaking</strong>
+        <span>capture</span><strong>muted</strong>
+        <span>packet loss</span><strong>0</strong>
+        <span>jitter</span><strong>18 ms</strong>
+      </div>
+    </details>
+  </main>
+</body>
+</html>

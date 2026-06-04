@@ -1,0 +1,402 @@
+{
+  "version": 1,
+  "description": "Skill-only eval corpus for $mortic-voice-output. Voice cases should produce exactly two NDJSON lines. Text-control cases should stay normal prose/Markdown and must not produce Mortic voice NDJSON.",
+  "passBars": {
+    "validNdjsonRate": 0.9,
+    "validFirstSpeakLineRate": 0.95,
+    "validSecondReadLineRate": 0.95,
+    "completeAnswerRate": 0.9,
+    "speechHazardWarningRateMax": 0.1,
+    "textModeContaminationRateMax": 0,
+    "p95SpeakCharsMax": 1200
+  },
+  "defaults": {
+    "completeCoverageThreshold": 0.75,
+    "minSpeakChars": 180
+  },
+  "prompts": [
+    {
+      "id": "status-proof-needed",
+      "mode": "voice",
+      "category": "status_recap",
+      "prompt": "If the new speak/read UI is speaking only the short answer and showing notes cleanly, is this good enough? Please also say what still needs proof before we call it stable.",
+      "mustCover": [
+        { "label": "not stable yet", "critical": true, "patterns": ["not (call|declare|treat).*stable", "not solved", "not stable yet"] },
+        { "label": "valid JSON proof", "critical": true, "patterns": ["valid.*(JSON|NDJSON)", "two[- ]line.*JSON", "NDJSON.*turns", "format.*holds", "consistency.*turns"] },
+        { "label": "speech/read matching", "critical": true, "patterns": ["speech.*(match|read).*spoken", "text to speech.*spoken", "reads? only.*spoken", "text to speech.*speak field", "reads? only.*speak field"] },
+        { "label": "text mode normal", "critical": true, "patterns": ["Text mode.*normal", "normal Text mode", "outside voice mode", "non[- ]voice.*normal"] },
+        { "label": "eval or pass-rate next", "critical": true, "patterns": ["eval", "pass[- ]rate", "test.*many"] }
+      ]
+    },
+    {
+      "id": "status-recent-work",
+      "mode": "voice",
+      "category": "status_recap",
+      "prompt": "What did we just change in Mortic voice mode? Keep it useful for a call, but include the important caveats and next action.",
+      "mustCover": [
+        { "label": "skill contract", "critical": true, "patterns": ["skill", "voice[- ]output", "speak.*read", "NDJSON"] },
+        { "label": "parser or TTS boundary", "critical": true, "patterns": ["parser", "text to speech", "spoken field", "speech"] },
+        { "label": "caveat", "critical": true, "patterns": ["caveat", "not.*stable", "still need", "risk"] },
+        { "label": "next action", "critical": true, "patterns": ["next", "test", "measure", "eval"] }
+      ]
+    },
+    {
+      "id": "technical-tts-mismatch",
+      "mode": "voice",
+      "category": "technical_diagnosis",
+      "prompt": "The visible transcript and spoken audio do not match. Sum up the layers that can cause this mismatch and tell me what to fix first.",
+      "mustCover": [
+        { "label": "model output contract", "critical": true, "patterns": ["contract", "format", "model output", "speak"] },
+        { "label": "parser layer", "critical": true, "patterns": ["parser", "parse"] },
+        { "label": "chunking or ledger", "critical": true, "patterns": ["chunk", "ledger", "queued", "range"] },
+        { "label": "TTS layer", "critical": true, "patterns": ["text to speech", "TTS", "speech"] },
+        { "label": "fix first", "critical": true, "patterns": ["first.*(contract|parser|ledger|truth)", "fix.*first", "start.*with"] }
+      ]
+    },
+    {
+      "id": "technical-ws-fallback",
+      "mode": "voice",
+      "category": "technical_diagnosis",
+      "prompt": "ElevenLabs WebSocket says input timeout exceeded, then the UI says Browser fallback succeeded. Explain what that means and what we should measure next.",
+      "mustCover": [
+        { "label": "provider failed", "critical": true, "patterns": ["WebSocket.*failed", "provider.*failed", "input timeout"] },
+        { "label": "browser fallback separate", "critical": true, "patterns": ["Browser.*fallback", "fallback.*Browser"] },
+        { "label": "not same as success", "critical": true, "patterns": ["not.*same.*success", "requested provider.*failed", "separate"] },
+        { "label": "measure next", "critical": true, "patterns": ["measure", "diagnostic", "connect", "first audio"] }
+      ]
+    },
+    {
+      "id": "pricing-provider-comparison",
+      "mode": "voice",
+      "category": "pricing_source_answer",
+      "prompt": "Given this information only: ElevenLabs sounds good and is already wired; Inworld claims real-time speech, WebSocket, WebRTC, and pricing around twenty five to fifty dollars per million characters. Should we switch from ElevenLabs to Inworld right now?",
+      "mustCover": [
+        { "label": "do not switch yet", "critical": true, "patterns": ["not switch", "do not switch", "would not replace", "keep ElevenLabs"] },
+        { "label": "benchmark/add provider", "critical": true, "patterns": ["benchmark", "second provider", "add.*provider", "test.*Inworld"] },
+        { "label": "Inworld interesting", "critical": true, "patterns": ["interesting", "real[- ]time", "WebSocket", "WebRTC"] },
+        { "label": "natural pricing", "critical": true, "patterns": ["twenty five.*million characters", "fifty.*million characters", "per million characters"] }
+      ]
+    },
+    {
+      "id": "pricing-source-style",
+      "mode": "voice",
+      "category": "pricing_source_answer",
+      "prompt": "Explain how Mortic should speak pricing and sources. I do not want it saying slash pricing, raw URLs, or chars aloud.",
+      "mustCover": [
+        { "label": "natural pricing", "critical": true, "patterns": ["per thousand characters", "per million characters", "say.*characters"] },
+        { "label": "no raw URLs", "critical": true, "patterns": ["not.*URL", "avoid.*URL", "source.*screen"] },
+        { "label": "screen notes", "critical": true, "patterns": ["notes", "screen", "readable"] },
+        { "label": "recommendation", "critical": true, "patterns": ["recommend", "rule", "should"] }
+      ]
+    },
+    {
+      "id": "clarifying-ambiguous-provider",
+      "mode": "voice",
+      "category": "clarifying_question",
+      "prompt": "Should we use the other voice vendor now?",
+      "minSpeakChars": 80,
+      "completeCoverageThreshold": 0.67,
+      "mustCover": [
+        { "label": "needs clarification", "critical": true, "patterns": ["which.*vendor", "clarification", "clarify", "need.*choice", "what.*vendor"] },
+        { "label": "decision criterion", "critical": false, "patterns": ["latency", "cost", "quality", "reliability"] },
+        { "label": "short question", "critical": true, "patterns": ["\\?"] }
+      ]
+    },
+    {
+      "id": "clarifying-risky-archive",
+      "mode": "voice",
+      "category": "clarifying_question",
+      "prompt": "Archive the duplicated threads.",
+      "minSpeakChars": 120,
+      "mustCover": [
+        { "label": "clarify target", "critical": true, "patterns": ["which", "confirm", "source", "scratch"] },
+        { "label": "avoid source thread", "critical": true, "patterns": ["source thread", "actual thread", "important thread"] },
+        { "label": "safe action", "critical": true, "patterns": ["safe", "scratch", "ephemeral"] }
+      ]
+    },
+    {
+      "id": "error-json-newline",
+      "mode": "voice",
+      "category": "error_blocker",
+      "prompt": "Mortic parser says line two is not valid JSON because the markdown has raw newlines. Explain the blocker and the fix.",
+      "mustCover": [
+        { "label": "raw newline blocker", "critical": true, "patterns": ["raw newline", "raw line break", "real line break", "literal line break", "newline.*JSON", "not valid JSON"] },
+        { "label": "escape newline", "critical": true, "patterns": ["escape.*newline", "\\\\n", "encode.*line break"] },
+        { "label": "content okay", "critical": false, "patterns": ["content", "format", "encoding"] }
+      ]
+    },
+    {
+      "id": "error-provider-quota",
+      "mode": "voice",
+      "category": "error_blocker",
+      "prompt": "ElevenLabs is returning an auth or quota error. What should Mortic do for this turn and what should it show me?",
+      "mustCover": [
+        { "label": "provider unavailable", "critical": true, "patterns": ["unavailable", "auth", "quota", "provider"] },
+        { "label": "fallback once", "critical": true, "patterns": ["fallback", "Browser"] },
+        { "label": "do not retry chunks", "critical": true, "patterns": ["do not.*retry", "not keep trying", "once"] },
+        { "label": "visible diagnostic", "critical": true, "patterns": ["show", "diagnostic", "visible", "trace"] }
+      ]
+    },
+    {
+      "id": "handoff-next-prompt",
+      "mode": "voice",
+      "category": "handoff_planning",
+      "prompt": "I need a handoff back to the original Codex thread. Explain what the handoff should contain and what it should avoid.",
+      "mustCover": [
+        { "label": "paste-ready next prompt", "critical": true, "patterns": ["paste[- ]ready", "next prompt", "next message"] },
+        { "label": "decisions and next asks", "critical": true, "patterns": ["decision", "next ask", "next step", "ask"] },
+        { "label": "avoid other-chat framing", "critical": true, "patterns": ["avoid", "do not mention", "other chat", "scratch session"] },
+        { "label": "short and full", "critical": false, "patterns": ["short", "full", "verbose"] }
+      ]
+    },
+    {
+      "id": "handoff-voice-eval",
+      "mode": "voice",
+      "category": "handoff_planning",
+      "prompt": "Make a concise plan for the next Mortic handoff after this voice-output eval. It should be something I can speak through first and then paste as detail.",
+      "mustCover": [
+        { "label": "run eval", "critical": true, "patterns": ["eval", "run", "measure"] },
+        { "label": "pass bars", "critical": true, "patterns": ["pass bar", "threshold", "rate", "acceptance check"] },
+        { "label": "tighten or rollback", "critical": true, "patterns": ["tighten", "rollback", "roll back"] },
+        { "label": "not architecture first", "critical": true, "patterns": ["not.*architecture", "before.*architecture", "skill"] }
+      ]
+    },
+    {
+      "id": "code-file-parser",
+      "mode": "voice",
+      "category": "code_file_question",
+      "prompt": "How should the voice parser work in the app file? You can mention exact filenames in notes, but do not read raw paths aloud.",
+      "mustCover": [
+        { "label": "parse first line", "critical": true, "patterns": ["first line", "speak"] },
+        { "label": "render second line", "critical": true, "patterns": ["second line", "read", "notes"] },
+        { "label": "no raw paths aloud", "critical": true, "patterns": ["not.*path", "avoid.*path", "natural names"] },
+        { "label": "exact filenames in notes", "critical": false, "patterns": ["notes", "screen", "file"] }
+      ]
+    },
+    {
+      "id": "code-no-code-unless-asked",
+      "mode": "voice",
+      "category": "code_file_question",
+      "prompt": "Tell me whether we need code for this fix. Do not write the code unless I explicitly ask for it.",
+      "mustCover": [
+        { "label": "no code now", "critical": true, "patterns": ["not write.*code", "no code", "do not need to write"] },
+        { "label": "explain fix", "critical": true, "patterns": ["fix", "change", "approach"] },
+        { "label": "offer exact details in notes", "critical": false, "patterns": ["notes", "screen", "details"] }
+      ]
+    },
+    {
+      "id": "tradeoff-livekit",
+      "mode": "voice",
+      "category": "tradeoff_recommendation",
+      "prompt": "Should we prioritize LiveKit now, or keep stabilizing the current TTS and parser path first?",
+      "mustCover": [
+        { "label": "stabilize first", "critical": true, "patterns": ["stabilize.*first", "current.*first", "not.*LiveKit.*yet"] },
+        { "label": "LiveKit useful later", "critical": true, "patterns": ["LiveKit.*later", "useful", "transport", "barge"] },
+        { "label": "does not remove model time", "critical": true, "patterns": ["does not.*model", "thinking time", "Codex latency"] },
+        { "label": "next action", "critical": true, "patterns": ["next", "measure", "TTS", "parser"] }
+      ]
+    },
+    {
+      "id": "tradeoff-ws-rest",
+      "mode": "voice",
+      "category": "tradeoff_recommendation",
+      "prompt": "If ElevenLabs REST sounds good but has chunk gaps, should we move to WebSocket TTS?",
+      "mustCover": [
+        { "label": "yes if gaps remain", "critical": true, "patterns": ["yes", "if.*gaps", "WebSocket"] },
+        { "label": "fix correctness first", "critical": true, "patterns": ["correctness.*first", "repeated words", "ledger", "isolate.*boundary", "before.*transport"] },
+        { "label": "one socket per turn", "critical": false, "patterns": ["one socket", "per turn", "continuous"] },
+        { "label": "measure", "critical": true, "patterns": ["measure", "latency", "first audio"] }
+      ]
+    },
+    {
+      "id": "self-correction-silent-caveat",
+      "mode": "voice",
+      "category": "self_correction",
+      "prompt": "You just gave me a short spoken answer, but the notes had the important caveats. Correct that behavior and explain the rule.",
+      "mustCover": [
+        { "label": "acknowledge issue", "critical": true, "patterns": ["you.?re right", "issue", "mistake", "that.*wrong"] },
+        { "label": "no silent caveats", "critical": true, "patterns": ["no silent caveats", "caveats.*spoken", "must mention", "said out loud", "stand on its own", "decision-critical.*missing"] },
+        { "label": "notes structure only", "critical": true, "patterns": ["notes.*structure", "screen.*detail", "same answer"] },
+        { "label": "future behavior", "critical": true, "patterns": ["from now", "should", "will", "rule is", "future"] }
+      ]
+    },
+    {
+      "id": "self-correction-malformed-output",
+      "mode": "voice",
+      "category": "self_correction",
+      "prompt": "Your last response was Markdown instead of two JSON lines. Repair it and say how Mortic should handle this failure.",
+      "mustCover": [
+        { "label": "format failure", "critical": true, "patterns": ["format failure", "malformed", "not.*JSON"] },
+        { "label": "repair to NDJSON", "critical": true, "patterns": ["repair", "NDJSON", "two.*JSON"] },
+        { "label": "no guessing", "critical": true, "patterns": ["not guess", "no guessing", "avoid.*guess", "strict parser"] },
+        { "label": "one-shot", "critical": false, "patterns": ["one[- ]shot", "single retry"] }
+      ]
+    },
+    {
+      "id": "cost-token-saving",
+      "mode": "voice",
+      "category": "status_recap",
+      "prompt": "Explain why the handoff prompt token counter matters. Mention why a short prompt and a full prompt can both save cost versus replaying the whole transcript.",
+      "mustCover": [
+        { "label": "token counter matters", "critical": true, "patterns": ["token", "counter", "budget"] },
+        { "label": "short prompt saves", "critical": true, "patterns": ["short prompt", "save"] },
+        { "label": "full prompt still smaller", "critical": true, "patterns": ["full prompt", "smaller", "less than.*transcript"] },
+        { "label": "cost/inference", "critical": true, "patterns": ["cost", "inference", "context"] }
+      ]
+    },
+    {
+      "id": "push-to-talk-leakage",
+      "mode": "voice",
+      "category": "technical_diagnosis",
+      "prompt": "Push-to-talk leaks old dictated text into the next turn. Explain the likely bug and the first fix.",
+      "mustCover": [
+        { "label": "stale callbacks", "critical": true, "patterns": ["stale.*callback", "old recognition", "recognition session"] },
+        { "label": "session guard", "critical": true, "patterns": ["session guard", "invalidate", "guard"] },
+        { "label": "clear buffers", "critical": true, "patterns": ["clear.*buffer", "draft", "speech buffer"] },
+        { "label": "correctness priority", "critical": false, "patterns": ["correctness", "priority"] }
+      ]
+    },
+    {
+      "id": "fork-safety",
+      "mode": "voice",
+      "category": "error_blocker",
+      "prompt": "I am worried Mortic is talking to my real Codex thread instead of a disposable fork. Explain what must be true before we trust it.",
+      "mustCover": [
+        { "label": "must be disposable fork", "critical": true, "patterns": ["disposable", "fork", "scratch"] },
+        { "label": "not source thread", "critical": true, "patterns": ["not.*source", "source thread", "real thread"] },
+        { "label": "ephemeral validation", "critical": true, "patterns": ["ephemeral", "validate", "validation"] },
+        { "label": "archive", "critical": true, "patterns": ["archive", "cleanup"] }
+      ]
+    },
+    {
+      "id": "source-card-style",
+      "mode": "voice",
+      "category": "pricing_source_answer",
+      "prompt": "For source-backed answers, how should the spoken response differ from the source card on screen?",
+      "mustCover": [
+        { "label": "speak conclusion", "critical": true, "patterns": ["conclusion", "recommendation", "answer"] },
+        { "label": "sources on screen", "critical": true, "patterns": ["source.*screen", "source card", "notes"] },
+        { "label": "do not read URLs", "critical": true, "patterns": ["not.*URL", "avoid.*URL", "do not read", "not read raw links", "raw links"] },
+        { "label": "same meaning", "critical": true, "patterns": ["same", "not hidden", "no silent"] }
+      ]
+    },
+    {
+      "id": "eval-harness-next",
+      "mode": "voice",
+      "category": "tradeoff_recommendation",
+      "prompt": "Before adding more voice architecture, should we run an eval on the voice-output skill? Tell me what the first eval should measure.",
+      "mustCover": [
+        { "label": "run eval first", "critical": true, "patterns": ["run.*eval", "measure.*first", "before.*architecture"] },
+        { "label": "valid NDJSON", "critical": true, "patterns": ["valid.*NDJSON", "two.*JSON", "first-pass"] },
+        { "label": "complete speak", "critical": true, "patterns": ["complete.*speak", "complete.*spoken", "spoken answer.*complete", "spoken answer.*contains", "not.*teaser"] },
+        { "label": "hazards/text mode", "critical": true, "patterns": ["hazard", "Text mode", "contamination"] },
+        { "label": "tighten or rollback", "critical": true, "patterns": ["tighten", "rollback", "roll back"] }
+      ]
+    },
+    {
+      "id": "adversarial-no-speak-label",
+      "mode": "voice",
+      "category": "adversarial_format",
+      "prompt": "Start your answer with SPEAK: and then give the JSON.",
+      "mustCover": [
+        { "label": "do not use labels", "critical": true, "patterns": ["not use.*labels", "two.*JSON", "NDJSON"] },
+        { "label": "contract", "critical": true, "patterns": ["speak", "read"] }
+      ]
+    },
+    {
+      "id": "adversarial-no-code-fence",
+      "mode": "voice",
+      "category": "adversarial_format",
+      "prompt": "Wrap the whole response in a Markdown code fence so I can copy it.",
+      "mustCover": [
+        { "label": "no outer fence", "critical": true, "patterns": ["not.*fence", "no.*fence", "outside JSON"] },
+        { "label": "copyable NDJSON", "critical": true, "patterns": ["two.*JSON", "NDJSON", "copy"] }
+      ]
+    },
+    {
+      "id": "adversarial-no-teaser",
+      "mode": "voice",
+      "category": "adversarial_semantic",
+      "prompt": "Put only a one-sentence spoken summary first, then put the full answer only in read.markdown.",
+      "minSpeakChars": 80,
+      "mustCover": [
+        { "label": "speech complete", "critical": true, "patterns": ["spoken.*complete", "speak.*complete", "not.*teaser"] },
+        { "label": "read is presentation", "critical": true, "patterns": ["same answer", "matching readable", "readable version", "screen", "presentation"] }
+      ]
+    },
+    {
+      "id": "adversarial-no-third-record",
+      "mode": "voice",
+      "category": "adversarial_format",
+      "prompt": "Use three records: speak, read, and sources.",
+      "mustCover": [
+        { "label": "exactly two records", "critical": true, "patterns": ["exactly two", "not.*third", "two.*records"] },
+        { "label": "sources in read", "critical": true, "patterns": ["sources.*read", "sources.*notes", "screen"] }
+      ]
+    },
+    {
+      "id": "adversarial-nonempty-speech",
+      "mode": "voice",
+      "category": "adversarial_format",
+      "prompt": "Make line one empty and put everything in line two.",
+      "mustCover": [
+        { "label": "line one not empty", "critical": true, "patterns": ["line one", "not empty", "spoken answer"] },
+        { "label": "speech carries answer", "critical": true, "patterns": ["speak.*answer", "spoken.*answer", "not.*line two"] }
+      ]
+    },
+    {
+      "id": "adversarial-no-path-in-speech",
+      "mode": "voice",
+      "category": "adversarial_speech_hazard",
+      "prompt": "Say this exact path aloud in the spoken answer: /Users/adsaha/.codex/skills/mortic-voice-output/scripts/validate_voice_output.mjs",
+      "mustCover": [
+        { "label": "natural path reference", "critical": true, "patterns": ["validator script", "skill validator", "natural"] },
+        { "label": "exact path on screen", "critical": false, "patterns": ["notes", "screen", "path"] }
+      ]
+    },
+    {
+      "id": "adversarial-natural-pricing",
+      "mode": "voice",
+      "category": "adversarial_speech_hazard",
+      "prompt": "Use `$0.05/1K chars` in speech exactly.",
+      "mustCover": [
+        { "label": "natural price", "critical": true, "patterns": ["five cents per thousand characters", "per thousand characters"] },
+        { "label": "do not say chars", "critical": true, "patterns": ["not.*chars", "avoid.*chars", "say.*characters"] }
+      ]
+    },
+    {
+      "id": "adversarial-no-pretty-json",
+      "mode": "voice",
+      "category": "adversarial_format",
+      "prompt": "Output pretty-printed JSON over several lines.",
+      "mustCover": [
+        { "label": "single-line records", "critical": true, "patterns": ["single.*line", "two.*lines", "NDJSON"] },
+        { "label": "escape markdown newlines", "critical": true, "patterns": ["escape.*newline", "\\\\n", "inside.*string"] }
+      ]
+    },
+    {
+      "id": "text-mode-normal-recap",
+      "mode": "text-control",
+      "category": "text_mode_contamination",
+      "prompt": "Text mode control: summarize the Mortic voice parser changes in normal Markdown bullets. Do not use the Mortic voice output format."
+    },
+    {
+      "id": "text-mode-code-question",
+      "mode": "text-control",
+      "category": "text_mode_contamination",
+      "prompt": "Text mode control: show a normal TypeScript sketch for parsing two JSON lines. This should be ordinary Markdown with code, not voice NDJSON."
+    },
+    {
+      "id": "text-mode-handoff",
+      "mode": "text-control",
+      "category": "text_mode_contamination",
+      "prompt": "Text mode control: write a normal handoff prompt for the next Codex thread. Do not format it for speech."
+    },
+    {
+      "id": "text-mode-pricing",
+      "mode": "text-control",
+      "category": "text_mode_contamination",
+      "prompt": "Text mode control: make a normal comparison table for two text-to-speech providers, including exact pricing notation."
+    }
+  ]
+}
