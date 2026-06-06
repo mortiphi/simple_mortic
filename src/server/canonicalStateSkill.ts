@@ -5,6 +5,9 @@ import { homedir, tmpdir } from "node:os";
 import path from "node:path";
 
 import type {
+  CanonicalLifecycleAction,
+  CanonicalLifecycleStatus,
+  CanonicalReconciledItem,
   ExtractedItem,
   ExtractedItemType,
   MorticSession,
@@ -27,6 +30,10 @@ type CanonicalDelta = {
   operation: string;
   targetPath: string;
   targetId: string | null;
+  targetCanonicalItemId?: string | null;
+  lifecycleAction?: CanonicalLifecycleAction;
+  statusBefore?: CanonicalLifecycleStatus | null;
+  statusAfter?: CanonicalLifecycleStatus;
   title: string;
   body: string;
   rationale: string;
@@ -34,6 +41,14 @@ type CanonicalDelta = {
   confidence: number;
   reviewStatus: "candidate";
   mergeStrategy: string;
+  reconcilesWith?: Array<{
+    id: string;
+    type: CanonicalDelta["type"];
+    title: string;
+    status: CanonicalLifecycleStatus;
+    score: number;
+  }>;
+  reconciliationReason?: string;
   conflicts: string[];
 };
 
@@ -227,6 +242,9 @@ async function extractWithCodex(input: CanonicalSkillInput): Promise<CanonicalDe
     "Important: every rationale must explain why the item matters to the Mortic project/work, not why the extractor picked it.",
     "Important: never cite handoff provenance as a rationale. Use project-native reasons like latency measurement, source-thread safety, TTS fallback correctness, or canonical-state consistency.",
     "Important: compare against existing production and extracted items. If a candidate is semantically the same as existing state, use append_evidence or merge_duplicate instead of creating a duplicate.",
+    "Important: compare against existing draft extracted items too. If the transcript is discussing an unresolved draft candidate, update/reconcile that pending candidate instead of creating another active candidate.",
+    "Important: assistant explanations, expected-result checklists, safe acceptance checks, and 'what should happen after approval' prose are context only. Do not turn those lines into standalone candidates.",
+    "Important: if the user explicitly moves existing backlog work into tasks, emit operation canonicalOperation promote_backlog_to_task targeting the existing backlog item; do not leave both active.",
     "Important: workflow copy such as archive/commit/generate handoff controls is not backlog. Put it in rejectedCandidates when it is not project state.",
     "Important: provider pricing/source answers are not canonical state unless the scratch session settles a Mortic decision, task, risk, priority, or explicit future work.",
     "Important: if one sentence has both a sequencing choice and concrete work, prefer the project-relevant delta rather than a generic summary. Keep rationales specific and non-repeated.",
@@ -280,6 +298,144 @@ function evidenceSourceForItem(evidence: CanonicalEvidence | undefined): NonNull
   if (evidence.source === "production_json") return "production_json";
   if (evidence.source === "production_md") return "production_md";
   return "transcript";
+}
+
+const lifecycleActions = new Set<CanonicalLifecycleAction>([
+  "create",
+  "update",
+  "append_evidence",
+  "resolve",
+  "drop",
+  "supersede",
+  "reopen",
+  "no_op"
+]);
+
+const lifecycleStatuses = new Set<CanonicalLifecycleStatus>([
+  "open",
+  "in_progress",
+  "resolved",
+  "dropped",
+  "superseded",
+  "stale"
+]);
+
+function lifecycleActionForDelta(delta: CanonicalDelta): CanonicalLifecycleAction {
+  if (delta.lifecycleAction && lifecycleActions.has(delta.lifecycleAction)) return delta.lifecycleAction;
+  if (delta.operation === "mark_resolved") return "resolve";
+  if (delta.operation === "deprecate") return "supersede";
+  if (delta.operation === "append_evidence") return "append_evidence";
+  if (delta.operation === "no_op") return "no_op";
+  if (delta.operation === "promote_backlog_to_task" || delta.operation === "demote_task_to_backlog") return "update";
+  return "create";
+}
+
+function lifecycleStatusForDelta(delta: CanonicalDelta, action: CanonicalLifecycleAction): CanonicalLifecycleStatus {
+  if (delta.statusAfter && lifecycleStatuses.has(delta.statusAfter)) return delta.statusAfter;
+  if (action === "resolve") return "resolved";
+  if (action === "drop") return "dropped";
+  if (action === "supersede") return "superseded";
+  if (action === "reopen") return "open";
+  if (delta.operation === "promote_backlog_to_task") return "in_progress";
+  return "open";
+}
+
+function lifecycleStatusBeforeForDelta(delta: CanonicalDelta): CanonicalLifecycleStatus | null {
+  return delta.statusBefore && lifecycleStatuses.has(delta.statusBefore) ? delta.statusBefore : null;
+}
+
+function isExplicitLifecycleDirective(delta: CanonicalDelta, action: CanonicalLifecycleAction): boolean {
+  const text = normalize(`${delta.title} ${delta.body}`);
+  if (action === "resolve") {
+    return /\b(mark|set|resolve|resolved|fixed|completed|complete|done)\b/.test(text) || /\bis resolved\b|\bhas been resolved\b|\bno longer applies\b|\bno longer reproduces\b/.test(text);
+  }
+  if (action === "drop") {
+    return /^(drop|discard|remove)\b/.test(text) || /\bwill not pursue\b|\bno longer pursue\b|\bnot pursuing\b/.test(text);
+  }
+  if (action === "supersede") {
+    return /^(supersede|replace|deprecate|archive)\s+(the\s+)?(existing|old|older|current|canonical|previous|prior|historical|item|task|risk|backlog)\b/.test(text) || /\b(mark|set|move)\b.{0,80}\b(superseded|archived|deprecated)\b/.test(text) || /\breplaced by\b/.test(text);
+  }
+  if (action === "reopen") {
+    return /^(reopen|reactivate)\b/.test(text) || /\b(regressed|came back|still failing|still broken|still reproduces|still reproducing)\b/.test(text);
+  }
+  return true;
+}
+
+function normalizedLifecycleActionForDelta(delta: CanonicalDelta, action: CanonicalLifecycleAction, targetCanonicalItemId: string | null): CanonicalLifecycleAction {
+  if (action !== "resolve" && action !== "drop" && action !== "supersede" && action !== "reopen") return action;
+  if (isExplicitLifecycleDirective(delta, action)) return action;
+  return targetCanonicalItemId ? "append_evidence" : "create";
+}
+
+function lifecycleStatusForNormalizedDelta(delta: CanonicalDelta, action: CanonicalLifecycleAction): CanonicalLifecycleStatus {
+  if (action === "create") return "open";
+  if (action === "append_evidence") return lifecycleStatusBeforeForDelta(delta) ?? "open";
+  return lifecycleStatusForDelta(delta, action);
+}
+
+function operationForLifecycle(delta: CanonicalDelta, action: CanonicalLifecycleAction): string {
+  if (action === "create") return "add";
+  if (action === "append_evidence") return "append_evidence";
+  return delta.operation;
+}
+
+function mergeStrategyForLifecycle(delta: CanonicalDelta, action: CanonicalLifecycleAction): string {
+  if (action === "create") return "append_unique";
+  if (action === "append_evidence") return "update_existing";
+  return delta.mergeStrategy;
+}
+
+function existingItemByAnyId(existing: ExtractedItem[], id: string | null | undefined): ExtractedItem | undefined {
+  if (!id) return undefined;
+  return existing.find((item) => item.id === id || item.canonicalItemId === id || item.targetCanonicalItemId === id);
+}
+
+function lifecycleOperationForDelta(
+  delta: CanonicalDelta,
+  type: ExtractedItemType,
+  targetCanonicalItemId: string | null,
+  existing: ExtractedItem[]
+): string {
+  if (delta.operation === "promote_backlog_to_task" || delta.operation === "demote_task_to_backlog") return delta.operation;
+
+  const target = existingItemByAnyId(existing, targetCanonicalItemId);
+  const text = normalize(`${delta.title} ${delta.body} ${delta.rationale}`);
+  const mentionsBacklogToTask =
+    /\b(move|promote|convert|turn)\b.{0,80}\bbacklog\b.{0,80}\b(task|tasks)\b/.test(text) ||
+    /\b(move|promote|convert|turn)\b.{0,80}\b(task|tasks)\b.{0,80}\bbacklog\b/.test(text) ||
+    /\bout of backlog\b.{0,80}\b(task|tasks)\b/.test(text);
+  const mentionsTaskToBacklog =
+    /\b(move|demote|defer|convert|turn)\b.{0,80}\b(task|tasks)\b.{0,80}\bbacklog\b/.test(text) ||
+    /\bbacklog\b.{0,80}\b(task|tasks)\b.{0,80}\b(defer|demote)\b/.test(text);
+
+  if (type === "task" && (mentionsBacklogToTask || (text.includes("promote") && text.includes("backlog")) || target?.type === "backlog")) {
+    return "promote_backlog_to_task";
+  }
+  if (type === "backlog" && (mentionsTaskToBacklog || target?.type === "task")) {
+    return "demote_task_to_backlog";
+  }
+  return delta.operation;
+}
+
+function canonicalItemIdForDelta(delta: CanonicalDelta, fallbackItemId: string): string {
+  if (delta.operation === "promote_backlog_to_task" || delta.operation === "demote_task_to_backlog") return fallbackItemId;
+  return delta.targetCanonicalItemId || delta.targetId || fallbackItemId;
+}
+
+function reconciledItemsForDelta(delta: CanonicalDelta): CanonicalReconciledItem[] {
+  return (delta.reconcilesWith ?? [])
+    .map((item) => {
+      const type = typeMap[item.type];
+      if (!type) return undefined;
+      return {
+        id: item.id,
+        type,
+        title: item.title,
+        status: item.status,
+        score: item.score
+      } satisfies CanonicalReconciledItem;
+    })
+    .filter((item): item is CanonicalReconciledItem => Boolean(item));
 }
 
 function roleForEvidence(evidence: CanonicalEvidence | undefined, session: MorticSession): TranscriptRole {
@@ -348,6 +504,26 @@ function canonicalSessionSummary(deltaSet: CanonicalDeltaSet): string {
   return summary.slice(0, 220).replace(/\s+\S*$/, "").trim();
 }
 
+function isAssistantExplanationCandidate(delta: CanonicalDelta, session: MorticSession): boolean {
+  const evidence = delta.evidence[0];
+  if (roleForEvidence(evidence, session) !== "assistant") return false;
+  const text = normalize(`${delta.title} ${delta.body} ${evidence?.quote ?? ""}`);
+  if (!text) return false;
+
+  const startsLikeExplanation =
+    /^(acknowledged|not guaranteed|based on the current canonical state|desired behavior|correct behavior|expected result|safe acceptance check|practical implication|current canonical state says|until approval|you say)\b/.test(text);
+  const isOutcomeChecklist =
+    /^(tasks|backlog|risks?)\b.{0,80}\b(includes|no longer shows|should include|should no longer)\b/.test(text) ||
+    /\bold backlog record remains\b/.test(text) ||
+    /\bprevious backlog record\b.{0,80}\b(provenance|historical state)\b/.test(text);
+  const isBareExistingTitle =
+    /^\**[a-z0-9 ]{8,90}\**$/.test(String(delta.body ?? "").trim()) &&
+    delta.lifecycleAction === "append_evidence" &&
+    Boolean(delta.targetCanonicalItemId ?? delta.targetId);
+
+  return startsLikeExplanation || isOutcomeChecklist || isBareExistingTitle;
+}
+
 export async function extractItemsWithCanonicalStateSkill(params: CanonicalExtractionParams): Promise<CanonicalExtractionResult> {
   const input = buildCanonicalSkillInput(params);
   const deltaSet = await extractCanonicalDeltaSet(input);
@@ -355,12 +531,29 @@ export async function extractItemsWithCanonicalStateSkill(params: CanonicalExtra
   const previousByFingerprint = existingByFingerprint(params.existing);
   const createdAt = params.nowIso();
 
-  const items = deltaSet.candidateDeltas.slice(0, 12).map((delta) => {
+  const candidateDeltas = deltaSet.candidateDeltas.filter((delta) => !isAssistantExplanationCandidate(delta, params.session));
+  const items = candidateDeltas.slice(0, 12).map((delta) => {
     const type = typeMap[delta.type];
     const evidence = delta.evidence[0];
     const id = `item-${params.hash(`${params.scratchSessionId}:${delta.id}`, 18)}`;
     const fingerprint = extractionFingerprint(type, delta.title, delta.body);
     const previous = previousById.get(id) ?? previousByFingerprint.get(fingerprint);
+    const rawTargetCanonicalItemId = delta.targetCanonicalItemId ?? delta.targetId ?? null;
+    const operation = lifecycleOperationForDelta(delta, type, rawTargetCanonicalItemId, params.existing);
+    const operationDelta = { ...delta, operation };
+    const rawLifecycleAction = lifecycleActionForDelta(operationDelta);
+    const lifecycleAction = normalizedLifecycleActionForDelta(operationDelta, rawLifecycleAction, rawTargetCanonicalItemId);
+    const lifecycleStatusAfter = lifecycleStatusForNormalizedDelta(operationDelta, lifecycleAction);
+    const targetCanonicalItemId = lifecycleAction === "create" ? null : rawTargetCanonicalItemId;
+    const canonicalOperation = operationForLifecycle(operationDelta, lifecycleAction);
+    const mergeStrategy = mergeStrategyForLifecycle(operationDelta, lifecycleAction);
+    const lifecycleStatusBefore = lifecycleAction === "create" ? null : lifecycleStatusBeforeForDelta(delta);
+    const normalizedDelta = {
+      ...delta,
+      operation: canonicalOperation,
+      targetCanonicalItemId,
+      targetId: targetCanonicalItemId
+    };
     return {
       id,
       projectId: params.projectId,
@@ -371,8 +564,18 @@ export async function extractItemsWithCanonicalStateSkill(params: CanonicalExtra
       title: compactCardTitle(delta.title),
       body: delta.body,
       confidence: delta.confidence,
-      status: params.approveItemIds?.has(id) ? "approved" : previous?.status ?? "draft",
+      status: params.approveItemIds?.has(id) ? "approved" : "draft",
       delta: previous ? (normalize(previous.body) === normalize(delta.body) ? "unchanged" : "changed") : "new",
+      canonicalItemId: previous?.canonicalItemId ?? canonicalItemIdForDelta(normalizedDelta, id),
+      targetCanonicalItemId,
+      lifecycleAction,
+      lifecycleStatusBefore,
+      lifecycleStatusAfter,
+      canonicalOperation,
+      mergeStrategy,
+      reconcilesWith: reconciledItemsForDelta(delta),
+      reconciliationReason: delta.reconciliationReason,
+      conflicts: delta.conflicts,
       evidenceSource: evidenceSourceForItem(evidence),
       selectionReason: delta.rationale,
       createdAt: previous?.createdAt ?? createdAt,

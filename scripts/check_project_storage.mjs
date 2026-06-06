@@ -246,13 +246,369 @@ assert.equal(
   "markdown headings and preface lines should not become canonical items"
 );
 
+let chart = await store.chart();
+const compilation = chart.draftCompilations.find((item) => item.scratchSessionId === committed.committedSession.id);
+assert.ok(compilation, "commit should create a draft compilation");
+assert.equal(compilation.status, "draft", "compilation alone should not approve canonical state");
+assert.equal(chart.checkpoints.length, 0, "compilation should not create canonical checkpoints");
+assert.equal(chart.deltas.length, 0, "compilation should not create approved canonical deltas");
+assert.equal(compilation.transcriptEntryCount, session.transcript.length, "compilation should record transcript coverage");
+assert.equal(compilation.transcriptEndEntryId, session.transcript.at(-1).id, "compilation should record transcript end boundary");
+assert.ok(committed.createdItems.every((item) => item.sourceCompilationId === compilation.id), "items should belong to the immutable compilation snapshot");
+
+const firstCompileItemIds = committed.createdItems.map((item) => item.id);
+const repeatedCommit = await store.commitSession(session);
+chart = await store.chart();
+assert.equal(repeatedCommit.createdItems.length, 0, "recompiling without new transcript entries should not create duplicate candidates");
+assert.equal(
+  chart.draftCompilations.filter((item) => item.scratchSessionId === repeatedCommit.committedSession.id).length,
+  1,
+  "recompiling without new transcript entries should not create a duplicate compilation snapshot"
+);
+snapshot = await store.snapshot(session);
+for (const itemId of firstCompileItemIds) {
+  assert.ok(snapshot.extractedItems.some((item) => item.id === itemId), `recompile should preserve pending item ${itemId}`);
+}
+
+const incrementalSession = {
+  ...session,
+  updatedAt: "2026-05-04T00:03:30.000Z",
+  transcript: [
+    ...session.transcript,
+    {
+      id: "turn-user-incremental-compile",
+      role: "user",
+      text: "Task: Add compile-window regression test so repeated compile without new transcript entries creates no duplicate candidates.",
+      createdAt: "2026-05-04T00:03:30.000Z",
+      scratchMode: "voice",
+      reasoningEffort: "low"
+    }
+  ]
+};
+const incrementalCommit = await store.commitSession(incrementalSession);
+assert.equal(incrementalCommit.createdItems.length, 1, "new transcript entries should still compile into new candidates");
+chart = await store.chart();
+const incrementalCompilation = chart.draftCompilations.find(
+  (item) => item.scratchSessionId === incrementalCommit.committedSession.id && item.id !== compilation.id
+);
+assert.ok(incrementalCompilation, "new transcript entries should create an incremental compilation snapshot");
+assert.equal(incrementalCompilation.transcriptStartEntryId, "turn-user-incremental-compile", "incremental compilation should start at the first uncompiled turn");
+assert.equal(incrementalCompilation.transcriptEntryCount, 1, "incremental compilation should cover only new transcript entries");
+assert.ok(
+  incrementalCompilation.basisDraftCompilationIds?.includes(compilation.id),
+  "new compile snapshot should record pending draft compilations it reconciled against"
+);
+
 const risk = committed.createdItems.find((item) => item.type === "risk");
 assert.ok(risk, "risk extraction should exist");
 const sourceSafety = committed.createdItems.find((item) => /Do not mutate the source Codex thread/.test(item.body));
 assert.ok(sourceSafety, "source-thread safety extraction should exist");
-snapshot = await store.updateExtractedItem(sourceSafety.id, { status: "approved" });
+await assert.rejects(
+  () => store.approveCompilation(compilation.id, { extractedItemIds: ["missing-item-id"] }),
+  /Invalid selected item\(s\) for compilation/,
+  "invalid explicit approval selections should not approve the whole compilation"
+);
+const approvedFromCompilation = await store.approveCompilation(compilation.id, { extractedItemIds: [sourceSafety.id] });
+snapshot = approvedFromCompilation.projectState;
 assert.equal(snapshot.extractedItems.find((item) => item.id === sourceSafety.id)?.status, "approved");
 assert.equal(snapshot.production.riskUpdates.some((item) => item.id === sourceSafety.id), true);
+assert.equal(approvedFromCompilation.checkpoints.length, 1, "approval should create a canonical checkpoint");
+assert.equal(approvedFromCompilation.deltas.length, 1, "approval should create a canonical delta");
+assert.equal(approvedFromCompilation.checkpoints[0].approvedDeltaIds[0], approvedFromCompilation.deltas[0].id);
+assert.equal(approvedFromCompilation.sourceCheckpoints.some((checkpoint) => checkpoint.id === approvedFromCompilation.checkpoints[0].id), false, "source checkpoints are observations, not canonical checkpoints");
+
+const approvedDelta = approvedFromCompilation.deltas[0];
+const artifactPreview = await store.artifactPreview(approvedDelta.conversationArtifactId);
+assert.ok(artifactPreview?.transcriptPreview?.includes("Mortic Transcript"), "approved delta should resolve to a readable transcript artifact");
+assert.ok(artifactPreview.providerRefs.some((ref) => ref.provider === "codex" && ref.providerRefId === "scratch-thread-456"), "artifact should expose adapter-shaped Codex scratch provider ref");
+const scratchProviderRef = artifactPreview.providerRefs.find((ref) => ref.providerRefId === "scratch-thread-456");
+assert.equal(scratchProviderRef?.actions.resume.available, false, "ephemeral scratches should not be marked resumable");
+assert.equal(approvedDelta.lifecycleAction, "create", "approved deltas should carry lifecycle metadata");
+assert.equal(approvedDelta.lifecycleStatusAfter, "open", "new approved deltas should become open canonical items");
+assert.ok(
+  approvedFromCompilation.canonicalItems.some((item) => item.id === approvedDelta.canonicalItemId && item.lifecycleStatus === "open"),
+  "chart response should include a current canonical item index"
+);
+
+const correctionTask = committed.createdItems.find((item) => item.type === "task");
+assert.ok(correctionTask, "task extraction should exist for correction regression");
+await store.updateExtractedItem(correctionTask.id, { status: "approved" });
+chart = await store.chart();
+let correctionDeltas = chart.deltas
+  .filter((delta) => delta.sourceExtractedItemId === correctionTask.id)
+  .sort((left, right) => left.version - right.version);
+assert.equal(correctionDeltas.length, 1, "approving a correction fixture should create an initial task delta");
+assert.equal(correctionDeltas[0].version, 1);
+
+await store.updateExtractedItem(correctionTask.id, {
+  title: `${correctionTask.title} (edited)`,
+  body: `${correctionTask.body}\n\nManual correction: keep this task wording concise.`
+});
+chart = await store.chart();
+correctionDeltas = chart.deltas
+  .filter((delta) => delta.sourceExtractedItemId === correctionTask.id)
+  .sort((left, right) => left.version - right.version);
+assert.equal(correctionDeltas.length, 2, "editing an approved card should create a new canonical delta");
+assert.equal(correctionDeltas[0].status, "superseded", "editing should supersede the previous approved delta");
+assert.equal(correctionDeltas[1].version, 2, "approved edit should increment canonical delta version");
+assert.equal(correctionDeltas[1].previousDeltaId, correctionDeltas[0].id, "approved edit should link to the previous delta");
+assert.equal(correctionDeltas[1].lifecycleAction, "update", "approved edit should be an update lifecycle action");
+assert.match(correctionDeltas[1].body, /Manual correction/);
+
+const retiredCorrectionSnapshot = await store.updateExtractedItem(correctionTask.id, { retire: true });
+chart = await store.chart();
+correctionDeltas = chart.deltas
+  .filter((delta) => delta.sourceExtractedItemId === correctionTask.id)
+  .sort((left, right) => left.version - right.version);
+assert.equal(correctionDeltas.length, 3, "retiring an approved card should create a canonical delta");
+assert.equal(correctionDeltas[2].version, 3);
+assert.equal(correctionDeltas[2].previousDeltaId, correctionDeltas[1].id);
+assert.equal(correctionDeltas[2].lifecycleAction, "drop");
+assert.equal(correctionDeltas[2].lifecycleStatusAfter, "dropped");
+assert.equal(retiredCorrectionSnapshot.extractedItems.find((item) => item.id === correctionTask.id)?.status, "approved", "retired cards stay approved for provenance");
+assert.ok(
+  chart.canonicalItems.some((item) => item.id === correctionDeltas[2].canonicalItemId && item.lifecycleStatus === "dropped"),
+  "retired card should appear as dropped in the canonical item index"
+);
+
+const resolvedRiskSession = {
+  ...session,
+  id: "session-fixture-resolve-risk",
+  createdAt: "2026-05-04T00:04:00.000Z",
+  updatedAt: "2026-05-04T00:04:02.000Z",
+  forkCheckpoint: {
+    sourceThreadId: "source-thread-123",
+    scratchThreadId: "scratch-thread-resolve-risk",
+    forkedAt: "2026-05-04T00:04:01.000Z",
+    checkpointInstruction: "Resolve an existing canonical risk from the approved production chart."
+  },
+  transcript: [
+    {
+      id: "turn-resolve-user",
+      role: "user",
+      text: "Mark the source thread mutation risk resolved after the storage work.",
+      createdAt: "2026-05-04T00:04:03.000Z",
+      scratchMode: "voice",
+      reasoningEffort: "low"
+    },
+    {
+      id: "turn-resolve-assistant",
+      role: "assistant",
+      text: "The source mutation risk is resolved.",
+      notesText: "Risk: Do not mutate the source Codex thread during commit is resolved after verified scratch-only commit storage.",
+      createdAt: "2026-05-04T00:04:04.000Z",
+      scratchMode: "voice",
+      reasoningEffort: "low"
+    }
+  ]
+};
+const resolvedCommit = await store.commitSession(resolvedRiskSession);
+const resolvedCompilationChart = await store.chart();
+const resolvedCompilation = resolvedCompilationChart.draftCompilations.find((item) => item.scratchSessionId === resolvedCommit.committedSession.id);
+assert.ok(resolvedCompilation, "resolved-risk commit should create a compilation");
+const sourceSafetyCanonicalId = sourceSafety.canonicalItemId ?? sourceSafety.id;
+const resolvedRisk = resolvedCommit.createdItems.find((item) => item.lifecycleAction === "resolve" && item.targetCanonicalItemId === sourceSafetyCanonicalId);
+assert.ok(resolvedRisk, "resolved-risk commit should produce a lifecycle resolution item");
+assert.equal(resolvedRisk.targetCanonicalItemId, sourceSafetyCanonicalId, "resolution should target the approved canonical risk");
+const approvedResolution = await store.approveCompilation(resolvedCompilation.id, { extractedItemIds: [resolvedRisk.id] });
+const resolutionDelta = approvedResolution.deltas.find((delta) => delta.sourceExtractedItemId === resolvedRisk.id);
+assert.equal(resolutionDelta?.lifecycleAction, "resolve");
+assert.equal(resolutionDelta?.lifecycleStatusBefore, "open");
+assert.equal(resolutionDelta?.lifecycleStatusAfter, "resolved");
+assert.equal(resolutionDelta?.targetCanonicalItemId, sourceSafetyCanonicalId);
+assert.ok(
+  approvedResolution.canonicalItems.some((item) => item.id === sourceSafetyCanonicalId && item.lifecycleStatus === "resolved"),
+  "approving a lifecycle resolution should update the canonical item index"
+);
+
+const supersedeMentionSession = {
+  ...session,
+  id: "session-fixture-supersede-mention",
+  createdAt: "2026-05-04T00:05:00.000Z",
+  updatedAt: "2026-05-04T00:05:02.000Z",
+  forkCheckpoint: {
+    sourceThreadId: "source-thread-123",
+    scratchThreadId: "scratch-thread-supersede-mention",
+    forkedAt: "2026-05-04T00:05:01.000Z",
+    checkpointInstruction: "Capture a risk that mentions supersede behavior without making it a supersede action."
+  },
+  transcript: [
+    {
+      id: "turn-supersede-mention",
+      role: "user",
+      text: "Risk: Supersede flow can erase history. Track the risk that compile or approval reconciliation can hide older wording if supersede handling is wrong.",
+      createdAt: "2026-05-04T00:05:03.000Z",
+      scratchMode: "voice",
+      reasoningEffort: "low"
+    }
+  ]
+};
+const supersedeMentionCommit = await store.commitSession(supersedeMentionSession);
+const supersedeMention = supersedeMentionCommit.createdItems.find((item) => /Supersede flow can erase history/.test(item.title) || /Supersede flow can erase history/.test(item.body));
+assert.ok(supersedeMention, "supersede-word risk should be extracted");
+assert.equal(supersedeMention.lifecycleAction, "create", "mentioning a supersede flow should not supersede the risk itself");
+assert.equal(supersedeMention.lifecycleStatusAfter, "open");
+const supersedeMentionChart = await store.chart();
+const supersedeMentionCompilation = supersedeMentionChart.draftCompilations.find((item) => item.scratchSessionId === supersedeMentionCommit.committedSession.id);
+assert.ok(supersedeMentionCompilation, "supersede-word risk compile should create a compilation");
+await store.approveCompilation(supersedeMentionCompilation.id, { extractedItemIds: [supersedeMention.id] });
+const supersedeMentionCanonicalId = supersedeMention.canonicalItemId ?? supersedeMention.id;
+
+const duplicateSupersedeMentionSession = {
+  ...supersedeMentionSession,
+  id: "session-fixture-supersede-mention-duplicate",
+  createdAt: "2026-05-04T00:06:00.000Z",
+  updatedAt: "2026-05-04T00:06:02.000Z",
+  forkCheckpoint: {
+    sourceThreadId: "source-thread-123",
+    scratchThreadId: "scratch-thread-supersede-mention-duplicate",
+    forkedAt: "2026-05-04T00:06:01.000Z",
+    checkpointInstruction: "Repeat the supersede wording risk to verify duplicate lifecycle handling."
+  },
+  transcript: [
+    {
+      id: "turn-supersede-mention-duplicate",
+      role: "user",
+      text: "Risk: Supersede flow can erase history. Track the risk that compile or approval reconciliation can hide older wording if supersede handling is wrong.",
+      createdAt: "2026-05-04T00:06:03.000Z",
+      scratchMode: "voice",
+      reasoningEffort: "low"
+    }
+  ]
+};
+const duplicateSupersedeMentionCommit = await store.commitSession(duplicateSupersedeMentionSession);
+const duplicateSupersedeMention = duplicateSupersedeMentionCommit.createdItems.find((item) => /Supersede flow can erase history/.test(item.title) || /Supersede flow can erase history/.test(item.body));
+assert.ok(duplicateSupersedeMention, "duplicate supersede-word risk should be extracted for review");
+assert.equal(duplicateSupersedeMention.status, "draft", "duplicate extraction should not inherit approved status");
+assert.equal(duplicateSupersedeMention.lifecycleAction, "append_evidence", "duplicate supersede-word risk should append evidence, not supersede itself");
+assert.equal(duplicateSupersedeMention.lifecycleStatusAfter, "open");
+assert.equal(duplicateSupersedeMention.targetCanonicalItemId, supersedeMentionCanonicalId);
+await store.updateExtractedItem(duplicateSupersedeMention.id, { status: "dismissed" });
+chart = await store.chart();
+const dismissedDuplicateCompilation = chart.draftCompilations.find((item) => item.scratchSessionId === duplicateSupersedeMentionCommit.committedSession.id);
+assert.equal(dismissedDuplicateCompilation?.status, "superseded", "dismissing every item in a compilation should close the draft compilation");
+
+const backlog = committed.createdItems.find((item) => item.type === "backlog");
+assert.ok(backlog, "backlog extraction should exist");
+snapshot = await store.updateExtractedItem(backlog.id, { status: "approved" });
+chart = await store.chart();
+assert.ok(chart.deltas.some((delta) => delta.sourceExtractedItemId === backlog.id), "legacy extraction approval path should create a canonical delta");
+
+const promotionSession = {
+  ...session,
+  id: "session-fixture-promote-backlog",
+  createdAt: "2026-05-04T00:07:00.000Z",
+  updatedAt: "2026-05-04T00:07:02.000Z",
+  forkCheckpoint: {
+    sourceThreadId: "source-thread-123",
+    scratchThreadId: "scratch-thread-promote-backlog",
+    forkedAt: "2026-05-04T00:07:01.000Z",
+    checkpointInstruction: "Promote an approved backlog item into active task work."
+  },
+  transcript: [
+    {
+      id: "turn-promote-backlog-user",
+      role: "user",
+      text: `I want to move ${backlog.title} out of backlog and into tasks.`,
+      createdAt: "2026-05-04T00:07:03.000Z",
+      scratchMode: "voice",
+      reasoningEffort: "low"
+    }
+  ]
+};
+const promotionCommit = await store.commitSession(promotionSession);
+assert.equal(promotionCommit.createdItems.length, 1, "promotion intent should create one draft candidate");
+const promotionItem = promotionCommit.createdItems[0];
+assert.equal(promotionItem.type, "task", "promotion should create a task candidate");
+assert.equal(promotionItem.canonicalOperation, "promote_backlog_to_task", "promotion should carry an explicit canonical operation");
+assert.equal(promotionItem.targetCanonicalItemId, backlog.canonicalItemId ?? backlog.id, "promotion should target the existing backlog item");
+
+const duplicatePromotionSession = {
+  ...promotionSession,
+  updatedAt: "2026-05-04T00:07:12.000Z",
+  transcript: [
+    ...promotionSession.transcript,
+    {
+      id: "turn-promote-backlog-repeat",
+      role: "user",
+      text: `Move ${backlog.title} from backlog to task so it is no longer active backlog.`,
+      createdAt: "2026-05-04T00:07:12.000Z",
+      scratchMode: "voice",
+      reasoningEffort: "low"
+    }
+  ]
+};
+const duplicatePromotionCommit = await store.commitSession(duplicatePromotionSession);
+assert.equal(duplicatePromotionCommit.createdItems.length, 0, "recompiling an unresolved promotion should merge into the pending draft");
+assert.equal(duplicatePromotionCommit.committedSession.summary, "Updated existing pending canonical drafts.", "merged recompiles should not inherit noisy extraction summaries");
+snapshot = await store.snapshot(duplicatePromotionSession);
+assert.equal(
+  snapshot.extractedItems.filter((item) => item.status === "draft" && item.canonicalOperation === "promote_backlog_to_task" && item.targetCanonicalItemId === (backlog.canonicalItemId ?? backlog.id)).length,
+  1,
+  "only one pending promotion draft should remain active"
+);
+
+const explanationOnlySession = {
+  ...duplicatePromotionSession,
+  updatedAt: "2026-05-04T00:07:22.000Z",
+  transcript: [
+    ...duplicatePromotionSession.transcript,
+    {
+      id: "turn-promotion-question",
+      role: "user",
+      text: "If I compile now, will the previous backlog item get retired?",
+      createdAt: "2026-05-04T00:07:20.000Z",
+      scratchMode: "voice",
+      reasoningEffort: "low"
+    },
+    {
+      id: "turn-promotion-explanation",
+      role: "assistant",
+      text: "Not guaranteed. Based on the current canonical state, the desired behavior is that compiling now creates a draft promotion candidate.",
+      notesText: [
+        "Desired behavior:",
+        `- Tasks includes ${backlog.title}.`,
+        "- Backlog no longer shows it as active.",
+        "- The old backlog record remains linked as provenance or historical state.",
+        "Safe acceptance check after approval: the task appears once and no duplicate active backlog remains."
+      ].join("\n"),
+      createdAt: "2026-05-04T00:07:21.000Z",
+      scratchMode: "voice",
+      reasoningEffort: "low"
+    }
+  ]
+};
+const explanationOnlyCommit = await store.commitSession(explanationOnlySession);
+assert.equal(explanationOnlyCommit.createdItems.length, 0, "assistant acceptance-check prose should not create draft candidates");
+assert.equal(explanationOnlyCommit.committedSession.summary, "No new canonical candidates since the last compilation.", "explanation-only compiles should get a no-op summary");
+snapshot = await store.snapshot(explanationOnlySession);
+assert.equal(
+  snapshot.extractedItems.filter((item) => item.status === "draft" && item.canonicalOperation === "promote_backlog_to_task" && item.targetCanonicalItemId === (backlog.canonicalItemId ?? backlog.id)).length,
+  1,
+  "explanation compile should not grow the promotion review queue"
+);
+
+chart = await store.chart();
+const promotionCompilation = chart.draftCompilations.find((item) => item.extractedItemIds.includes(promotionItem.id));
+assert.ok(promotionCompilation, "promotion candidate should belong to a draft compilation");
+const approvedPromotion = await store.approveCompilation(promotionCompilation.id, { extractedItemIds: [promotionItem.id] });
+const promotedBacklog = approvedPromotion.projectState.extractedItems.find((item) => item.id === backlog.id);
+assert.equal(promotedBacklog?.lifecycleStatusAfter, "superseded", "approving promotion should retire the old backlog item");
+assert.equal(promotedBacklog?.mergedIntoId, promotionItem.canonicalItemId, "retired backlog should link to the promoted task");
+assert.ok(
+  approvedPromotion.projectState.production.taskUpdates.some((item) => item.id === promotionItem.id && item.canonicalOperation === "promote_backlog_to_task"),
+  "approved promotion should appear as a task update"
+);
+
+await rm(path.join(store.projectDir, "canonical_chart.json"), { force: true });
+const migratedStore = await createProjectStore({
+  workspacePath,
+  sourceUri: session.sourceUri,
+  threadId: session.threadId
+});
+const migratedChart = await migratedStore.chart();
+assert.ok(migratedChart.checkpoints.some((checkpoint) => checkpoint.imported), "legacy approved items should import into an initial checkpoint");
+assert.ok(migratedChart.deltas.every((delta) => delta.conversationArtifactId), "imported deltas should keep artifact provenance");
 
 const recommitted = await store.commitSession(session);
 assert.equal(recommitted.createdItems.some((item) => item.delta === "unchanged"), true, "repeat commit should compare against existing items");
@@ -261,6 +617,8 @@ const productionPath = path.join(store.projectDir, "production.md");
 const productionMarkdown = await readFile(productionPath, "utf8");
 assert.match(productionMarkdown, /Production Chart/);
 assert.match(productionMarkdown, /Do not mutate the source Codex thread/);
+assert.match(productionMarkdown, /Historical/);
+assert.match(productionMarkdown, /_resolved_/);
 
 const extractedMarkdown = await readFile(path.join(store.projectDir, "extracted_items.md"), "utf8");
 assert.match(extractedMarkdown, /Risk Update/);

@@ -1,7 +1,9 @@
 import type { SttProvider, SttStatus, SttTranscriptionRequest, SttTranscriptionResponse } from "../shared/types.js";
 
 const INWORLD_STT_URL = "https://api.inworld.ai/stt/v1/transcribe";
+const DEEPGRAM_STT_URL = "https://api.deepgram.com/v1/listen";
 const OPENAI_TRANSCRIPTION_URL = "https://api.openai.com/v1/audio/transcriptions";
+const DEFAULT_DEEPGRAM_STT_MODEL = "nova-2";
 const DEFAULT_INWORLD_STT_MODEL = "inworld/inworld-stt-1";
 const DEFAULT_WHISPER_MODEL = "whisper-1";
 const DEFAULT_STT_TIMEOUT_MS = 12000;
@@ -27,6 +29,14 @@ function openAIKey(env: NodeJS.ProcessEnv = process.env): string | undefined {
   return envValue("OPENAI_API_KEY", env);
 }
 
+function deepgramApiKey(env: NodeJS.ProcessEnv = process.env): string | undefined {
+  return envValue("DEEPGRAM_API_KEY", env);
+}
+
+function configuredDeepgramModel(env: NodeJS.ProcessEnv = process.env): string {
+  return envValue("DEEPGRAM_STT_MODEL", env) ?? envValue("MORTIC_STT_DEEPGRAM_MODEL", env) ?? DEFAULT_DEEPGRAM_STT_MODEL;
+}
+
 function configuredInworldModel(env: NodeJS.ProcessEnv = process.env): string {
   return envValue("MORTIC_STT_INWORLD_MODEL", env) ?? DEFAULT_INWORLD_STT_MODEL;
 }
@@ -38,8 +48,10 @@ function configuredWhisperModel(env: NodeJS.ProcessEnv = process.env): string {
 function configuredDefaultProvider(env: NodeJS.ProcessEnv = process.env): SttProvider {
   const requested = envValue("MORTIC_STT_PROVIDER", env);
   if (requested === "browser") return "browser";
+  if (requested === "deepgram-stt" && deepgramApiKey(env)) return "deepgram-stt";
   if (requested === "whisper" && openAIKey(env)) return "whisper";
   if (requested === "inworld-stt" && inworldApiKey(env)) return "inworld-stt";
+  if (deepgramApiKey(env)) return "deepgram-stt";
   if (inworldApiKey(env)) return "inworld-stt";
   return openAIKey(env) ? "whisper" : "browser";
 }
@@ -65,9 +77,11 @@ function defaultPrompt(env: NodeJS.ProcessEnv = process.env): string | undefined
 }
 
 export function getSttStatus(env: NodeJS.ProcessEnv = process.env): SttStatus {
+  const deepgramConfigured = Boolean(deepgramApiKey(env));
   const inworldConfigured = Boolean(inworldApiKey(env));
   const openAIConfigured = Boolean(openAIKey(env));
   const availableProviders: SttProvider[] = [];
+  if (deepgramConfigured) availableProviders.push("deepgram-stt");
   if (inworldConfigured) availableProviders.push("inworld-stt");
   if (openAIConfigured) availableProviders.push("whisper");
   availableProviders.push("browser");
@@ -75,6 +89,8 @@ export function getSttStatus(env: NodeJS.ProcessEnv = process.env): SttStatus {
   return {
     defaultProvider: configuredDefaultProvider(env),
     availableProviders,
+    deepgramConfigured,
+    deepgramModel: deepgramConfigured ? configuredDeepgramModel(env) : undefined,
     inworldConfigured,
     inworldModel: inworldConfigured ? configuredInworldModel(env) : undefined,
     openAIConfigured,
@@ -161,6 +177,70 @@ async function fetchWithTimeout(url: string, init: RequestInit, env: NodeJS.Proc
   } finally {
     clearTimeout(timeout);
   }
+}
+
+export async function transcribeDeepgramAudio(
+  request: SttTranscriptionRequest,
+  env: NodeJS.ProcessEnv = process.env
+): Promise<SttTranscriptionResponse> {
+  const startedAt = Date.now();
+  const apiKey = deepgramApiKey(env);
+  if (!apiKey) throw new Error("Deepgram STT is not configured. Set DEEPGRAM_API_KEY to enable it.");
+
+  const audio = audioBufferFromBase64(request.audioBase64, env);
+  const mimeType = safeText(request.mimeType) || "audio/wav";
+  const language = safeText(request.language) || defaultLanguage(env);
+  const url = new URL(DEEPGRAM_STT_URL);
+  url.searchParams.set("model", configuredDeepgramModel(env));
+  url.searchParams.set("punctuate", "true");
+  url.searchParams.set("smart_format", "true");
+  if (language) url.searchParams.set("language", language);
+
+  const response = await fetchWithTimeout(
+    url.toString(),
+    {
+      method: "POST",
+      headers: {
+        Authorization: `Token ${apiKey}`,
+        "Content-Type": mimeType
+      },
+      body: audio
+    },
+    env
+  );
+
+  const payload = await response.json().catch(async () => ({ error: await response.text().catch(() => "") })) as {
+    results?: {
+      channels?: Array<{
+        alternatives?: Array<{ transcript?: unknown }>;
+      }>;
+    };
+    metadata?: {
+      model_info?: Record<string, { name?: unknown; arch?: unknown }>;
+    };
+    err_msg?: unknown;
+    error?: unknown;
+  };
+
+  if (!response.ok) {
+    const detail =
+      typeof payload.err_msg === "string"
+        ? payload.err_msg
+        : typeof payload.error === "string"
+          ? payload.error
+          : `Deepgram STT failed with status ${response.status}`;
+    throw new Error(detail.slice(0, 300));
+  }
+
+  const text = safeText(payload.results?.channels?.[0]?.alternatives?.[0]?.transcript);
+  if (!text) throw new Error("Deepgram STT returned empty text.");
+
+  return {
+    text,
+    provider: "deepgram-stt",
+    model: configuredDeepgramModel(env),
+    elapsedMs: Date.now() - startedAt
+  };
 }
 
 export async function transcribeInworldAudio(
@@ -302,14 +382,20 @@ export async function transcribeAudioWithFallback(
   const requested = request.provider ?? getSttStatus(env).defaultProvider;
   const failures: string[] = [];
   const order: SttProvider[] =
-    requested === "inworld-stt"
-      ? ["inworld-stt", "whisper"]
+    requested === "deepgram-stt"
+      ? ["deepgram-stt", "inworld-stt", "whisper"]
+      : requested === "inworld-stt"
+        ? ["inworld-stt", "deepgram-stt", "whisper"]
       : requested === "whisper"
-        ? ["whisper", "inworld-stt"]
+        ? ["whisper", "deepgram-stt", "inworld-stt"]
         : ["browser"];
 
   for (const provider of order) {
     try {
+      if (provider === "deepgram-stt" && deepgramApiKey(env)) {
+        const result = await transcribeDeepgramAudio(request, env);
+        return failures.length > 0 ? { ...result, fallbackReason: failures.join(" | ") } : result;
+      }
       if (provider === "inworld-stt" && inworldApiKey(env)) {
         const result = await transcribeInworldAudio(request, env);
         return failures.length > 0 ? { ...result, fallbackReason: failures.join(" | ") } : result;

@@ -5,13 +5,25 @@ import { homedir } from "node:os";
 import path from "node:path";
 
 import type {
+  ApproveCompilationRequest,
+  ApproveCompilationResponse,
+  CanonicalCheckpoint,
+  CanonicalDelta,
+  CanonicalItem,
+  CanonicalLifecycleStatus,
+  ConversationArtifact,
   CommitSessionResponse,
+  DraftCompilation,
   ExtractedItem,
   ExtractedItemType,
   HandoffReadiness,
   MorticProject,
   MorticSession,
+  ProjectArtifactPreviewResponse,
+  ProjectChartResponse,
   ProjectCanonicalStateResponse,
+  ProviderReference,
+  RuntimeContextRestore,
   ProductionChart,
   ProjectStateResponse,
   ScratchSessionNode,
@@ -22,6 +34,7 @@ import type {
 } from "../shared/types.js";
 import { extractedItemTypes } from "../shared/types.js";
 import { extractItemsWithCanonicalStateSkill } from "./canonicalStateSkill.js";
+import { codexProviderAdapter } from "./providerAdapters.js";
 
 export type ProjectStore = {
   projectDir: string;
@@ -29,6 +42,9 @@ export type ProjectStore = {
   recordEvent(session: MorticSession, event: ProjectEvent): Promise<void>;
   snapshot(session?: MorticSession): Promise<ProjectStateResponse>;
   canonicalState(): Promise<ProjectCanonicalStateResponse>;
+  chart(runtimeContext?: RuntimeContextRestore): Promise<ProjectChartResponse>;
+  artifactPreview(id: string, runtimeContext?: RuntimeContextRestore): Promise<ProjectArtifactPreviewResponse | null>;
+  approveCompilation(id: string, request?: ApproveCompilationRequest, runtimeContext?: RuntimeContextRestore): Promise<ApproveCompilationResponse>;
   commitSession(session: MorticSession, approveItemIds?: string[]): Promise<CommitSessionResponse>;
   archiveSession(session: MorticSession): Promise<ProjectStateResponse>;
   updateExtractedItem(id: string, patch: UpdateExtractedItemRequest): Promise<ProjectStateResponse>;
@@ -119,11 +135,361 @@ function checkpointPath(projectDir: string, id: string): string {
 function projectPaths(projectDir: string) {
   return {
     project: path.join(projectDir, "project.json"),
+    chart: path.join(projectDir, "canonical_chart.json"),
     production: path.join(projectDir, "production.json"),
     productionMarkdown: path.join(projectDir, "production.md"),
     extractedItems: path.join(projectDir, "extracted_items.json"),
     extractedItemsMarkdown: path.join(projectDir, "extracted_items.md")
   };
+}
+
+type CanonicalChartFile = {
+  schemaVersion: "1.0";
+  projectId: string;
+  checkpoints: CanonicalCheckpoint[];
+  canonicalItems: CanonicalItem[];
+  deltas: CanonicalDelta[];
+  draftCompilations: DraftCompilation[];
+  artifacts: ConversationArtifact[];
+  providerRefs: ProviderReference[];
+  createdAt: string;
+  updatedAt: string;
+};
+
+function emptyChartFile(projectId: string): CanonicalChartFile {
+  const current = nowIso();
+  return {
+    schemaVersion: "1.0",
+    projectId,
+    checkpoints: [],
+    canonicalItems: [],
+    deltas: [],
+    draftCompilations: [],
+    artifacts: [],
+    providerRefs: [],
+    createdAt: current,
+    updatedAt: current
+  };
+}
+
+function canonicalCheckpointId(value: string): string {
+  return `canonical-checkpoint-${hash(value, 18)}`;
+}
+
+function canonicalDeltaId(value: string): string {
+  return `canonical-delta-${hash(value, 18)}`;
+}
+
+function conversationArtifactIdForScratch(scratchId: string): string {
+  return `artifact-${scratchId}`;
+}
+
+function importedArtifactId(projectId: string): string {
+  return `artifact-imported-${hash(projectId, 12)}`;
+}
+
+function draftCompilationIdForScratch(scratchId: string, createdAt: string): string {
+  return `compilation-${hash(`${scratchId}:${createdAt}:${randomUUID()}`, 18)}`;
+}
+
+function canonicalStableKey(item: ExtractedItem): string {
+  return `${item.type}:${canonicalItemIdForExtractedItem(item)}`;
+}
+
+function transcriptHash(entries: TranscriptEntry[]): string {
+  return hash(JSON.stringify(entries.map((entry) => ({
+    id: entry.id,
+    role: entry.role,
+    text: entry.text,
+    spokenText: entry.spokenText,
+    notesText: entry.notesText,
+    sourcesText: entry.sourcesText,
+    createdAt: entry.createdAt
+  }))), 18);
+}
+
+function compilationTranscriptBoundaryIndex(entries: TranscriptEntry[], compilation: DraftCompilation): number {
+  if (compilation.transcriptEndEntryId) {
+    const endIndex = entries.findIndex((entry) => entry.id === compilation.transcriptEndEntryId);
+    if (endIndex >= 0) return endIndex;
+  }
+  if (typeof compilation.transcriptEntryCount === "number" && compilation.transcriptEntryCount > 0) {
+    return Math.min(compilation.transcriptEntryCount - 1, entries.length - 1);
+  }
+  return -1;
+}
+
+function transcriptAfterLatestCompilation(entries: TranscriptEntry[], compilations: DraftCompilation[], scratchId: string): TranscriptEntry[] {
+  let latestBoundary = -1;
+  let latestUpdatedAt = "";
+  for (const compilation of compilations) {
+    if (compilation.scratchSessionId !== scratchId) continue;
+    const boundary = compilationTranscriptBoundaryIndex(entries, compilation);
+    if (boundary > latestBoundary || (boundary === latestBoundary && compilation.updatedAt > latestUpdatedAt)) {
+      latestBoundary = boundary;
+      latestUpdatedAt = compilation.updatedAt;
+    }
+  }
+  return entries.slice(latestBoundary + 1);
+}
+
+function compileScopedItemId(itemId: string, compilationId: string): string {
+  return `item-${hash(`${compilationId}:${itemId}`, 18)}`;
+}
+
+function itemAliases(item: Pick<ExtractedItem, "id" | "canonicalItemId" | "targetCanonicalItemId">): string[] {
+  return [item.id, item.canonicalItemId, item.targetCanonicalItemId].filter((id): id is string => Boolean(id));
+}
+
+function itemMatchesAnyId(item: Pick<ExtractedItem, "id" | "canonicalItemId" | "targetCanonicalItemId">, id: string): boolean {
+  return itemAliases(item).includes(id);
+}
+
+function canonicalTargetKeyForId(items: ExtractedItem[], id: string | null | undefined): string | undefined {
+  if (!id) return undefined;
+  const direct = items.find((item) => itemMatchesAnyId(item, id));
+  return direct ? canonicalItemIdForExtractedItem(direct) : id;
+}
+
+function reviewTargetKey(item: ExtractedItem, items: ExtractedItem[]): string {
+  return canonicalTargetKeyForId(items, item.targetCanonicalItemId) ?? canonicalItemIdForExtractedItem(item);
+}
+
+function reviewOperationKey(item: ExtractedItem): string {
+  return item.canonicalOperation ?? item.lifecycleAction ?? "create";
+}
+
+function isPendingDraftItem(item: ExtractedItem): boolean {
+  return item.status === "draft" && Boolean(item.sourceCompilationId);
+}
+
+function samePendingDraftSurface(left: ExtractedItem, right: ExtractedItem): boolean {
+  return extractionFingerprint(left.type, left.title, left.body) === extractionFingerprint(right.type, right.title, right.body);
+}
+
+function findPendingDraftMatch(existingItems: ExtractedItem[], incoming: ExtractedItem): ExtractedItem | undefined {
+  const pending = existingItems.filter(isPendingDraftItem);
+  const directPendingTarget = incoming.targetCanonicalItemId
+    ? pending.find((item) => itemMatchesAnyId(item, incoming.targetCanonicalItemId ?? ""))
+    : undefined;
+  if (directPendingTarget) return directPendingTarget;
+
+  const targetKey = reviewTargetKey(incoming, existingItems);
+  const operationKey = reviewOperationKey(incoming);
+  const matchedByTarget = pending.find((item) => {
+    if (reviewTargetKey(item, existingItems) !== targetKey) return false;
+    if (operationKey === "append_evidence" || reviewOperationKey(item) === "append_evidence") return true;
+    return reviewOperationKey(item) === operationKey || item.type === incoming.type;
+  });
+  if (matchedByTarget) return matchedByTarget;
+
+  return pending.find((item) => samePendingDraftSurface(item, incoming));
+}
+
+function mergedReconciledItems(left: ExtractedItem["reconcilesWith"], right: ExtractedItem["reconcilesWith"]): ExtractedItem["reconcilesWith"] {
+  const byId = new Map<string, NonNullable<ExtractedItem["reconcilesWith"]>[number]>();
+  for (const item of [...(left ?? []), ...(right ?? [])]) byId.set(`${item.type}:${item.id}`, item);
+  return byId.size > 0 ? [...byId.values()] : undefined;
+}
+
+function mergePendingDraftEvidence(existing: ExtractedItem, incoming: ExtractedItem, updatedAt: string): ExtractedItem {
+  return {
+    ...existing,
+    confidence: Math.max(existing.confidence, incoming.confidence),
+    selectionReason: existing.selectionReason ?? incoming.selectionReason,
+    reconciliationReason: existing.reconciliationReason ?? incoming.reconciliationReason,
+    conflicts: [...new Set([...(existing.conflicts ?? []), ...(incoming.conflicts ?? [])])],
+    reconcilesWith: mergedReconciledItems(existing.reconcilesWith, incoming.reconcilesWith),
+    transcriptAnchor: incoming.transcriptAnchor ?? existing.transcriptAnchor,
+    updatedAt
+  };
+}
+
+function reconcileGeneratedWithPendingDrafts(existingItems: ExtractedItem[], generated: ExtractedItem[], updatedAt: string): {
+  items: ExtractedItem[];
+  generated: ExtractedItem[];
+  mergedIds: string[];
+} {
+  if (generated.length === 0) return { items: existingItems, generated, mergedIds: [] };
+  const byId = new Map(existingItems.map((item) => [item.id, item]));
+  const kept: ExtractedItem[] = [];
+  const mergedIds: string[] = [];
+
+  for (const item of generated) {
+    const match = findPendingDraftMatch([...byId.values(), ...kept], item);
+    if (!match) {
+      kept.push(item);
+      continue;
+    }
+    byId.set(match.id, mergePendingDraftEvidence(match, item, updatedAt));
+    mergedIds.push(item.id);
+  }
+
+  return {
+    items: existingItems.map((item) => byId.get(item.id) ?? item),
+    generated: kept,
+    mergedIds
+  };
+}
+
+function sameCanonicalBody(delta: CanonicalDelta, item: ExtractedItem): boolean {
+  return normalizeBody(`${delta.title}\n${delta.body}`).toLowerCase() === normalizeBody(`${item.title}\n${item.body}`).toLowerCase() &&
+    (delta.lifecycleAction ?? "create") === (item.lifecycleAction ?? "create") &&
+    (delta.lifecycleStatusAfter ?? "open") === lifecycleStatusForItem(item);
+}
+
+function sortedCheckpoints(checkpoints: CanonicalCheckpoint[]): CanonicalCheckpoint[] {
+  return [...checkpoints].sort((a, b) => a.approvedAt.localeCompare(b.approvedAt));
+}
+
+function latestCheckpoint(checkpoints: CanonicalCheckpoint[]): CanonicalCheckpoint | undefined {
+  return sortedCheckpoints(checkpoints).at(-1);
+}
+
+function latestDeltaForStableKey(deltas: CanonicalDelta[], stableKey: string): CanonicalDelta | undefined {
+  return [...deltas]
+    .filter((delta) => delta.stableKey === stableKey)
+    .sort((a, b) => b.version - a.version || b.approvedAt.localeCompare(a.approvedAt))[0];
+}
+
+function latestDeltaForCanonicalItem(deltas: CanonicalDelta[], canonicalItemId: string): CanonicalDelta | undefined {
+  return [...deltas]
+    .filter((delta) => delta.canonicalItemId === canonicalItemId)
+    .sort((a, b) => b.version - a.version || b.approvedAt.localeCompare(a.approvedAt))[0];
+}
+
+const inactiveLifecycleStatuses = new Set<CanonicalLifecycleStatus>(["resolved", "dropped", "superseded", "stale"]);
+
+function lifecycleStatusForItem(item: Pick<ExtractedItem, "status" | "lifecycleStatusAfter">): CanonicalLifecycleStatus {
+  if (item.lifecycleStatusAfter) return item.lifecycleStatusAfter;
+  if (item.status === "merged") return "superseded";
+  return "open";
+}
+
+function canonicalItemIdForExtractedItem(item: Pick<ExtractedItem, "id" | "canonicalItemId" | "targetCanonicalItemId">): string {
+  return item.canonicalItemId || item.targetCanonicalItemId || item.id;
+}
+
+function shouldCreateCanonicalDelta(item: ExtractedItem): boolean {
+  return item.lifecycleAction !== "no_op";
+}
+
+function currentApprovedItems(items: ExtractedItem[]): ExtractedItem[] {
+  const currentByCanonicalId = new Map<string, ExtractedItem>();
+  const sorted = [...items]
+    .filter((item) => item.status === "approved")
+    .filter(shouldCreateCanonicalDelta)
+    .sort((a, b) => a.createdAt.localeCompare(b.createdAt) || a.updatedAt.localeCompare(b.updatedAt));
+  for (const item of sorted) {
+    currentByCanonicalId.set(canonicalItemIdForExtractedItem(item), item);
+  }
+  return [...currentByCanonicalId.values()];
+}
+
+function lifecycleStatusForDelta(delta: CanonicalDelta): CanonicalLifecycleStatus {
+  if (delta.status === "superseded") return "superseded";
+  return delta.lifecycleStatusAfter ?? "open";
+}
+
+function canonicalItemsFromDeltas(deltas: CanonicalDelta[]): CanonicalItem[] {
+  const byId = new Map<string, CanonicalItem>();
+  for (const delta of [...deltas].sort((a, b) => a.approvedAt.localeCompare(b.approvedAt))) {
+    const canonicalItemId = delta.canonicalItemId ?? delta.stableKey ?? delta.id;
+    const previous = byId.get(canonicalItemId);
+    const deltaIds = [...(previous?.deltaIds ?? []), delta.id];
+    byId.set(canonicalItemId, {
+      id: canonicalItemId,
+      projectId: delta.projectId,
+      type: delta.type,
+      title: delta.title,
+      body: delta.body,
+      lifecycleStatus: lifecycleStatusForDelta(delta),
+      latestDeltaId: delta.id,
+      deltaIds,
+      conversationArtifactId: delta.conversationArtifactId,
+      providerRefIds: delta.providerRefIds,
+      evidenceSource: delta.evidenceSource,
+      evidenceEntryId: delta.evidenceEntryId,
+      evidenceQuote: delta.evidenceQuote,
+      createdAt: previous?.createdAt ?? delta.createdAt,
+      updatedAt: delta.updatedAt
+    });
+  }
+  return [...byId.values()].sort((a, b) => a.updatedAt.localeCompare(b.updatedAt));
+}
+
+function withDeltaLifecycleDefaults(delta: CanonicalDelta): CanonicalDelta {
+  const canonicalItemId = delta.canonicalItemId ?? delta.stableKey ?? delta.id;
+  return {
+    ...delta,
+    canonicalItemId,
+    lifecycleAction: delta.lifecycleAction ?? "create",
+    lifecycleStatusBefore: delta.lifecycleStatusBefore,
+    lifecycleStatusAfter: delta.lifecycleStatusAfter ?? (delta.status === "superseded" ? "superseded" : "open"),
+    targetCanonicalItemId: delta.targetCanonicalItemId,
+    canonicalOperation: delta.canonicalOperation ?? "add",
+    mergeStrategy: delta.mergeStrategy ?? "append_unique",
+    reconcilesWith: delta.reconcilesWith ?? [],
+    conflicts: delta.conflicts ?? []
+  };
+}
+
+function withCanonicalItems(chart: CanonicalChartFile): CanonicalChartFile {
+  const deltas = chart.deltas.map(withDeltaLifecycleDefaults);
+  return {
+    ...chart,
+    deltas,
+    canonicalItems: canonicalItemsFromDeltas(deltas)
+  };
+}
+
+function matchesCanonicalTarget(item: ExtractedItem, targetId: string): boolean {
+  return item.id === targetId || item.canonicalItemId === targetId || item.targetCanonicalItemId === targetId;
+}
+
+function withLifecycleDefaults(item: ExtractedItem): ExtractedItem {
+  return {
+    ...item,
+    canonicalItemId: canonicalItemIdForExtractedItem(item),
+    lifecycleAction: item.lifecycleAction ?? "create",
+    lifecycleStatusAfter: lifecycleStatusForItem(item)
+  };
+}
+
+function applyLifecycleSideEffects(items: ExtractedItem[], selectedItems: ExtractedItem[], updatedAt: string): ExtractedItem[] {
+  const sideEffectTargets = selectedItems
+    .filter((item) => item.canonicalOperation === "promote_backlog_to_task" || item.canonicalOperation === "demote_task_to_backlog")
+    .map((item) => ({
+      targetId: item.targetCanonicalItemId,
+      mergedIntoId: item.canonicalItemId || item.id
+    }))
+    .filter((item): item is { targetId: string; mergedIntoId: string } => Boolean(item.targetId));
+  if (sideEffectTargets.length === 0) return items;
+
+  return items.map((item) => {
+    const target = sideEffectTargets.find((candidate) => matchesCanonicalTarget(item, candidate.targetId) && item.id !== candidate.mergedIntoId);
+    if (!target) return item;
+    return {
+      ...item,
+      lifecycleAction: "supersede",
+      lifecycleStatusAfter: "superseded",
+      mergedIntoId: target.mergedIntoId,
+      updatedAt
+    };
+  });
+}
+
+function unique<T>(items: T[]): T[] {
+  return Array.from(new Set(items));
+}
+
+async function previewFile(filePath: string | undefined, maxChars = 24_000): Promise<string | undefined> {
+  if (!filePath || !existsSync(filePath)) return undefined;
+  const text = await readFile(filePath, "utf8");
+  if (text.length <= maxChars) return text;
+  const head = text.slice(0, Math.floor(maxChars / 2));
+  const tail = text.slice(text.length - Math.floor(maxChars / 2));
+  return `${head}\n\n[... ${text.length - maxChars} chars omitted ...]\n\n${tail}`;
 }
 
 async function writeAtomic(filePath: string, text: string): Promise<void> {
@@ -360,7 +726,17 @@ function isWorkflowGuidance(value: string): boolean {
     lower.includes("later commits can add or refine") ||
     lower.includes("extract items such as decisions") ||
     lower.includes("look for the project card") ||
-    lower.includes("the first tree is there")
+    lower.includes("the first tree is there") ||
+    lower.includes("acknowledged. the intended canonical instruction") ||
+    lower.includes("not guaranteed. based on the current canonical state") ||
+    lower.includes("safe acceptance check") ||
+    lower.includes("desired behavior:") ||
+    lower.includes("expected result after approval") ||
+    lower.includes("old backlog record remains") ||
+    lower.includes("previous backlog record") ||
+    lower.includes("tasks includes") ||
+    lower.includes("backlog no longer shows") ||
+    lower.includes("you say:")
   );
 }
 
@@ -523,6 +899,8 @@ function renderExtractedMarkdown(items: ExtractedItem[]): string {
     .map((item) => {
       const details = [
         `  - ${item.body}`,
+        item.lifecycleStatusAfter ? `  - Lifecycle: ${item.lifecycleAction ?? "create"} -> ${item.lifecycleStatusAfter}` : undefined,
+        item.targetCanonicalItemId ? `  - Target: ${item.targetCanonicalItemId}` : undefined,
         item.selectionReason ? `  - Why picked: ${item.selectionReason}` : undefined,
         item.transcriptAnchor?.quote ? `  - Evidence: ${item.transcriptAnchor.quote}` : undefined
       ].filter(Boolean);
@@ -539,7 +917,7 @@ function productionFrom(params: {
   items: ExtractedItem[];
   previous?: ProductionChart;
 }): ProductionChart {
-  const approved = params.items.filter((item) => item.status === "approved");
+  const approved = currentApprovedItems(params.items);
   const byType = (type: ExtractedItemType) => approved.filter((item) => item.type === type);
   return {
     projectId: params.project.id,
@@ -572,8 +950,29 @@ function productionFrom(params: {
 }
 
 function renderProductionMarkdown(production: ProductionChart): string {
-  const section = (title: string, items: ExtractedItem[]) =>
-    `## ${title}\n\n${items.map((item) => `- **${item.title}**\n  - ${item.body}\n  - Session: ${item.scratchSessionId}`).join("\n") || "None."}\n`;
+  const renderItems = (items: ExtractedItem[]) => items.map((item) => {
+    const lifecycleStatus = lifecycleStatusForItem(item);
+    const lifecycleLabel = lifecycleStatus === "open" ? "" : ` _${lifecycleStatus}_`;
+    const lines = [
+      `- **${item.title}**${lifecycleLabel}`,
+      `  - ${item.body}`,
+      item.lifecycleAction ? `  - Lifecycle: ${item.lifecycleAction}${item.lifecycleStatusBefore ? ` (${item.lifecycleStatusBefore} -> ${lifecycleStatus})` : ` -> ${lifecycleStatus}`}` : undefined,
+      item.targetCanonicalItemId ? `  - Reconciles: ${item.targetCanonicalItemId}` : undefined,
+      `  - Session: ${item.scratchSessionId}`
+    ].filter(Boolean);
+    return lines.join("\n");
+  }).join("\n");
+  const section = (title: string, items: ExtractedItem[]) => {
+    const active = items.filter((item) => !inactiveLifecycleStatuses.has(lifecycleStatusForItem(item)));
+    const historical = items.filter((item) => inactiveLifecycleStatuses.has(lifecycleStatusForItem(item)));
+    return [
+      `## ${title}`,
+      "",
+      active.length ? renderItems(active) : "None.",
+      historical.length ? `\n### Historical\n\n${renderItems(historical)}` : "",
+      ""
+    ].join("\n");
+  };
 
   return [
     `# ${production.projectTitle} Production Chart`,
@@ -735,6 +1134,188 @@ export async function createProjectStore(params: ProjectStoreParams): Promise<Pr
     return sessions.filter(Boolean).sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
   }
 
+  async function writeChartStorage(chart: CanonicalChartFile): Promise<void> {
+    await writeAtomic(paths.chart, `${JSON.stringify({ ...withCanonicalItems(chart), updatedAt: nowIso() }, null, 2)}\n`);
+  }
+
+  async function readChartStorage(): Promise<CanonicalChartFile> {
+    const fallback = emptyChartFile(projectId);
+    const chart = await readJson(paths.chart, fallback);
+    return {
+      ...fallback,
+      ...chart,
+      schemaVersion: "1.0",
+      projectId,
+      checkpoints: chart.checkpoints ?? [],
+      canonicalItems: chart.canonicalItems ?? [],
+      deltas: chart.deltas ?? [],
+      draftCompilations: chart.draftCompilations ?? [],
+      artifacts: chart.artifacts ?? [],
+      providerRefs: chart.providerRefs ?? []
+    };
+  }
+
+  function conversationArtifactForScratch(scratch: ScratchSessionNode, providerRefIds: string[]): ConversationArtifact {
+    return {
+      id: conversationArtifactIdForScratch(scratch.id),
+      projectId,
+      title: scratch.title,
+      artifactKind: "scratch-session",
+      sourceThreadId: scratch.sourceThreadId,
+      sourceCheckpointId: scratch.sourceCheckpointId,
+      scratchSessionId: scratch.id,
+      transcriptPath: scratch.transcriptPath,
+      handoffPath: scratch.handoffPath,
+      eventLogPath: scratch.eventLogPath,
+      providerRefIds,
+      createdAt: scratch.createdAt,
+      updatedAt: scratch.updatedAt
+    };
+  }
+
+  async function syncChartArtifacts(chart: CanonicalChartFile, runtimeContext?: RuntimeContextRestore): Promise<CanonicalChartFile> {
+    const sources = await readSources();
+    const sessions = await readSessions();
+    const providerRefs = new Map(chart.providerRefs.map((ref) => [ref.id, ref]));
+    const sourceProviderRefIds = new Map<string, string>();
+
+    for (const source of sources) {
+      const ref = codexProviderAdapter.sourceReference(source, runtimeContext);
+      providerRefs.set(ref.id, { ...providerRefs.get(ref.id), ...ref, accountId: providerRefs.get(ref.id)?.accountId });
+      sourceProviderRefIds.set(source.id, ref.id);
+    }
+
+    const artifacts = new Map(chart.artifacts.map((artifact) => [artifact.id, artifact]));
+    for (const scratch of sessions) {
+      const scratchRef = codexProviderAdapter.scratchReference(scratch, runtimeContext);
+      if (scratchRef) {
+        providerRefs.set(scratchRef.id, { ...providerRefs.get(scratchRef.id), ...scratchRef, accountId: providerRefs.get(scratchRef.id)?.accountId });
+      }
+      const providerRefIds = unique([
+        scratchRef?.id,
+        sourceProviderRefIds.get(scratch.sourceThreadId)
+      ].filter((id): id is string => Boolean(id)));
+      const artifact = conversationArtifactForScratch(scratch, providerRefIds);
+      artifacts.set(artifact.id, {
+        ...artifacts.get(artifact.id),
+        ...artifact
+      });
+    }
+
+    return {
+      ...chart,
+      artifacts: [...artifacts.values()].sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)),
+      providerRefs: [...providerRefs.values()].sort((a, b) => a.id.localeCompare(b.id))
+    };
+  }
+
+  async function ensureImportedApprovedCheckpoint(chart: CanonicalChartFile, chartAlreadyExists: boolean): Promise<CanonicalChartFile> {
+    if (chartAlreadyExists) return chart;
+    if (chart.checkpoints.length > 0 || chart.deltas.length > 0) return chart;
+    const approvedItems = (await readItems()).filter((item) => item.status === "approved");
+    if (approvedItems.length === 0) return chart;
+
+    const sessions = await readSessions();
+    const artifacts = new Map(chart.artifacts.map((artifact) => [artifact.id, artifact]));
+    const deltas: CanonicalDelta[] = [];
+    const checkpointId = canonicalCheckpointId(`${projectId}:imported-approved-updates`);
+    const approvedAt = nowIso();
+    const sourceArtifactIds = new Set<string>();
+
+    for (const rawItem of approvedItems.sort((a, b) => a.createdAt.localeCompare(b.createdAt))) {
+      const item = withLifecycleDefaults(rawItem);
+      if (!shouldCreateCanonicalDelta(item)) continue;
+      const scratch = sessions.find((session) => session.id === item.scratchSessionId);
+      const artifactId = scratch ? conversationArtifactIdForScratch(scratch.id) : importedArtifactId(projectId);
+      if (!artifacts.has(artifactId)) {
+        artifacts.set(artifactId, {
+          id: artifactId,
+          projectId,
+          title: scratch?.title ?? "Imported approved project updates",
+          artifactKind: scratch ? "scratch-session" : "import",
+          sourceThreadId: item.sourceThreadId,
+          scratchSessionId: scratch?.id,
+          transcriptPath: scratch?.transcriptPath,
+          handoffPath: scratch?.handoffPath,
+          eventLogPath: scratch?.eventLogPath,
+          providerRefIds: [],
+          createdAt: item.createdAt,
+          updatedAt: item.updatedAt
+        });
+      }
+      sourceArtifactIds.add(artifactId);
+      const stableKey = canonicalStableKey(item);
+      const canonicalItemId = canonicalItemIdForExtractedItem(item);
+      const previous = latestDeltaForCanonicalItem(deltas, canonicalItemId) ?? latestDeltaForStableKey(deltas, stableKey);
+      const version = previous ? previous.version + 1 : 1;
+      const providerRefIds = artifacts.get(artifactId)?.providerRefIds ?? [];
+      deltas.push({
+        id: canonicalDeltaId(`${checkpointId}:${item.id}:${version}`),
+        projectId,
+        stableKey,
+        version,
+        type: item.type,
+        title: item.title,
+        body: item.body,
+        status: "approved",
+        canonicalItemId,
+        targetCanonicalItemId: item.targetCanonicalItemId,
+        lifecycleAction: item.lifecycleAction ?? "create",
+        lifecycleStatusBefore: item.lifecycleStatusBefore,
+        lifecycleStatusAfter: lifecycleStatusForItem(item),
+        canonicalOperation: item.canonicalOperation,
+        mergeStrategy: item.mergeStrategy,
+        reconcilesWith: item.reconcilesWith,
+        reconciliationReason: item.reconciliationReason,
+        conflicts: item.conflicts,
+        checkpointId,
+        previousDeltaId: previous?.id,
+        sourceExtractedItemId: item.id,
+        conversationArtifactId: artifactId,
+        providerRefIds,
+        evidenceSource: item.evidenceSource,
+        evidenceEntryId: item.transcriptAnchor?.entryId ?? item.sourceTurnId,
+        evidenceQuote: item.transcriptAnchor?.quote,
+        localPaths: {
+          transcript: scratch?.transcriptPath,
+          handoff: scratch?.handoffPath,
+          eventLog: scratch?.eventLogPath
+        },
+        approvedAt,
+        createdAt: item.createdAt,
+        updatedAt: item.updatedAt
+      });
+    }
+
+    return {
+      ...chart,
+      checkpoints: [
+        {
+          id: checkpointId,
+          projectId,
+          title: "Imported approved project updates",
+          approvedDeltaIds: deltas.map((delta) => delta.id),
+          sourceArtifactIds: [...sourceArtifactIds],
+          createdAt: approvedAt,
+          approvedAt,
+          imported: true
+        }
+      ],
+      deltas,
+      artifacts: [...artifacts.values()]
+    };
+  }
+
+  async function readCanonicalChart(runtimeContext?: RuntimeContextRestore): Promise<CanonicalChartFile> {
+    const chartAlreadyExists = existsSync(paths.chart);
+    let chart = await readChartStorage();
+    chart = await syncChartArtifacts(chart, runtimeContext);
+    chart = await ensureImportedApprovedCheckpoint(chart, chartAlreadyExists);
+    chart = withCanonicalItems(chart);
+    await writeChartStorage(chart);
+    return chart;
+  }
+
   async function readItems(): Promise<ExtractedItem[]> {
     const items = await readJson(paths.extractedItems, [] as ExtractedItem[]);
     return items.filter((item) => canonicalExtractionTypes.has(item.type) && item.delta && !isWorkflowGuidanceItem(item) && !isWeakExtractionItem(item));
@@ -744,6 +1325,261 @@ export async function createProjectStore(params: ProjectStoreParams): Promise<Pr
     const sorted = [...items].sort((a, b) => a.createdAt.localeCompare(b.createdAt));
     await writeAtomic(paths.extractedItems, `${JSON.stringify(sorted, null, 2)}\n`);
     await writeAtomic(paths.extractedItemsMarkdown, renderExtractedMarkdown(sorted));
+  }
+
+  async function createDraftCompilation(params: {
+    scratch: ScratchSessionNode;
+    items: ExtractedItem[];
+    summary?: string;
+    compilationId: string;
+    transcript: TranscriptEntry[];
+    createdAt: string;
+  }): Promise<DraftCompilation> {
+    const chart = await readCanonicalChart();
+    const firstTranscriptEntry = params.transcript[0];
+    const lastTranscriptEntry = params.transcript.at(-1);
+    const basisDraftCompilationIds = chart.draftCompilations
+      .filter((compilation) => compilation.status === "draft" || compilation.status === "partially-approved")
+      .map((compilation) => compilation.id);
+    const compilation: DraftCompilation = {
+      id: params.compilationId,
+      projectId,
+      scratchSessionId: params.scratch.id,
+      conversationArtifactId: conversationArtifactIdForScratch(params.scratch.id),
+      candidateDeltaIds: params.items.map((item) => item.id),
+      extractedItemIds: params.items.map((item) => item.id),
+      transcriptStartEntryId: firstTranscriptEntry?.id,
+      transcriptEndEntryId: lastTranscriptEntry?.id,
+      transcriptEntryCount: params.transcript.length,
+      transcriptHash: transcriptHash(params.transcript),
+      basisCheckpointId: latestCheckpoint(chart.checkpoints)?.id,
+      basisDraftCompilationIds,
+      summary: params.summary,
+      status: params.items.length === 0
+        ? "approved"
+        : params.items.every((item) => item.status === "approved")
+          ? "approved"
+          : params.items.some((item) => item.status === "approved")
+            ? "partially-approved"
+            : "draft",
+      createdAt: params.createdAt,
+      updatedAt: params.createdAt
+    };
+    await writeChartStorage({
+      ...chart,
+      draftCompilations: [
+        compilation,
+        ...chart.draftCompilations
+      ].sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))
+    });
+    return compilation;
+  }
+
+  async function refreshDraftCompilationStatuses(items: ExtractedItem[], updatedAt = nowIso()): Promise<void> {
+    const itemById = new Map(items.map((item) => [item.id, item]));
+    let chart = await readCanonicalChart();
+    let changed = false;
+    const draftCompilations = chart.draftCompilations.map((compilation) => {
+      if (compilation.extractedItemIds.length === 0) return compilation;
+      const compilationItems = compilation.extractedItemIds.map((id) => itemById.get(id)).filter((item): item is ExtractedItem => Boolean(item));
+      if (compilationItems.length !== compilation.extractedItemIds.length) return compilation;
+      const approvedCount = compilationItems.filter((item) => item.status === "approved").length;
+      const draftCount = compilationItems.filter((item) => item.status === "draft").length;
+      const dismissedCount = compilationItems.filter((item) => item.status === "dismissed").length;
+      const nextStatus =
+        dismissedCount === compilationItems.length
+          ? "superseded"
+          : approvedCount === compilationItems.length
+            ? "approved"
+            : approvedCount > 0
+              ? "partially-approved"
+              : draftCount > 0
+                ? "draft"
+                : compilation.status;
+      if (nextStatus === compilation.status) return compilation;
+      changed = true;
+      return {
+        ...compilation,
+        status: nextStatus,
+        updatedAt
+      };
+    });
+    if (!changed) return;
+    chart = {
+      ...chart,
+      draftCompilations
+    };
+    await writeChartStorage(chart);
+  }
+
+  async function approveExtractedItems(itemIds: string[], sourceCompilationId?: string): Promise<{ checkpoint?: CanonicalCheckpoint; approvedDeltaIds: string[] }> {
+    const selectedIds = new Set(itemIds);
+    if (selectedIds.size === 0) return { approvedDeltaIds: [] };
+
+    const current = nowIso();
+    const existingItems = await readItems();
+    const selectedItems = existingItems.filter((item) => selectedIds.has(item.id) && item.status !== "dismissed");
+    if (selectedItems.length === 0) return { approvedDeltaIds: [] };
+
+    const updatedItems = applyLifecycleSideEffects(
+      existingItems.map((item) =>
+        selectedIds.has(item.id) && item.status !== "dismissed"
+          ? withLifecycleDefaults({ ...item, status: "approved" as const, updatedAt: current })
+          : item
+      ),
+      selectedItems.map(withLifecycleDefaults),
+      current
+    );
+    await writeItems(updatedItems);
+
+    let chart = await readCanonicalChart();
+    const artifacts = new Map(chart.artifacts.map((artifact) => [artifact.id, artifact]));
+    const nextDeltas = [...chart.deltas];
+    const approvedDeltaIds: string[] = [];
+    const sourceArtifactIds = new Set<string>();
+    const checkpointId = canonicalCheckpointId(`${projectId}:approval:${current}:${randomUUID()}`);
+
+    for (const rawItem of selectedItems) {
+      const item = withLifecycleDefaults(rawItem);
+      if (!shouldCreateCanonicalDelta(item)) continue;
+      const stableKey = canonicalStableKey(item);
+      const canonicalItemId = canonicalItemIdForExtractedItem(item);
+      const previous = latestDeltaForCanonicalItem(nextDeltas, canonicalItemId) ?? latestDeltaForStableKey(nextDeltas, stableKey);
+      if (previous && sameCanonicalBody(previous, item)) continue;
+
+      const artifactId = artifacts.has(conversationArtifactIdForScratch(item.scratchSessionId))
+        ? conversationArtifactIdForScratch(item.scratchSessionId)
+        : importedArtifactId(projectId);
+      if (!artifacts.has(artifactId)) {
+        artifacts.set(artifactId, {
+          id: artifactId,
+          projectId,
+          title: "Approved project update",
+          artifactKind: "import",
+          sourceThreadId: item.sourceThreadId,
+          scratchSessionId: item.scratchSessionId,
+          providerRefIds: [],
+          createdAt: item.createdAt,
+          updatedAt: item.updatedAt
+        });
+      }
+      const artifact = artifacts.get(artifactId);
+      const providerRefIds = artifact?.providerRefIds ?? [];
+      const version = previous ? previous.version + 1 : 1;
+      const delta: CanonicalDelta = {
+        id: canonicalDeltaId(`${checkpointId}:${item.id}:${version}`),
+        projectId,
+        stableKey,
+        version,
+        type: item.type,
+        title: item.title,
+        body: item.body,
+        status: "approved",
+        canonicalItemId,
+        targetCanonicalItemId: item.targetCanonicalItemId,
+        lifecycleAction: item.lifecycleAction ?? "create",
+        lifecycleStatusBefore: item.lifecycleStatusBefore,
+        lifecycleStatusAfter: lifecycleStatusForItem(item),
+        canonicalOperation: item.canonicalOperation,
+        mergeStrategy: item.mergeStrategy,
+        reconcilesWith: item.reconcilesWith,
+        reconciliationReason: item.reconciliationReason,
+        conflicts: item.conflicts,
+        checkpointId,
+        previousDeltaId: previous?.id,
+        sourceExtractedItemId: item.id,
+        sourceCompilationId,
+        conversationArtifactId: artifactId,
+        providerRefIds,
+        evidenceSource: item.evidenceSource,
+        evidenceEntryId: item.transcriptAnchor?.entryId ?? item.sourceTurnId,
+        evidenceQuote: item.transcriptAnchor?.quote,
+        localPaths: {
+          transcript: artifact?.transcriptPath,
+          handoff: artifact?.handoffPath,
+          eventLog: artifact?.eventLogPath
+        },
+        approvedAt: current,
+        createdAt: current,
+        updatedAt: current
+      };
+      if (previous) {
+        const previousIndex = nextDeltas.findIndex((candidate) => candidate.id === previous.id);
+        if (previousIndex >= 0) nextDeltas[previousIndex] = { ...nextDeltas[previousIndex], status: "superseded", updatedAt: current };
+      }
+      if (item.targetCanonicalItemId && item.targetCanonicalItemId !== canonicalItemId) {
+        const targetPrevious = latestDeltaForCanonicalItem(nextDeltas, item.targetCanonicalItemId);
+        if (targetPrevious) {
+          const targetPreviousIndex = nextDeltas.findIndex((candidate) => candidate.id === targetPrevious.id);
+          if (targetPreviousIndex >= 0) nextDeltas[targetPreviousIndex] = { ...nextDeltas[targetPreviousIndex], status: "superseded", updatedAt: current };
+        }
+      }
+      nextDeltas.push(delta);
+      approvedDeltaIds.push(delta.id);
+      sourceArtifactIds.add(artifactId);
+    }
+
+    let checkpoint: CanonicalCheckpoint | undefined;
+    if (approvedDeltaIds.length > 0) {
+      checkpoint = {
+        id: checkpointId,
+        projectId,
+        title: `Approved ${approvedDeltaIds.length} canonical ${approvedDeltaIds.length === 1 ? "delta" : "deltas"}`,
+        parentCheckpointId: latestCheckpoint(chart.checkpoints)?.id,
+        approvedDeltaIds,
+        sourceArtifactIds: [...sourceArtifactIds],
+        createdAt: current,
+        approvedAt: current,
+        imported: false
+      };
+    }
+
+    const draftCompilations = chart.draftCompilations.map((compilation) => {
+      if (sourceCompilationId && compilation.id !== sourceCompilationId) return compilation;
+      if (!sourceCompilationId && !compilation.extractedItemIds.some((id) => selectedIds.has(id))) return compilation;
+      const compilationItemIds = new Set(compilation.extractedItemIds);
+      const approvedInCompilation = updatedItems.filter((item) => compilationItemIds.has(item.id) && item.status === "approved").length;
+      return {
+        ...compilation,
+        status: approvedInCompilation >= compilation.extractedItemIds.length ? "approved" as const : "partially-approved" as const,
+        updatedAt: current
+      };
+    });
+
+    chart = {
+      ...chart,
+      checkpoints: checkpoint ? [...chart.checkpoints, checkpoint] : chart.checkpoints,
+      deltas: nextDeltas,
+      draftCompilations,
+      artifacts: [...artifacts.values()]
+    };
+    await writeChartStorage(chart);
+    await rebuildProduction();
+    return { checkpoint, approvedDeltaIds };
+  }
+
+  async function projectChartResponse(runtimeContext?: RuntimeContextRestore): Promise<ProjectChartResponse> {
+    const chart = await readCanonicalChart(runtimeContext);
+    const status = await codexProviderAdapter.status();
+    const providerRefs = chart.providerRefs.map((ref) =>
+      ref.provider === "codex" && status.accountId && !ref.accountId
+        ? { ...ref, accountId: status.accountId }
+        : ref
+    );
+    return {
+      projectDir,
+      chartPath: paths.chart,
+      project: await readProject(),
+      sourceThreads: await readSources(),
+      sourceCheckpoints: await readCheckpoints(),
+      checkpoints: sortedCheckpoints(chart.checkpoints),
+      canonicalItems: [...chart.canonicalItems].sort((a, b) => a.updatedAt.localeCompare(b.updatedAt)),
+      deltas: [...chart.deltas].sort((a, b) => a.approvedAt.localeCompare(b.approvedAt)),
+      draftCompilations: [...chart.draftCompilations].sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)),
+      artifacts: [...chart.artifacts].sort((a, b) => b.updatedAt.localeCompare(a.updatedAt)),
+      providerRefs,
+      providerAdapters: [status]
+    };
   }
 
   async function writeProduction(production: ProductionChart): Promise<void> {
@@ -1079,55 +1915,161 @@ export async function createProjectStore(params: ProjectStoreParams): Promise<Pr
     };
   }
 
+  async function chart(runtimeContext?: RuntimeContextRestore): Promise<ProjectChartResponse> {
+    await ensureCheckpointCoverage();
+    return projectChartResponse(runtimeContext);
+  }
+
+  async function artifactPreview(id: string, runtimeContext?: RuntimeContextRestore): Promise<ProjectArtifactPreviewResponse | null> {
+    const response = await projectChartResponse(runtimeContext);
+    const artifact = response.artifacts.find((candidate) => candidate.id === id);
+    if (!artifact) return null;
+    const providerRefIds = new Set(artifact.providerRefIds);
+    return {
+      artifact,
+      providerRefs: response.providerRefs.filter((ref) => providerRefIds.has(ref.id)),
+      transcriptPreview: await previewFile(artifact.transcriptPath),
+      handoffPreview: await previewFile(artifact.handoffPath, 16_000),
+      eventPreview: await previewFile(artifact.eventLogPath, 16_000),
+      paths: {
+        transcript: artifact.transcriptPath,
+        handoff: artifact.handoffPath,
+        eventLog: artifact.eventLogPath
+      }
+    };
+  }
+
+  async function approveCompilation(id: string, request?: ApproveCompilationRequest, runtimeContext?: RuntimeContextRestore): Promise<ApproveCompilationResponse> {
+    const chartFile = await readCanonicalChart(runtimeContext);
+    const compilation = chartFile.draftCompilations.find((candidate) => candidate.id === id);
+    if (!compilation) {
+      throw new Error(`Draft compilation not found: ${id}`);
+    }
+    const requestedIds = unique([
+      ...(request?.extractedItemIds ?? []),
+      ...(request?.candidateDeltaIds ?? [])
+    ]);
+    const compilationSelectableIds = new Set([
+      ...compilation.extractedItemIds,
+      ...compilation.candidateDeltaIds
+    ]);
+    const invalidIds = requestedIds.filter((itemId) => !compilationSelectableIds.has(itemId));
+    if (invalidIds.length > 0) {
+      throw new Error(`Invalid selected item(s) for compilation ${id}: ${invalidIds.join(", ")}`);
+    }
+    const idsToApprove = requestedIds.length > 0 ? requestedIds : compilation.extractedItemIds;
+    const approval = await approveExtractedItems(idsToApprove, id);
+    return {
+      ...(await projectChartResponse(runtimeContext)),
+      projectState: await snapshot(),
+      checkpoint: approval.checkpoint,
+      approvedDeltaIds: approval.approvedDeltaIds
+    };
+  }
+
   async function commitSession(session: MorticSession, approveItemIds?: string[]): Promise<CommitSessionResponse> {
     const source = await upsertSource(session);
     const scratch = await upsertScratch(session);
     const approveSet = new Set(approveItemIds ?? []);
+    const compilationCreatedAt = nowIso();
+    const compilationId = draftCompilationIdForScratch(scratch.id, compilationCreatedAt);
     const existingItems = await readItems();
+    const chartBeforeCompilation = await readCanonicalChart();
+    const transcriptForCompilation = transcriptAfterLatestCompilation(session.transcript, chartBeforeCompilation.draftCompilations, scratch.id);
+    const scopedSession: MorticSession = {
+      ...session,
+      transcript: transcriptForCompilation,
+      updatedAt: transcriptForCompilation.at(-1)?.createdAt ?? session.updatedAt
+    };
     const project = await readProject();
     const sources = await readSources();
     const sessions = await readSessions();
     const previousProduction = await readJson<ProductionChart | undefined>(paths.production, undefined);
     const production = productionFrom({ project, sources, sessions, items: existingItems, previous: previousProduction });
-    const extraction = await extractItemsWithCanonicalStateSkill({
-      projectId,
-      sourceThreadId: source.id,
-      scratchSessionId: scratch.id,
-      session,
-      production,
-      existing: existingItems,
-      approveItemIds: approveSet,
-      hash,
-      nowIso
+    const extraction = transcriptForCompilation.length > 0
+      ? await extractItemsWithCanonicalStateSkill({
+        projectId,
+        sourceThreadId: source.id,
+        scratchSessionId: scratch.id,
+        session: scopedSession,
+        production,
+        existing: existingItems,
+        approveItemIds: approveSet,
+        hash,
+        nowIso
+      })
+      : {
+        items: [] as ExtractedItem[],
+        summary: "No new transcript entries since the last compilation."
+      };
+    const generatedItemIds = new Map(extraction.items.map((item) => [item.id, compileScopedItemId(item.id, compilationId)]));
+    const generated = extraction.items.map((item) => {
+      const scopedId = generatedItemIds.get(item.id) ?? compileScopedItemId(item.id, compilationId);
+      return {
+        ...item,
+        id: scopedId,
+        sourceCompilationId: compilationId,
+        canonicalItemId: item.canonicalItemId ?? item.id,
+        mergedIntoId: item.mergedIntoId
+          ? generatedItemIds.get(item.mergedIntoId) ?? item.mergedIntoId
+          : item.mergedIntoId
+      };
     });
-    const generated = extraction.items;
-    const otherItems = existingItems.filter((item) => item.scratchSessionId !== scratch.id);
-    const items = [...otherItems, ...generated];
+    const reconciled = reconcileGeneratedWithPendingDrafts(existingItems, generated, compilationCreatedAt);
+    const finalGenerated = reconciled.generated;
+    const items = [...reconciled.items, ...finalGenerated];
+    const compilationSummary = finalGenerated.length > 0
+      ? extraction.summary
+      : reconciled.mergedIds.length > 0
+        ? "Updated existing pending canonical drafts."
+        : "No new canonical candidates since the last compilation.";
     await writeItems(items);
-    await writeAtomic(scratch.extractedItemsPath, `${JSON.stringify(generated, null, 2)}\n`);
+    await writeAtomic(
+      scratch.extractedItemsPath,
+      `${JSON.stringify(items.filter((item) => item.scratchSessionId === scratch.id), null, 2)}\n`
+    );
 
     const committedAt = nowIso();
     const committedSession: ScratchSessionNode = {
       ...scratch,
       status: "committed",
-      summary: extraction.summary,
+      summary: compilationSummary,
       committedAt,
       updatedAt: committedAt
     };
     await writeAtomic(path.join(sessionDir(projectDir, scratch.id), "session.json"), `${JSON.stringify(committedSession, null, 2)}\n`);
+    const compilation = transcriptForCompilation.length > 0
+      ? await createDraftCompilation({
+        scratch: committedSession,
+        items: finalGenerated,
+        summary: compilationSummary,
+        compilationId,
+        transcript: transcriptForCompilation,
+        createdAt: compilationCreatedAt
+      })
+      : undefined;
+    const approvedGeneratedIds = finalGenerated.filter((item) => item.status === "approved").map((item) => item.id);
+    if (approvedGeneratedIds.length > 0 && compilation) {
+      await approveExtractedItems(approvedGeneratedIds, compilation.id);
+    }
+    const existingApprovalIds = [...approveSet].filter((id) => existingItems.some((item) => item.id === id));
+    if (existingApprovalIds.length > 0) {
+      await approveExtractedItems(existingApprovalIds);
+    }
     await recordEvent(session, {
       type: "session.committed",
       detail: {
         scratchSessionId: scratch.id,
-        createdItems: generated.length,
-        approvedItems: generated.filter((item) => item.status === "approved").length
+        createdItems: finalGenerated.length,
+        approvedItems: finalGenerated.filter((item) => item.status === "approved").length,
+        mergedIntoPendingItems: reconciled.mergedIds.length
       }
     });
     await rebuildProduction(session);
     return {
       ...(await snapshot(session)),
       committedSession,
-      createdItems: generated
+      createdItems: finalGenerated
     };
   }
 
@@ -1145,19 +2087,46 @@ export async function createProjectStore(params: ProjectStoreParams): Promise<Pr
 
   async function updateExtractedItem(id: string, patch: UpdateExtractedItemRequest): Promise<ProjectStateResponse> {
     const items = await readItems();
+    const approving = patch.status === "approved";
+    const retiring = patch.retire === true;
+    const current = nowIso();
+    const sourceItem = items.find((item) => item.id === id);
+    const title = patch.title?.trim();
+    const body = patch.body?.trim();
+    const contentChanged = Boolean(
+      sourceItem &&
+      ((title !== undefined && title !== "" && title !== sourceItem.title) ||
+        (body !== undefined && body !== "" && body !== sourceItem.body))
+    );
+    const approvedCorrection = Boolean(sourceItem?.status === "approved" && (contentChanged || retiring));
     const nextItems = items.map((item) => {
       if (item.id !== id) return item;
+      const nextTitle = title || item.title;
+      const nextBody = body || item.body;
       return {
         ...item,
-        title: patch.title?.trim() || item.title,
-        body: patch.body?.trim() || item.body,
-        status: patch.status ?? item.status,
+        title: nextTitle,
+        body: nextBody,
+        status: approving || retiring || approvedCorrection ? "approved" as const : patch.status ?? item.status,
         mergedIntoId: patch.mergeIntoId ?? item.mergedIntoId,
-        updatedAt: nowIso()
+        lifecycleAction: retiring
+          ? "drop" as const
+          : approvedCorrection && (!item.lifecycleAction || item.lifecycleAction === "create")
+            ? "update" as const
+            : item.lifecycleAction,
+        lifecycleStatusBefore: retiring ? item.lifecycleStatusAfter ?? "open" : item.lifecycleStatusBefore,
+        lifecycleStatusAfter: retiring ? "dropped" as const : item.lifecycleStatusAfter,
+        canonicalOperation: retiring ? "drop" : approvedCorrection ? item.canonicalOperation ?? "update" : item.canonicalOperation,
+        updatedAt: current
       };
     });
     await writeItems(nextItems);
-    await rebuildProduction();
+    await refreshDraftCompilationStatuses(nextItems);
+    if (approving || approvedCorrection || retiring) {
+      await approveExtractedItems([id]);
+    } else {
+      await rebuildProduction();
+    }
     return snapshot();
   }
 
@@ -1257,6 +2226,7 @@ export async function createProjectStore(params: ProjectStoreParams): Promise<Pr
 
   const initialProject = await readProject();
   await writeProject(initialProject);
+  await readCanonicalChart();
 
   return {
     projectDir,
@@ -1264,6 +2234,9 @@ export async function createProjectStore(params: ProjectStoreParams): Promise<Pr
     recordEvent: (session, event) => enqueue(() => recordEvent(session, event)),
     snapshot: (session) => enqueue(() => snapshot(session)),
     canonicalState: () => enqueue(() => canonicalState()),
+    chart: (runtimeContext) => enqueue(() => chart(runtimeContext)),
+    artifactPreview: (id, runtimeContext) => enqueue(() => artifactPreview(id, runtimeContext)),
+    approveCompilation: (id, request, runtimeContext) => enqueue(() => approveCompilation(id, request, runtimeContext)),
     commitSession: (session, approveItemIds) => enqueue(() => commitSession(session, approveItemIds)),
     archiveSession: (session) => enqueue(() => archiveSession(session)),
     updateExtractedItem: (id, patch) => enqueue(() => updateExtractedItem(id, patch)),

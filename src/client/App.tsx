@@ -11,19 +11,24 @@ import {
   ttsProviders,
   type AudioHealthRequest,
   type AgentState,
+  type CanonicalDelta,
+  type ConversationArtifact,
   type CaptureState,
-  type ElevenLabsHealthResponse,
   type ExtractedItem,
   type ExtractionStatus,
   type InputPolicy,
   type LiveKitStatus,
   type MorticSession,
   type PrewarmResponse,
+  type ProjectArtifactPreviewResponse,
   type ProjectCanonicalStateResponse,
+  type ProjectChartResponse,
   type ProjectStateResponse,
+  type ProviderReference,
   type ReasoningEffort,
   type ScratchSessionNode,
   type ScratchMode,
+  type SessionResponse,
   type SparkContextCompactResponse,
   type SparkContextPreflight,
   type SparkContextPreflightResponse,
@@ -34,16 +39,20 @@ import {
   type TranscriptEntry,
   type TransportProvider,
   type TransportState,
+  type TtsHealthResponse,
   type TtsProvider,
   type TtsStatus,
   type TurnRun,
-  type TurnStreamEvent
+  type TurnStatusResponse,
+  type TurnStreamEvent,
+  type UpdateExtractedItemRequest
 } from "../shared/types.js";
 import { redactThreadId } from "../shared/threadUri.js";
 import { contextWorkReduction, estimateTextTokens, estimateTranscriptTokens, percentReduction } from "../shared/tokenEstimate.js";
 import { partialSpokenText } from "../shared/voiceResponse.js";
 import { effectiveReasoningForModel, modelRequiresLowReasoning } from "../shared/modelPolicy.js";
 import { modelProfile } from "../shared/modelProfiles.js";
+import { projectSpeech, shouldUseExactSpeechProjection } from "../shared/speechProjection.js";
 import {
   interruptResumeAction,
   isCurrentRecognitionSession,
@@ -54,6 +63,7 @@ import {
 } from "../shared/inputControl.js";
 import {
   createBrowserTtsProvider,
+  createDeepgramTtsProvider,
   createElevenLabsTtsProvider,
   createElevenLabsWsTtsProvider,
   createInworldWsTtsProvider,
@@ -131,6 +141,14 @@ type SpeechLedgerItem = SpeechQueueItem & {
   provider: TtsProvider;
 };
 
+type ProgressSoundHandle = {
+  audio: HTMLAudioElement;
+  context?: AudioContext;
+  source?: MediaElementAudioSourceNode;
+  filter?: BiquadFilterNode;
+  gain?: GainNode;
+};
+
 const effortLabels: Record<ReasoningEffort, string> = {
   none: "None",
   minimal: "Minimal",
@@ -147,12 +165,14 @@ const modeLabels: Record<ScratchMode, string> = {
 
 const ttsProviderLabels: Record<TtsProvider, string> = {
   browser: "Browser",
+  deepgram: "Deepgram",
   "inworld-ws": "Inworld WS",
   elevenlabs: "ElevenLabs",
   "elevenlabs-ws": "ElevenLabs WS"
 };
 
 const sttProviderLabels: Record<SttProvider, string> = {
+  "deepgram-stt": "Deepgram STT",
   "inworld-stt": "Inworld STT",
   whisper: "Whisper",
   browser: "Browser"
@@ -162,6 +182,8 @@ const transportLabels: Record<TransportProvider, string> = {
   "local-browser": "Local Browser",
   "livekit-webrtc": "LiveKit WebRTC"
 };
+
+const progressKeyboardLoopUrl = "/assets/progress-keyboard.ogg";
 
 const extractionTypeLabels: Record<ExtractedItem["type"], string> = {
   project_state: "Project State Update",
@@ -188,6 +210,35 @@ const extractionStatusLabels: Record<ExtractionStatus, string> = {
   merged: "Merged"
 };
 
+const extractionOperationLabels: Record<string, string> = {
+  add: "Create",
+  append_evidence: "Append evidence",
+  mark_resolved: "Mark resolved",
+  deprecate: "Supersede",
+  promote_backlog_to_task: "Promote backlog to task",
+  demote_task_to_backlog: "Move task to backlog"
+};
+
+const inactiveExtractionLifecycleStatuses = new Set(["resolved", "dropped", "superseded", "stale"]);
+
+function isExtractionReviewCandidate(item: ExtractedItem): boolean {
+  if (item.status !== "draft") return false;
+  const lifecycleStatus = item.lifecycleStatusAfter ?? "open";
+  return !inactiveExtractionLifecycleStatuses.has(lifecycleStatus);
+}
+
+function extractionActionLabel(item: ExtractedItem): string | undefined {
+  if (item.canonicalOperation && extractionOperationLabels[item.canonicalOperation]) {
+    return extractionOperationLabels[item.canonicalOperation];
+  }
+  if (item.delta) return item.delta;
+  return undefined;
+}
+
+function extractionReviewSort(left: ExtractedItem, right: ExtractedItem): number {
+  return right.updatedAt.localeCompare(left.updatedAt);
+}
+
 const extractionReasons: Record<ExtractedItem["type"], string> = {
   project_state: "Picked because it looks like a durable project fact, decision, constraint, or operating rule.",
   prioritization: "Picked because it changes what matters now, next, later, or what is deferred.",
@@ -206,7 +257,58 @@ function extractionEvidenceLabel(item: ExtractedItem): string {
   return "Evidence from transcript";
 }
 
-const SETTINGS_VERSION = "voice-mode-v5";
+function chartDateLabel(value: string | undefined): string {
+  if (!value) return "-";
+  const timestamp = Date.parse(value);
+  if (Number.isNaN(timestamp)) return value;
+  return new Intl.DateTimeFormat(undefined, {
+    month: "short",
+    day: "numeric",
+    hour: "2-digit",
+    minute: "2-digit"
+  }).format(new Date(timestamp));
+}
+
+function providerRefTitle(ref: ProviderReference): string {
+  return `${ref.provider} ${ref.forkKind}${ref.ephemeral ? " ephemeral" : ref.persisted ? " persisted" : ""}`;
+}
+
+function providerActionText(action: ProviderReference["actions"]["resume"], label: string): string {
+  return action.available ? `${label}: available` : `${label}: ${action.disabledReason ?? "disabled"}`;
+}
+
+function artifactTitle(artifact: ConversationArtifact | undefined): string {
+  if (!artifact) return "No artifact";
+  return artifact.title || artifact.id;
+}
+
+function turnProgressSummary(turn: TurnRun | null | undefined): { phase: string; detail: string; elapsedMs?: number } {
+  if (!turn) return { phase: "Sending", detail: "Waiting for Mortic to accept the turn" };
+  const latest = turn.logs.at(-1);
+  const label = latest?.label ?? "Turn running";
+  const detail = latest?.detail ?? "";
+
+  if (turn.metrics.firstDeltaMs !== undefined) {
+    if (/tool/i.test(label)) return { phase: "Using a tool", detail: detail || label, elapsedMs: latest?.elapsedMs };
+    return { phase: "Streaming response", detail: detail || label, elapsedMs: latest?.elapsedMs };
+  }
+
+  if (/request received/i.test(label)) return { phase: "Preparing turn", detail: detail || "User text received", elapsedMs: latest?.elapsedMs };
+  if (/utterance prepared/i.test(label)) return { phase: "Preparing prompt", detail, elapsedMs: latest?.elapsedMs };
+  if (/runtime context/i.test(label)) return { phase: "Restoring workspace", detail, elapsedMs: latest?.elapsedMs };
+  if (/bridge selected/i.test(label)) return { phase: "Starting Codex bridge", detail, elapsedMs: latest?.elapsedMs };
+  if (/turn\/start sent/i.test(label)) return { phase: "Starting scratch turn", detail, elapsedMs: latest?.elapsedMs };
+  if (/turn started/i.test(label)) return { phase: "Waiting for first token", detail: detail || "Codex accepted the turn", elapsedMs: latest?.elapsedMs };
+  if (/first model delta/i.test(label)) return { phase: "Streaming response", detail, elapsedMs: latest?.elapsedMs };
+
+  return { phase: label, detail, elapsedMs: latest?.elapsedMs };
+}
+
+function deltaLifecycleLabel(delta: CanonicalDelta): string {
+  return `${delta.lifecycleAction ?? "create"} -> ${delta.lifecycleStatusAfter ?? "open"}`;
+}
+
+const SETTINGS_VERSION = "voice-mode-v6";
 const modelOptions = ["default", "gpt-5.5", "gpt-5.4", "gpt-5.4-mini", "gpt-5.3-codex-spark", "gpt-5.3-codex"];
 const modelLabels: Record<string, string> = {
   default: "Thread native",
@@ -223,18 +325,25 @@ const BROWSER_MAX_CHUNK_CHARS = 180;
 const ELEVENLABS_FIRST_CHUNK_CHARS = 32;
 const ELEVENLABS_MIN_CHUNK_CHARS = 80;
 const ELEVENLABS_MAX_CHUNK_CHARS = 260;
+const DEEPGRAM_FIRST_CHUNK_CHARS = 40;
+const DEEPGRAM_MIN_CHUNK_CHARS = 90;
+const DEEPGRAM_MAX_CHUNK_CHARS = 220;
 const REMOTE_STT_SAMPLE_RATE = 16000;
 const SOFT_STT_SEGMENT_MS = 10_000;
 const HARD_STT_SEGMENT_MS = 18_000;
 const MAX_LOCAL_SEGMENT_BYTES = 5 * 1024 * 1024;
 const LIVE_MODE_RUNTIME_ENABLED = false;
 
-function isElevenLabsProvider(provider: TtsProvider): boolean {
-  return provider === "elevenlabs" || provider === "elevenlabs-ws" || provider === "inworld-ws";
+function isRemoteTtsProvider(provider: TtsProvider): boolean {
+  return provider === "deepgram" || provider === "elevenlabs" || provider === "elevenlabs-ws" || provider === "inworld-ws";
 }
 
 function isStreamingWsProvider(provider: TtsProvider): boolean {
   return provider === "elevenlabs-ws" || provider === "inworld-ws";
+}
+
+function isBufferedTtsProvider(provider: TtsProvider): boolean {
+  return provider === "deepgram" || isStreamingWsProvider(provider);
 }
 
 function apiBase(): string {
@@ -242,55 +351,71 @@ function apiBase(): string {
   return fromQuery ?? "http://127.0.0.1:5152";
 }
 
+function storedSetting(key: string): string | null {
+  try {
+    return window.localStorage?.getItem(key) ?? null;
+  } catch {
+    return null;
+  }
+}
+
+function writeStoredSetting(key: string, value: string): void {
+  try {
+    window.localStorage?.setItem(key, value);
+  } catch {
+    // Settings persistence is optional in embedded browser contexts.
+  }
+}
+
 function readStoredEffort(defaultEffort: ReasoningEffort): ReasoningEffort {
-  if (window.localStorage.getItem("mortic.settingsVersion") !== SETTINGS_VERSION) return defaultEffort;
-  const stored = window.localStorage.getItem("mortic.reasoningEffort");
+  if (storedSetting("mortic.settingsVersion") !== SETTINGS_VERSION) return defaultEffort;
+  const stored = storedSetting("mortic.reasoningEffort");
   return reasoningEfforts.includes(stored as ReasoningEffort) ? (stored as ReasoningEffort) : defaultEffort;
 }
 
 function readStoredModel(defaultModel: string): string {
-  if (window.localStorage.getItem("mortic.settingsVersion") !== SETTINGS_VERSION) return defaultModel;
-  return window.localStorage.getItem("mortic.codexModel") || defaultModel;
+  if (storedSetting("mortic.settingsVersion") !== SETTINGS_VERSION) return defaultModel;
+  return storedSetting("mortic.codexModel") || defaultModel;
 }
 
 function readStoredScratchMode(defaultMode: ScratchMode): ScratchMode {
-  if (window.localStorage.getItem("mortic.settingsVersion") !== SETTINGS_VERSION) return defaultMode;
-  const stored = window.localStorage.getItem("mortic.scratchMode");
+  if (storedSetting("mortic.settingsVersion") !== SETTINGS_VERSION) return defaultMode;
+  const stored = storedSetting("mortic.scratchMode");
   return scratchModes.includes(stored as ScratchMode) ? (stored as ScratchMode) : defaultMode;
 }
 
 function readStoredVoiceCaveman(): boolean {
-  if (window.localStorage.getItem("mortic.settingsVersion") !== SETTINGS_VERSION) return false;
-  return window.localStorage.getItem("mortic.voiceCaveman") === "true";
+  if (storedSetting("mortic.settingsVersion") !== SETTINGS_VERSION) return false;
+  return storedSetting("mortic.voiceCaveman") === "true";
 }
 
 function readStoredTtsProvider(defaultProvider: TtsProvider, availableProviders: TtsProvider[]): TtsProvider {
-  if (window.localStorage.getItem("mortic.settingsVersion") !== SETTINGS_VERSION) return defaultProvider;
-  const stored = window.localStorage.getItem("mortic.ttsProvider");
+  if (storedSetting("mortic.settingsVersion") !== SETTINGS_VERSION) return defaultProvider;
+  const stored = storedSetting("mortic.ttsProvider");
   return ttsProviders.includes(stored as TtsProvider) && availableProviders.includes(stored as TtsProvider)
     ? (stored as TtsProvider)
     : defaultProvider;
 }
 
 function readStoredSttProvider(defaultProvider: SttProvider, availableProviders: SttProvider[]): SttProvider {
-  if (window.localStorage.getItem("mortic.settingsVersion") !== SETTINGS_VERSION) return defaultProvider;
-  const stored = window.localStorage.getItem("mortic.sttProvider");
+  if (storedSetting("mortic.settingsVersion") !== SETTINGS_VERSION) return defaultProvider;
+  const stored = storedSetting("mortic.sttProvider");
   return sttProviders.includes(stored as SttProvider) && availableProviders.includes(stored as SttProvider)
     ? (stored as SttProvider)
     : defaultProvider;
 }
 
 function readStoredTransportProvider(defaultProvider: TransportProvider, availableProviders: TransportProvider[]): TransportProvider {
-  if (window.localStorage.getItem("mortic.settingsVersion") !== SETTINGS_VERSION) return defaultProvider;
-  const stored = window.localStorage.getItem("mortic.transportProvider");
+  if (storedSetting("mortic.settingsVersion") !== SETTINGS_VERSION) return defaultProvider;
+  const stored = storedSetting("mortic.transportProvider");
   return transportProviders.includes(stored as TransportProvider) && availableProviders.includes(stored as TransportProvider)
     ? (stored as TransportProvider)
     : defaultProvider;
 }
 
 function readStoredInputPolicy(): InputPolicy {
-  if (window.localStorage.getItem("mortic.settingsVersion") !== SETTINGS_VERSION) return "push_to_talk";
-  const stored = window.localStorage.getItem("mortic.inputPolicy");
+  if (storedSetting("mortic.settingsVersion") !== SETTINGS_VERSION) return "push_to_talk";
+  const stored = storedSetting("mortic.inputPolicy");
   return stored === "live" ? "live" : "push_to_talk";
 }
 
@@ -320,22 +445,35 @@ function chooseSpeakableEnd(text: string, start: number, force: boolean, provide
   const remaining = text.slice(start);
   if (!isSpeakableText(remaining) && !force) return null;
 
-  const minChars =
-    isElevenLabsProvider(provider)
-      ? start === 0
+  const firstChunkChars =
+    provider === "deepgram"
+      ? DEEPGRAM_FIRST_CHUNK_CHARS
+      : isRemoteTtsProvider(provider)
         ? ELEVENLABS_FIRST_CHUNK_CHARS
-        : ELEVENLABS_MIN_CHUNK_CHARS
-      : start === 0
-        ? BROWSER_FIRST_CHUNK_CHARS
+        : BROWSER_FIRST_CHUNK_CHARS;
+  const laterChunkChars =
+    provider === "deepgram"
+      ? DEEPGRAM_MIN_CHUNK_CHARS
+      : isRemoteTtsProvider(provider)
+        ? ELEVENLABS_MIN_CHUNK_CHARS
         : BROWSER_MIN_CHUNK_CHARS;
-  const maxChars = isElevenLabsProvider(provider) ? ELEVENLABS_MAX_CHUNK_CHARS : BROWSER_MAX_CHUNK_CHARS;
+  const minChars = start === 0 ? firstChunkChars : laterChunkChars;
+  const maxChars =
+    provider === "deepgram"
+      ? DEEPGRAM_MAX_CHUNK_CHARS
+      : isRemoteTtsProvider(provider)
+        ? ELEVENLABS_MAX_CHUNK_CHARS
+        : BROWSER_MAX_CHUNK_CHARS;
 
   if (force) {
-    return isSpeakableText(remaining) ? text.length : null;
+    if (!isSpeakableText(remaining)) return null;
+    if (remaining.length <= maxChars) return text.length;
+    const whitespaceEnd = lastWhitespaceBefore(remaining, maxChars);
+    return start + (whitespaceEnd ?? maxChars);
   }
 
   const sentenceEnd = findSentenceEnd(remaining, minChars);
-  if (sentenceEnd !== null) return start + sentenceEnd;
+  if (sentenceEnd !== null && sentenceEnd <= maxChars) return start + sentenceEnd;
 
   if (remaining.length < maxChars) return null;
   const whitespaceEnd = lastWhitespaceBefore(remaining, maxChars);
@@ -376,6 +514,191 @@ function MarkdownContent({ markdown }: { markdown: string }) {
     <ReactMarkdown remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeSanitize]}>
       {markdown}
     </ReactMarkdown>
+  );
+}
+
+type ChartTranscriptSection = {
+  label: string;
+  markdown: string;
+};
+
+type ChartTranscriptTurn = {
+  role: string;
+  timestamp?: string;
+  mode?: string;
+  reasoningEffort?: string;
+  failed: boolean;
+  sections: ChartTranscriptSection[];
+};
+
+type ChartTranscriptProjection = {
+  title: string;
+  sourceThread?: string;
+  turns: ChartTranscriptTurn[];
+};
+
+function parseChartTranscriptSections(body: string): ChartTranscriptSection[] {
+  const sections: ChartTranscriptSection[] = [];
+  let currentLabel: string | null = null;
+  let currentLines: string[] = [];
+
+  const commitSection = () => {
+    if (!currentLabel) return;
+    const markdown = currentLines.join("\n").trim();
+    if (markdown) sections.push({ label: currentLabel, markdown });
+  };
+
+  for (const line of body.split("\n")) {
+    const labelMatch = line.match(/^(Text|Spoken|Notes|Sources):\s*(.*)$/);
+    if (labelMatch) {
+      commitSection();
+      currentLabel = labelMatch[1] ?? "Text";
+      currentLines = [];
+      const inlineValue = labelMatch[2] ?? "";
+      if (inlineValue.trim()) currentLines.push(inlineValue);
+      continue;
+    }
+
+    if (!currentLabel && line.trim()) currentLabel = "Text";
+    if (currentLabel) currentLines.push(line);
+  }
+
+  commitSection();
+  return sections;
+}
+
+function parseChartTranscriptMarkdown(markdown: string): ChartTranscriptProjection {
+  const normalized = markdown.replace(/\r\n?/g, "\n");
+  const title = normalized.match(/^#\s+(.+)$/m)?.[1]?.trim() || "Mortic Transcript";
+  const sourceThread = normalized.match(/^Source thread:\s*(.+)$/im)?.[1]?.trim();
+  const headings: Array<{ index: number; line: string; heading: string }> = [];
+  const headingPattern = /^##\s+((?:user|assistant)\s+·\s+.+)$/gim;
+  let headingMatch: RegExpExecArray | null;
+
+  while ((headingMatch = headingPattern.exec(normalized)) !== null) {
+    headings.push({
+      index: headingMatch.index,
+      line: headingMatch[0],
+      heading: (headingMatch[1] ?? "").trim()
+    });
+  }
+
+  const turns = headings.map((heading, index) => {
+    const nextHeading = headings[index + 1];
+    const bodyStart = heading.index + heading.line.length;
+    const bodyEnd = nextHeading?.index ?? normalized.length;
+    const headingParts = heading.heading
+      .split("·")
+      .map((part) => part.trim())
+      .filter(Boolean);
+    const failed = headingParts.some((part) => part.toLowerCase() === "failed");
+
+    return {
+      role: headingParts[0] ?? "turn",
+      timestamp: headingParts[1],
+      mode: headingParts[2],
+      reasoningEffort: headingParts[3],
+      failed,
+      sections: parseChartTranscriptSections(normalized.slice(bodyStart, bodyEnd))
+    };
+  });
+
+  return { title, sourceThread: sourceThread || undefined, turns };
+}
+
+function chartTranscriptRoleLabel(role: string): string {
+  const normalizedRole = role.trim().toLowerCase();
+  if (normalizedRole === "user") return "User";
+  if (normalizedRole === "assistant") return "Assistant";
+  if (!role.trim()) return "Turn";
+  return role.trim().slice(0, 1).toUpperCase() + role.trim().slice(1);
+}
+
+function chartTranscriptRoleClass(role: string): string {
+  return role.trim().toLowerCase().replace(/[^a-z0-9_-]+/g, "-") || "turn";
+}
+
+function chartTranscriptSectionLabel(sectionLabel: string, role: string): string {
+  const normalizedSection = sectionLabel.trim().toLowerCase();
+  const normalizedRole = role.trim().toLowerCase();
+  if (normalizedSection === "text" && normalizedRole === "user") return "User Speech";
+  if (normalizedSection === "text" && normalizedRole === "assistant") return "Spoken";
+  if (normalizedSection === "spoken") return "Spoken";
+  if (normalizedSection === "notes") return "Notes";
+  if (normalizedSection === "sources") return "Sources";
+  return sectionLabel.trim() || "Text";
+}
+
+function isExpandableChartTranscriptSection(sectionLabel: string): boolean {
+  return sectionLabel.trim().toLowerCase() === "notes";
+}
+
+function ChartTranscriptPreview({ markdown }: { markdown: string }) {
+  const transcript = useMemo(() => parseChartTranscriptMarkdown(markdown), [markdown]);
+
+  return (
+    <div className="chart-transcript">
+      <header className="chart-transcript-meta">
+        <strong>{transcript.title}</strong>
+        {transcript.sourceThread && (
+          <span>
+            Source thread <code>{transcript.sourceThread}</code>
+          </span>
+        )}
+      </header>
+      {transcript.turns.length === 0 ? (
+        <div className="markdown-body chart-transcript-fallback">
+          <MarkdownContent markdown={markdown} />
+        </div>
+      ) : (
+        <div className="chart-transcript-turns">
+          {transcript.turns.map((turn, turnIndex) => (
+            <article
+              key={`${turn.role}-${turn.timestamp ?? turnIndex}-${turnIndex}`}
+              className={`chart-transcript-turn transcript-role-${chartTranscriptRoleClass(turn.role)}`}
+            >
+              <header className="chart-transcript-turn-header">
+                <strong>{chartTranscriptRoleLabel(turn.role)}</strong>
+                {turn.timestamp && <span>{turn.timestamp}</span>}
+                {turn.mode && <span>{turn.mode}</span>}
+                {turn.reasoningEffort && <span>{turn.reasoningEffort}</span>}
+                {turn.failed && <span>failed</span>}
+              </header>
+              <div className="chart-transcript-sections">
+                {turn.sections.length === 0 ? (
+                  <p className="empty-inline">No transcript content.</p>
+                ) : (
+                  turn.sections.map((section, sectionIndex) => {
+                    const label = chartTranscriptSectionLabel(section.label, turn.role);
+                    const expandable = isExpandableChartTranscriptSection(section.label);
+                    const sectionKey = `${section.label}-${sectionIndex}`;
+                    const body = (
+                      <div className="markdown-body chart-transcript-section-body">
+                        <MarkdownContent markdown={section.markdown} />
+                      </div>
+                    );
+
+                    return expandable ? (
+                      <details key={sectionKey} className="chart-transcript-section chart-transcript-section-disclosure">
+                        <summary>
+                          <span className="chart-transcript-section-label">{label}</span>
+                        </summary>
+                        {body}
+                      </details>
+                    ) : (
+                      <section key={sectionKey} className="chart-transcript-section">
+                        <span className="chart-transcript-section-label">{label}</span>
+                        {body}
+                      </section>
+                    );
+                  })
+                )}
+              </div>
+            </article>
+          ))}
+        </div>
+      )}
+    </div>
   );
 }
 
@@ -619,9 +942,22 @@ export function App() {
   const [canonicalState, setCanonicalState] = useState<ProjectCanonicalStateResponse | null>(null);
   const [canonicalStateOpen, setCanonicalStateOpen] = useState(false);
   const [canonicalStatePending, setCanonicalStatePending] = useState(false);
+  const [chartState, setChartState] = useState<ProjectChartResponse | null>(null);
+  const [chartOpen, setChartOpen] = useState(false);
+  const [chartPending, setChartPending] = useState(false);
+  const [chartSearch, setChartSearch] = useState("");
+  const [chartTypeFilter, setChartTypeFilter] = useState<ExtractedItem["type"] | "all">("all");
+  const [selectedChartCheckpointId, setSelectedChartCheckpointId] = useState("");
+  const [selectedChartDeltaId, setSelectedChartDeltaId] = useState("");
+  const [artifactPreview, setArtifactPreview] = useState<ProjectArtifactPreviewResponse | null>(null);
+  const [artifactPending, setArtifactPending] = useState(false);
   const [transcriptDrawerOpen, setTranscriptDrawerOpen] = useState(false);
   const [handoffReviewOpen, setHandoffReviewOpen] = useState(false);
   const [extractionReviewOpen, setExtractionReviewOpen] = useState(false);
+  const [extractionReviewTab, setExtractionReviewTab] = useState<"pending" | "approved">("pending");
+  const [editingExtractionId, setEditingExtractionId] = useState<string | null>(null);
+  const [editingExtractionTitle, setEditingExtractionTitle] = useState("");
+  const [editingExtractionBody, setEditingExtractionBody] = useState("");
   const [sourceDraft, setSourceDraft] = useState("");
   const [sourcePending, setSourcePending] = useState(false);
   const [prewarm, setPrewarm] = useState<PrewarmState>({ status: "idle" });
@@ -629,12 +965,16 @@ export function App() {
     defaultProvider: "browser",
     availableProviders: ["browser"],
     inworldConfigured: false,
+    deepgramConfigured: false,
     elevenLabsConfigured: false
   });
+  const [speechProjectionEnabled, setSpeechProjectionEnabled] = useState(true);
+  const [progressSoundsEnabled, setProgressSoundsEnabled] = useState(false);
   const [ttsProvider, setTtsProvider] = useState<TtsProvider>("browser");
   const [sttStatus, setSttStatus] = useState<SttStatus>({
     defaultProvider: "browser",
     availableProviders: ["browser"],
+    deepgramConfigured: false,
     inworldConfigured: false,
     openAIConfigured: false
   });
@@ -666,6 +1006,8 @@ export function App() {
   const [sttPhase, setSttPhase] = useState<"idle" | "listening" | "transcribing">("idle");
   const [lastSttMeta, setLastSttMeta] = useState<{ provider: SttProvider; elapsedMs: number; bytes: number; fallbackReason?: string } | null>(null);
   const [uiDispatchMs, setUiDispatchMs] = useState<number | null>(null);
+  const [progressVisible, setProgressVisible] = useState(false);
+  const [queuedTurnPreview, setQueuedTurnPreview] = useState<string | null>(null);
   const [liveModeActive, setLiveModeActive] = useState(false);
   const [speechPhase, setSpeechPhase] = useState<"idle" | "buffering" | "speaking">("idle");
   const recognitionRef = useRef<SpeechRecognitionLike | null>(null);
@@ -707,8 +1049,11 @@ export function App() {
   const spokenChunkCountRef = useRef(0);
   const pttViewportRestoreRef = useRef<{ x: number; y: number; until: number } | null>(null);
   const ttsRuntimeRef = useRef<RuntimeTtsProvider | null>(null);
+  const progressSoundRef = useRef<ProgressSoundHandle | null>(null);
+  const queuedTurnRef = useRef<{ text: string; options: { sttMetrics?: SttTurnMetrics } } | null>(null);
   const currentTurnIdRef = useRef<string | null>(null);
   const currentTurnScratchModeRef = useRef<ScratchMode | null>(null);
+  const exactSpeechProjectionRef = useRef(false);
   const audioTimingBaseRef = useRef<number | null>(null);
   const audioHealthRef = useRef<AudioHealthState | null>(null);
   const prewarmKeyRef = useRef("");
@@ -853,7 +1198,7 @@ export function App() {
           const providerLabel = ttsProviderLabels[ttsProvider];
           setTtsProviderNotice(`${providerLabel} unavailable, using Browser`);
         }
-        if (!isStreamingWsProvider(result.spokenBy)) {
+        if (!isBufferedTtsProvider(result.spokenBy)) {
           finishPrewarmAnnouncement(generation);
           return;
         }
@@ -901,6 +1246,60 @@ export function App() {
     }
   }
 
+  function selectInitialChartNodes(payload: ProjectChartResponse): void {
+    const checkpoint = [...payload.checkpoints].sort((a, b) => b.approvedAt.localeCompare(a.approvedAt))[0];
+    setSelectedChartCheckpointId(checkpoint?.id ?? "");
+    const delta = checkpoint
+      ? payload.deltas.find((candidate) => checkpoint.approvedDeltaIds.includes(candidate.id))
+      : payload.deltas[0];
+    setSelectedChartDeltaId(delta?.id ?? "");
+  }
+
+  async function refreshProjectChart(options: { open?: boolean; preserveSelection?: boolean } = {}): Promise<void> {
+    if (chartPending) return;
+    setChartPending(true);
+    setProjectError(null);
+    try {
+      const response = await fetch(`${api}/api/project/chart`);
+      const payload = (await response.json()) as ProjectChartResponse & { error?: string };
+      if (!response.ok || payload.error) {
+        throw new Error(payload.error ?? `Project chart request failed: ${response.status}`);
+      }
+      setChartState(payload);
+      if (options.open) setChartOpen(true);
+      if (!options.preserveSelection) selectInitialChartNodes(payload);
+    } catch (error) {
+      setProjectError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setChartPending(false);
+    }
+  }
+
+  async function openProjectChart(): Promise<void> {
+    await refreshProjectChart({ open: true });
+  }
+
+  async function loadArtifactPreview(artifactId: string): Promise<void> {
+    if (!artifactId) {
+      setArtifactPreview(null);
+      return;
+    }
+    setArtifactPending(true);
+    try {
+      const response = await fetch(`${api}/api/project/artifacts/${encodeURIComponent(artifactId)}`);
+      const payload = (await response.json()) as ProjectArtifactPreviewResponse & { error?: string };
+      if (!response.ok || payload.error) {
+        throw new Error(payload.error ?? `Artifact preview failed: ${response.status}`);
+      }
+      setArtifactPreview(payload);
+    } catch (error) {
+      setProjectError(error instanceof Error ? error.message : String(error));
+      setArtifactPreview(null);
+    } finally {
+      setArtifactPending(false);
+    }
+  }
+
   useEffect(() => {
     let cancelled = false;
 
@@ -908,14 +1307,16 @@ export function App() {
       try {
         const response = await fetch(`${api}/api/session`);
         if (!response.ok) throw new Error(`Session request failed: ${response.status}`);
-        const payload = await response.json();
+        const payload = (await response.json()) as SessionResponse;
         if (cancelled) return;
-        const defaultEffort = payload.defaultReasoningEffort as ReasoningEffort;
-        const defaultModel = payload.defaultCodexModel as string;
+        const defaultEffort = payload.defaultReasoningEffort;
+        const defaultModel = payload.defaultCodexModel;
         const defaultMode = (payload.defaultScratchMode ?? "voice") as ScratchMode;
-        const tts = payload.tts as TtsStatus;
-        const stt = payload.stt as SttStatus;
-        const livekit = payload.livekit as LiveKitStatus | undefined;
+        const tts = payload.tts;
+        const stt = payload.stt;
+        const livekit = payload.livekit;
+        setSpeechProjectionEnabled(payload.features?.speechProjection ?? true);
+        setProgressSoundsEnabled(payload.features?.progressSounds ?? false);
         setScratchMode(readStoredScratchMode(defaultMode));
         setVoiceCaveman(readStoredVoiceCaveman());
         setReasoningEffort(readStoredEffort(defaultEffort));
@@ -931,6 +1332,11 @@ export function App() {
         setInputPolicy("push_to_talk");
         setLiveModeActive(false);
         setState({ session: payload.session, loading: false, error: null });
+        if (payload.session.activeTurn?.status === "running") {
+          reattachActiveTurn(payload.session.activeTurn);
+        } else {
+          setTurnPending(false);
+        }
         setSourceDraft(payload.session.sourceUri);
         setHandoff(payload.session.handoff ?? "");
         setShortHandoff(payload.session.handoffShort ?? "");
@@ -956,9 +1362,22 @@ export function App() {
 
   useEffect(() => {
     if (!settingsHydrated) return;
-    window.localStorage.setItem("mortic.settingsVersion", SETTINGS_VERSION);
-    window.localStorage.setItem("mortic.reasoningEffort", voiceSafeReasoningEffort);
+    writeStoredSetting("mortic.settingsVersion", SETTINGS_VERSION);
+    writeStoredSetting("mortic.reasoningEffort", voiceSafeReasoningEffort);
   }, [settingsHydrated, voiceSafeReasoningEffort]);
+
+  useEffect(() => {
+    if (!chartOpen || !chartState || !selectedChartDeltaId) {
+      setArtifactPreview(null);
+      return;
+    }
+    const selected = chartState.deltas.find((delta) => delta.id === selectedChartDeltaId);
+    if (!selected) {
+      setArtifactPreview(null);
+      return;
+    }
+    void loadArtifactPreview(selected.conversationArtifactId);
+  }, [chartOpen, chartState, selectedChartDeltaId]);
 
   useEffect(() => {
     if (scratchMode === "voice" && reasoningEffort === "minimal") {
@@ -973,44 +1392,44 @@ export function App() {
 
   useEffect(() => {
     if (!settingsHydrated) return;
-    window.localStorage.setItem("mortic.settingsVersion", SETTINGS_VERSION);
-    window.localStorage.setItem("mortic.codexModel", codexModel);
+    writeStoredSetting("mortic.settingsVersion", SETTINGS_VERSION);
+    writeStoredSetting("mortic.codexModel", codexModel);
   }, [settingsHydrated, codexModel]);
 
   useEffect(() => {
     if (!settingsHydrated) return;
-    window.localStorage.setItem("mortic.settingsVersion", SETTINGS_VERSION);
-    window.localStorage.setItem("mortic.scratchMode", scratchMode);
+    writeStoredSetting("mortic.settingsVersion", SETTINGS_VERSION);
+    writeStoredSetting("mortic.scratchMode", scratchMode);
   }, [settingsHydrated, scratchMode]);
 
   useEffect(() => {
     if (!settingsHydrated) return;
-    window.localStorage.setItem("mortic.settingsVersion", SETTINGS_VERSION);
-    window.localStorage.setItem("mortic.voiceCaveman", String(voiceCaveman));
+    writeStoredSetting("mortic.settingsVersion", SETTINGS_VERSION);
+    writeStoredSetting("mortic.voiceCaveman", String(voiceCaveman));
   }, [settingsHydrated, voiceCaveman]);
 
   useEffect(() => {
     if (!settingsHydrated) return;
-    window.localStorage.setItem("mortic.settingsVersion", SETTINGS_VERSION);
-    window.localStorage.setItem("mortic.ttsProvider", ttsProvider);
+    writeStoredSetting("mortic.settingsVersion", SETTINGS_VERSION);
+    writeStoredSetting("mortic.ttsProvider", ttsProvider);
   }, [settingsHydrated, ttsProvider]);
 
   useEffect(() => {
     if (!settingsHydrated) return;
-    window.localStorage.setItem("mortic.settingsVersion", SETTINGS_VERSION);
-    window.localStorage.setItem("mortic.sttProvider", sttProvider);
+    writeStoredSetting("mortic.settingsVersion", SETTINGS_VERSION);
+    writeStoredSetting("mortic.sttProvider", sttProvider);
   }, [settingsHydrated, sttProvider]);
 
   useEffect(() => {
     if (!settingsHydrated) return;
-    window.localStorage.setItem("mortic.settingsVersion", SETTINGS_VERSION);
-    window.localStorage.setItem("mortic.transportProvider", transportProvider);
+    writeStoredSetting("mortic.settingsVersion", SETTINGS_VERSION);
+    writeStoredSetting("mortic.transportProvider", transportProvider);
   }, [settingsHydrated, transportProvider]);
 
   useEffect(() => {
     if (!settingsHydrated) return;
-    window.localStorage.setItem("mortic.settingsVersion", SETTINGS_VERSION);
-    window.localStorage.setItem("mortic.inputPolicy", inputPolicy);
+    writeStoredSetting("mortic.settingsVersion", SETTINGS_VERSION);
+    writeStoredSetting("mortic.inputPolicy", inputPolicy);
   }, [settingsHydrated, inputPolicy]);
 
   useEffect(() => {
@@ -1184,14 +1603,17 @@ export function App() {
     window.speechSynthesis.cancel();
   }, []);
 
-  useEffect(() => {
-    const browserProvider = createBrowserTtsProvider();
-    const elevenLabsWsProvider = createElevenLabsWsTtsProvider(api, browserProvider);
-    ttsRuntimeRef.current =
-      ttsProvider === "inworld-ws"
-        ? createInworldWsTtsProvider(api, elevenLabsWsProvider)
-        : ttsProvider === "elevenlabs"
-        ? createElevenLabsTtsProvider(api, browserProvider)
+	  useEffect(() => {
+	    const browserProvider = createBrowserTtsProvider();
+	    const deepgramProvider = createDeepgramTtsProvider(api, browserProvider);
+	    const elevenLabsWsProvider = createElevenLabsWsTtsProvider(api, browserProvider);
+	    ttsRuntimeRef.current =
+	      ttsProvider === "inworld-ws"
+	        ? createInworldWsTtsProvider(api, elevenLabsWsProvider)
+	        : ttsProvider === "deepgram"
+	          ? deepgramProvider
+	        : ttsProvider === "elevenlabs"
+	        ? createElevenLabsTtsProvider(api, browserProvider)
         : ttsProvider === "elevenlabs-ws"
           ? elevenLabsWsProvider
         : browserProvider;
@@ -1209,34 +1631,35 @@ export function App() {
         cancelled = true;
       };
     }
-    if (ttsProvider === "elevenlabs-ws") {
-      setTtsProviderNotice("ElevenLabs WS selected; Browser fallback active");
-      return () => {
-        cancelled = true;
-      };
-    }
-    if (ttsProvider !== "elevenlabs") {
-      setTtsProviderNotice(null);
-      return () => {
-        cancelled = true;
-      };
-    }
-
-    setTtsProviderNotice("Checking ElevenLabs");
-    fetch(`${api}/api/tts/elevenlabs/health`)
-      .then(async (response) => {
-        const payload = (await response.json()) as ElevenLabsHealthResponse;
-        if (cancelled) return;
-        if (payload.available) {
-          setTtsProviderNotice(`ElevenLabs ready ${formatMs(payload.elapsedMs)}`);
-          return;
-        }
-        setTtsProviderNotice(`ElevenLabs unavailable, using Browser (${payload.status}${payload.detail ? `: ${payload.detail}` : ""})`);
-      })
-      .catch((error) => {
-        if (cancelled) return;
-        setTtsProviderNotice(`ElevenLabs unavailable, using Browser (${error instanceof Error ? error.message : String(error)})`);
-      });
+	    if (ttsProvider === "elevenlabs-ws") {
+	      setTtsProviderNotice("ElevenLabs WS selected; Browser fallback active");
+	      return () => {
+	        cancelled = true;
+	      };
+	    }
+	    if (ttsProvider !== "deepgram" && ttsProvider !== "elevenlabs") {
+	      setTtsProviderNotice(null);
+	      return () => {
+	        cancelled = true;
+	      };
+	    }
+	
+	    const label = ttsProviderLabels[ttsProvider];
+	    setTtsProviderNotice(`Checking ${label}`);
+	    fetch(`${api}/api/tts/${ttsProvider}/health`)
+	      .then(async (response) => {
+	        const payload = (await response.json()) as TtsHealthResponse;
+	        if (cancelled) return;
+	        if (payload.available) {
+	          setTtsProviderNotice(`${label} ready ${formatMs(payload.elapsedMs)}`);
+	          return;
+	        }
+	        setTtsProviderNotice(`${label} unavailable, using Browser (${payload.status}${payload.detail ? `: ${payload.detail}` : ""})`);
+	      })
+	      .catch((error) => {
+	        if (cancelled) return;
+	        setTtsProviderNotice(`${label} unavailable, using Browser (${error instanceof Error ? error.message : String(error)})`);
+	      });
 
     return () => {
       cancelled = true;
@@ -1244,6 +1667,14 @@ export function App() {
   }, [api, ttsProvider]);
 
   useEffect(() => {
+    if (sttProvider === "deepgram-stt") {
+      setSttProviderNotice(
+        sttStatus.deepgramConfigured
+          ? `Deepgram STT ready${sttStatus.deepgramModel ? ` · ${sttStatus.deepgramModel}` : ""}; Inworld/Whisper fallback active`
+          : "Deepgram STT unavailable; set DEEPGRAM_API_KEY or choose Browser"
+      );
+      return;
+    }
     if (sttProvider === "inworld-stt") {
       setSttProviderNotice(
         sttStatus.inworldConfigured
@@ -1261,7 +1692,16 @@ export function App() {
       return;
     }
     setSttProviderNotice(recognitionSupported ? "Browser STT ready" : "Browser STT unavailable in this browser");
-  }, [recognitionSupported, sttProvider, sttStatus.inworldConfigured, sttStatus.inworldModel, sttStatus.openAIConfigured, sttStatus.whisperModel]);
+  }, [
+    recognitionSupported,
+    sttProvider,
+    sttStatus.deepgramConfigured,
+    sttStatus.deepgramModel,
+    sttStatus.inworldConfigured,
+    sttStatus.inworldModel,
+    sttStatus.openAIConfigured,
+    sttStatus.whisperModel
+  ]);
 
   useEffect(() => {
     if (transportProvider !== "livekit-webrtc") {
@@ -1331,10 +1771,95 @@ export function App() {
   }, [liveAssistantText, pending, prewarm.status, recognizing, speechError, speechPhase, state.error, sttPhase]);
 
   useEffect(() => {
+    if (!pending) {
+      setProgressVisible(false);
+      return;
+    }
+    const timer = window.setTimeout(() => setProgressVisible(true), 1000);
+    return () => window.clearTimeout(timer);
+  }, [pending, activeTurn?.id]);
+
+  useEffect(() => {
+    if (!progressSoundsEnabled || !progressVisible || !pending || liveAssistantText.trim()) {
+      stopProgressSound();
+      return;
+    }
+    if (progressSoundRef.current) return;
+
+    const audio = new Audio(progressKeyboardLoopUrl);
+    audio.loop = true;
+    audio.preload = "auto";
+    audio.volume = 0.08;
+    const handle: ProgressSoundHandle = { audio };
+    const Constructor = audioContextConstructor();
+
+    if (Constructor) {
+      try {
+        const context = new Constructor();
+        const source = context.createMediaElementSource(audio);
+        const filter = context.createBiquadFilter();
+        const gain = context.createGain();
+        filter.type = "lowpass";
+        filter.frequency.value = 1800;
+        gain.gain.value = 0.14;
+        source.connect(filter);
+        filter.connect(gain);
+        gain.connect(context.destination);
+        audio.volume = 1;
+        Object.assign(handle, { context, source, filter, gain });
+      } catch {
+        audio.volume = 0.08;
+      }
+    }
+
+    progressSoundRef.current = handle;
+    void Promise.resolve(handle.context?.state === "suspended" ? handle.context.resume() : undefined)
+      .then(() => audio.play())
+      .catch(() => {
+        stopProgressSound();
+      });
+
     return () => {
+      stopProgressSound();
+    };
+  }, [liveAssistantText, pending, progressSoundsEnabled, progressVisible]);
+
+  useEffect(() => {
+    if (pending || !queuedTurnPreview) return;
+    const timer = window.setTimeout(() => {
+      if (pendingRef.current) return;
+      const queued = queuedTurnRef.current;
+      if (!queued) {
+        setQueuedTurnPreview(null);
+        return;
+      }
+      queuedTurnRef.current = null;
+      setQueuedTurnPreview(null);
+      void sendTurn(queued.text, queued.options);
+    }, 0);
+    return () => window.clearTimeout(timer);
+  }, [pending, queuedTurnPreview]);
+
+  useEffect(() => {
+    return () => {
+      stopProgressSound();
       resetSpeechPlayback();
     };
   }, []);
+
+  function stopProgressSound(): void {
+    const handle = progressSoundRef.current;
+    if (!handle) return;
+    progressSoundRef.current = null;
+    handle.audio.pause();
+    handle.audio.currentTime = 0;
+    handle.source?.disconnect();
+    handle.filter?.disconnect();
+    handle.gain?.disconnect();
+    if (handle.context && handle.context.state !== "closed") {
+      void handle.context.close().catch(() => undefined);
+    }
+  }
 
   function updateAudioHealth(patch: Partial<AudioHealthState>): AudioHealthState | null {
     const current = audioHealthRef.current;
@@ -1393,6 +1918,31 @@ export function App() {
     audioHealthRef.current = null;
     setAudioHealth(null);
     setSpeechPhase("idle");
+  }
+
+  function turnStartPerformanceMs(turn: TurnRun): number {
+    const createdAtMs = Date.parse(turn.createdAt);
+    if (!Number.isFinite(createdAtMs)) return performance.now();
+    return performance.now() - Math.max(0, Date.now() - createdAtMs);
+  }
+
+  function reattachActiveTurn(turn: TurnRun): void {
+    currentTurnScratchModeRef.current = turn.scratchMode;
+    setTurnPending(true);
+    setSpeechError(null);
+    setLiveAssistantText("");
+    liveAssistantTextRef.current = "";
+    const startedAtMs = turnStartPerformanceMs(turn);
+    if (turn.scratchMode === "voice") {
+      startAudioHealth(turn.id, startedAtMs);
+    } else {
+      startTextTurnTracking(turn.id, startedAtMs);
+    }
+    if (typeof EventSource !== "undefined") {
+      streamTurn(turn.id);
+    } else {
+      void pollTurn(turn.id);
+    }
   }
 
   async function syncAudioHealth(turnId: string) {
@@ -1511,13 +2061,13 @@ export function App() {
         if (currentTurnIdRef.current) void syncAudioHealth(currentTurnIdRef.current);
       };
       const result = await provider.speak(next.text, ttsDiagnosticsCallbacks(recordSpeechStart));
-      if (!isStreamingWsProvider(result.spokenBy)) recordSpeechStart();
+      if (!isBufferedTtsProvider(result.spokenBy)) recordSpeechStart();
       speechLedgerRef.current = speechLedgerRef.current.map((item) =>
         item.id === next.id ? { ...item, status: "spoken", provider: result.spokenBy } : item
       );
       spokenCharsRef.current = Math.max(spokenCharsRef.current, next.end);
       spokenChunkCountRef.current = speechLedgerRef.current.filter((item) => item.status === "spoken").length;
-      const endPatch = isStreamingWsProvider(result.spokenBy) ? null : firstTimingPatch("firstSpeechEndMs");
+      const endPatch = isBufferedTtsProvider(result.spokenBy) ? null : firstTimingPatch("firstSpeechEndMs");
       syncAudioLedger(result.spokenBy);
       if (endPatch) updateAudioHealth(endPatch);
       if (endPatch && currentTurnIdRef.current) void syncAudioHealth(currentTurnIdRef.current);
@@ -1594,6 +2144,7 @@ export function App() {
     speechLedgerRef.current = [];
     currentTurnIdRef.current = null;
     currentTurnScratchModeRef.current = null;
+    exactSpeechProjectionRef.current = false;
     audioTimingBaseRef.current = null;
     audioHealthRef.current = null;
     setAudioHealth(null);
@@ -1721,6 +2272,11 @@ export function App() {
     return `${speechBufferRef.current} ${interimBufferRef.current}`.trim();
   }
 
+  function projectedAssistantSpeechText(text: string): string {
+    if (!speechProjectionEnabled) return text;
+    return projectSpeech(text, { exact: exactSpeechProjectionRef.current }).speechText;
+  }
+
   function queueAvailableSpeech(assistantText: string, force = false) {
     while (lastQueuedCharRef.current < assistantText.length) {
       const start = lastQueuedCharRef.current;
@@ -1737,7 +2293,11 @@ export function App() {
     options: { force?: boolean; final?: boolean; turnId?: string; spokenText?: string } = {}
   ) {
     if (!displayText.trim()) return;
-    const speechText = options.spokenText ?? displayText;
+    const speechText = projectedAssistantSpeechText(options.spokenText ?? displayText);
+    if (!speechText.trim()) {
+      setLiveAssistantText(displayText);
+      return;
+    }
     const previousSpeechText = liveAssistantTextRef.current;
     if (previousSpeechText && speechText !== previousSpeechText && !speechText.startsWith(previousSpeechText)) {
       console.warn("[Mortic] assistant text diverged from previously streamed text; keeping monotonic speech ledger", {
@@ -1774,6 +2334,7 @@ export function App() {
     if (options.final) {
       finishSpeechAfterQueueRef.current = true;
       finishSpeechTurnIfReady();
+      exactSpeechProjectionRef.current = false;
     }
 
     if (lastQueuedCharRef.current >= speechText.length && !speakingRef.current && speechQueueRef.current.length === 0) {
@@ -1947,7 +2508,13 @@ export function App() {
 
   async function sendTurn(text: string, options: { sttMetrics?: SttTurnMetrics } = {}) {
     const clean = text.trim();
-    if (!clean || pendingRef.current) return;
+    if (!clean) return;
+    if (pendingRef.current) {
+      queuedTurnRef.current = { text: clean, options };
+      setQueuedTurnPreview(clean);
+      setDraft("");
+      return;
+    }
     const turnScratchMode = scratchMode;
     if (needsModelTransitionPreflight(effectiveCodexModel) && (sparkPreflightPending || sparkCompactionPending || !sparkApproved)) {
       setState((current) => ({
@@ -1960,6 +2527,7 @@ export function App() {
     }
 
     resetSpeechPlayback();
+    exactSpeechProjectionRef.current = shouldUseExactSpeechProjection(clean);
     clearRecognitionBuffers(true);
     currentTurnScratchModeRef.current = turnScratchMode;
     setTurnPending(true);
@@ -2032,7 +2600,13 @@ export function App() {
       if (payload.type === "snapshot") {
         setState({ session: payload.session, loading: false, error: null });
         const turn = payload.turn;
-        if (!turn || turn.status === "running") return;
+        if (turn?.status === "running") {
+          setTurnPending(true);
+          currentTurnScratchModeRef.current = turn.scratchMode;
+          if (payload.replayText) handleDeltaText(payload.replayText, turn.scratchMode);
+          return;
+        }
+        if (!turn) return;
         setTurnPending(false);
         if (turn.responseEntryId) {
           const assistant = payload.session.transcript.find((entry) => entry.id === turn.responseEntryId);
@@ -2107,7 +2681,7 @@ export function App() {
       while (true) {
         await new Promise((resolve) => window.setTimeout(resolve, 500));
         const response = await fetch(`${api}/api/turn/${turnId}`);
-        const payload = await response.json();
+        const payload = (await response.json()) as TurnStatusResponse & { error?: string };
         if (!response.ok) {
           setState((current) => ({ ...current, error: payload.error ?? "Could not read turn status" }));
           setTurnPending(false);
@@ -2117,7 +2691,12 @@ export function App() {
         setState({ session: payload.session, loading: false, error: null });
         const turn = payload.turn as TurnRun | null;
 
-        if (!turn || turn.status === "running") {
+        if (turn?.status === "running") {
+          if (payload.replayText) handleDeltaText(payload.replayText, turn.scratchMode);
+          continue;
+        }
+
+        if (!turn) {
           continue;
         }
 
@@ -2233,7 +2812,7 @@ export function App() {
             audioBase64: segment.base64,
             mimeType: "audio/wav",
             language: "en-US",
-            prompt: "Codex, Mortic, Inworld, ElevenLabs, LiveKit, WebRTC, VAD, TTS, STT",
+            prompt: "Codex, Mortic, Deepgram, Nova, Inworld, ElevenLabs, LiveKit, WebRTC, VAD, TTS, STT",
             segmentIndex: index,
             segmentCount: recording.segments.length,
             recordingSessionId: recording.sessionId
@@ -2688,6 +3267,9 @@ export function App() {
       const payload = (await response.json()) as ProjectStateResponse & { error?: string };
       if (!response.ok || payload.error) throw new Error(payload.error ?? "Commit session failed");
       setProjectState(payload);
+      if (chartOpen || approveItemIds.length > 0) {
+        void refreshProjectChart({ preserveSelection: chartOpen });
+      }
     } catch (error) {
       setProjectError(error instanceof Error ? error.message : String(error));
     } finally {
@@ -2743,7 +3325,7 @@ export function App() {
     await runProjectAction("/api/project/checkpoint/manual", "Could not create manual checkpoint");
   }
 
-  async function updateExtraction(itemId: string, status: ExtractionStatus) {
+  async function patchExtraction(itemId: string, patch: UpdateExtractedItemRequest) {
     if (projectPending) return;
     setProjectPending(true);
     setProjectError(null);
@@ -2753,16 +3335,49 @@ export function App() {
         headers: {
           "Content-Type": "application/json"
         },
-        body: JSON.stringify({ status })
+        body: JSON.stringify(patch)
       });
       const payload = (await response.json()) as ProjectStateResponse & { error?: string };
       if (!response.ok || payload.error) throw new Error(payload.error ?? "Extraction update failed");
       setProjectState(payload);
+      if (patch.status === "approved") setExtractionReviewTab("approved");
+      if (patch.status === "approved" || patch.retire || chartOpen) {
+        void refreshProjectChart({ preserveSelection: chartOpen });
+      }
     } catch (error) {
       setProjectError(error instanceof Error ? error.message : String(error));
     } finally {
       setProjectPending(false);
     }
+  }
+
+  async function updateExtraction(itemId: string, status: ExtractionStatus) {
+    await patchExtraction(itemId, { status });
+  }
+
+  function beginEditExtraction(item: ExtractedItem) {
+    setEditingExtractionId(item.id);
+    setEditingExtractionTitle(item.title);
+    setEditingExtractionBody(item.body);
+  }
+
+  function cancelEditExtraction() {
+    setEditingExtractionId(null);
+    setEditingExtractionTitle("");
+    setEditingExtractionBody("");
+  }
+
+  async function saveExtractionEdit(itemId: string) {
+    const title = editingExtractionTitle.trim();
+    const body = editingExtractionBody.trim();
+    if (!title || !body) return;
+    await patchExtraction(itemId, { title, body });
+    cancelEditExtraction();
+  }
+
+  async function retireExtraction(itemId: string) {
+    await patchExtraction(itemId, { retire: true });
+    cancelEditExtraction();
   }
 
   async function copyText(text: string) {
@@ -2987,24 +3602,58 @@ export function App() {
   const activeProjectSource = activeProjectSession
     ? projectState?.sourceThreads.find((source) => source.id === activeProjectSession.sourceThreadId) ?? null
     : projectState?.sourceThreads[0] ?? null;
-  const activeExtractions = activeProjectSession
-    ? dedupeExtractionItems(projectState?.extractedItems.filter((item) => item.scratchSessionId === activeProjectSession.id && item.status !== "dismissed") ?? [])
+  const draftExtractions = activeProjectSession
+    ? dedupeExtractionItems(projectState?.extractedItems.filter((item) => item.scratchSessionId === activeProjectSession.id && isExtractionReviewCandidate(item)) ?? []).sort(extractionReviewSort)
     : [];
-  const draftExtractions = activeExtractions.filter((item) => item.status === "draft");
-  const approvedExtractions = projectState?.extractedItems.filter((item) => item.status === "approved") ?? [];
-  const extractionCounts = extractionTypeOrder
+  const approvedExtractions = dedupeExtractionItems(projectState?.extractedItems.filter((item) => item.status === "approved") ?? [])
+    .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
+  const reviewExtractions = extractionReviewTab === "approved" ? approvedExtractions : draftExtractions;
+  const pendingExtractionCounts = extractionTypeOrder
     .map((type) => ({
       type,
-      total: activeExtractions.filter((item) => item.type === type).length,
-      draft: activeExtractions.filter((item) => item.type === type && item.status === "draft").length,
-      approved: activeExtractions.filter((item) => item.type === type && item.status === "approved").length
+      total: draftExtractions.filter((item) => item.type === type).length
+    }))
+    .filter((item) => item.total > 0);
+  const reviewExtractionCounts = extractionTypeOrder
+    .map((type) => ({
+      type,
+      total: reviewExtractions.filter((item) => item.type === type).length
     }))
     .filter((item) => item.total > 0);
   const projectSources = projectState?.sourceThreads ?? [];
   const sourceCheckpoints = projectState?.sourceCheckpoints ?? [];
   const scratchSessions = projectState?.scratchSessions ?? [];
   const checkpointProposal = projectState?.project.pendingSourceCheckpoint ?? null;
-  const primaryExtraction = activeExtractions[0] ?? null;
+  const chartCheckpoints = chartState?.checkpoints ?? [];
+  const chartDeltas = chartState?.deltas ?? [];
+  const chartArtifacts = chartState?.artifacts ?? [];
+  const chartProviderRefs = chartState?.providerRefs ?? [];
+  const chartCodexStatus = chartState?.providerAdapters.find((adapter) => adapter.provider === "codex") ?? null;
+  const chartTimelineCheckpoints = [...chartCheckpoints].sort((left, right) => right.approvedAt.localeCompare(left.approvedAt));
+  const selectedChartCheckpoint = chartCheckpoints.find((checkpoint) => checkpoint.id === selectedChartCheckpointId) ?? chartCheckpoints.at(-1) ?? null;
+  const selectedChartDelta = chartDeltas.find((delta) => delta.id === selectedChartDeltaId) ?? null;
+  const selectedChartArtifact = selectedChartDelta
+    ? chartArtifacts.find((artifact) => artifact.id === selectedChartDelta.conversationArtifactId)
+    : null;
+  const selectedProviderRefs = selectedChartArtifact
+    ? chartProviderRefs.filter((ref) => selectedChartArtifact.providerRefIds.includes(ref.id))
+    : [];
+  const normalizedChartSearch = normalizeExtractionText(chartSearch);
+  const visibleChartDeltas = chartDeltas
+    .filter((delta) => !selectedChartCheckpoint || selectedChartCheckpoint.approvedDeltaIds.includes(delta.id))
+    .filter((delta) => chartTypeFilter === "all" || delta.type === chartTypeFilter)
+    .filter((delta) => {
+      if (!normalizedChartSearch) return true;
+      const artifact = chartArtifacts.find((candidate) => candidate.id === delta.conversationArtifactId);
+      return normalizeExtractionText(`${delta.title} ${delta.body} ${artifact?.title ?? ""}`).includes(normalizedChartSearch);
+    });
+  const chartDeltaCounts = extractionTypeOrder
+    .map((type) => ({
+      type,
+      total: chartDeltas.filter((delta) => delta.type === type && (!selectedChartCheckpoint || selectedChartCheckpoint.approvedDeltaIds.includes(delta.id))).length
+    }))
+    .filter((item) => item.total > 0);
+  const primaryExtraction = reviewExtractions[0] ?? null;
   const extractionPreview = primaryExtraction
     ? primaryExtraction.title
     : "No project updates compiled yet.";
@@ -3043,6 +3692,7 @@ export function App() {
     ttsStatus.availableProviders.includes(ttsProvider) ? ttsProviderLabels[ttsProvider] : "TTS unavailable",
     prewarm.status === "ready" ? "Scratch ready" : prewarm.status === "warming" ? "Warming" : null
   ].filter(Boolean).join(" · ");
+  const visibleTurnProgress = pending && progressVisible ? turnProgressSummary(activeTurn) : null;
   const progressPanel = activeTurn ? (
     <section className={`progress-panel progress-${activeTurn.status}`}>
       <div className="progress-header">
@@ -3112,10 +3762,12 @@ export function App() {
             text first {formatMs(activeTurn.metrics.firstDeltaMs)} · visible {formatMs(visibleAudioHealth.firstVisibleTextMs)} ·
             speakable {formatMs(visibleAudioHealth.firstSpeakableTextMs)} · queued {formatMs(visibleAudioHealth.firstSpeechQueuedMs)} ·
             speech start {formatMs(visibleAudioHealth.firstSpeechStartMs)}
-            {(visibleAudioHealth.provider === "elevenlabs-ws" || visibleAudioHealth.provider === "inworld-ws") && (
+            {isBufferedTtsProvider(visibleAudioHealth.provider) && (
               <>
                 {" "}
-                · ws connect {formatMs(visibleAudioHealth.ttsConnectMs)} · ws audio {formatMs(visibleAudioHealth.firstAudioChunkMs)} ·
+                · {isStreamingWsProvider(visibleAudioHealth.provider) ? "ws connect" : "tts response"}{" "}
+                {formatMs(visibleAudioHealth.ttsConnectMs)}
+                · audio bytes {formatMs(visibleAudioHealth.firstAudioChunkMs)} ·
                 audio play {formatMs(visibleAudioHealth.firstAudioPlayMs)}
               </>
             )}{" "}
@@ -3130,7 +3782,7 @@ export function App() {
             <span>Queued {visibleAudioHealth.queuedChars ?? 0} chars</span>
             <span>Spoken {visibleAudioHealth.spokenChars ?? 0} chars</span>
             <span>Chunks {visibleAudioHealth.spokenChunks}</span>
-            {(visibleAudioHealth.provider === "elevenlabs-ws" || visibleAudioHealth.provider === "inworld-ws") && <span>Underruns {visibleAudioHealth.audioBufferUnderruns ?? 0}</span>}
+            {isBufferedTtsProvider(visibleAudioHealth.provider) && <span>Underruns {visibleAudioHealth.audioBufferUnderruns ?? 0}</span>}
             {(visibleAudioHealth.provider === "elevenlabs-ws" || visibleAudioHealth.provider === "inworld-ws") && (
               <span>
                 Close {visibleAudioHealth.ttsCloseCode ?? "-"}
@@ -3200,6 +3852,9 @@ export function App() {
               </button>
             </div>
             <div className="rail-actions">
+              <button type="button" onClick={() => void openProjectChart()} disabled={chartPending}>
+                Chart
+              </button>
               <button type="button" onClick={() => void openCanonicalState()} disabled={canonicalStatePending}>
                 State
               </button>
@@ -3426,6 +4081,15 @@ export function App() {
                 <strong>{speechStateLabel}</strong>
               </span>
             </div>
+            {visibleTurnProgress && (
+              <section className="turn-progress-strip" aria-label="Current turn progress">
+                <div>
+                  <span>{visibleTurnProgress.phase}</span>
+                  {visibleTurnProgress.detail && <p>{visibleTurnProgress.detail}</p>}
+                </div>
+                <strong>{formatMs(visibleTurnProgress.elapsedMs)}</strong>
+              </section>
+            )}
             <div className={`agent-orb agent-${agentState} ${recognizing ? "agent-hearing" : ""} ${speechPhase === "speaking" ? "agent-speaking" : ""}`}>
               <div className="orb-halo" />
               <div className="orb-core">
@@ -3468,6 +4132,12 @@ export function App() {
                       </div>
                     </details>
                   )}
+                </section>
+              )}
+              {queuedTurnPreview && (
+                <section className="compact-turn compact-queued">
+                  <span>Queued</span>
+                  <p>{queuedTurnPreview}</p>
                 </section>
               )}
             </article>
@@ -3523,7 +4193,7 @@ export function App() {
               }}
             >
               <textarea value={draft} onChange={(event) => setDraft(event.target.value)} placeholder="Type a scratch turn" rows={3} />
-              <button type="submit" disabled={pending || !draft.trim() || sparkBlocked}>{pending ? "Running" : "Send"}</button>
+              <button type="submit" disabled={!draft.trim() || sparkBlocked}>{pending ? "Queue" : "Send"}</button>
             </form>
           </section>
 
@@ -3541,15 +4211,16 @@ export function App() {
                 <h2>{draftExtractions.length} to review</h2>
               </div>
               <div className="project-header-actions">
+                <button type="button" onClick={() => void openProjectChart()} disabled={chartPending}>Chart</button>
                 <button type="button" onClick={() => void openCanonicalState()} disabled={canonicalStatePending}>Open State</button>
-                <button type="button" onClick={() => void commitCurrentSession(activeExtractions.map((item) => item.id))} disabled={projectPending || pending || activeExtractions.length === 0}>Approve all</button>
+                <button type="button" onClick={() => void commitCurrentSession(reviewExtractions.map((item) => item.id))} disabled={projectPending || pending || reviewExtractions.length === 0}>Approve all</button>
               </div>
             </div>
             <div className="extraction-chip-row" aria-label="Project update counts">
-              {extractionCounts.length === 0 ? (
+              {pendingExtractionCounts.length === 0 ? (
                 <span className="extraction-chip extraction-chip-empty">No updates</span>
               ) : (
-                extractionCounts.map((item) => (
+                pendingExtractionCounts.map((item) => (
                   <span key={item.type} className={`extraction-chip extraction-chip-${item.type}`}>
                     <strong>{item.total}</strong> {extractionTypeShortLabels[item.type]}
                   </span>
@@ -3658,55 +4329,115 @@ export function App() {
             <div className="extraction-review-header">
               <div>
                 <span>Project updates</span>
-                <h2>{draftExtractions.length} waiting for review</h2>
-                <p>Approve only the updates that should enter Mortic canonical state.</p>
+                <h2>{extractionReviewTab === "approved" ? `${approvedExtractions.length} approved cards` : `${draftExtractions.length} waiting for review`}</h2>
+                <p>{extractionReviewTab === "approved" ? "Edit approved canonical cards or retire cards that should leave active state." : "Approve only the updates that should enter Mortic canonical state."}</p>
               </div>
               <div className="project-header-actions">
+                <button type="button" onClick={() => void openProjectChart()} disabled={chartPending}>Chart</button>
                 <button type="button" onClick={() => void openCanonicalState()} disabled={canonicalStatePending}>Open State</button>
                 <button type="button" onClick={() => setExtractionReviewOpen(false)}>Close</button>
               </div>
             </div>
             <div className="extraction-chip-row extraction-modal-chips">
-              {extractionCounts.length === 0 ? (
+              {reviewExtractionCounts.length === 0 ? (
                 <span className="extraction-chip extraction-chip-empty">No updates found</span>
               ) : (
-                extractionCounts.map((item) => (
+                reviewExtractionCounts.map((item) => (
                   <span key={item.type} className={`extraction-chip extraction-chip-${item.type}`}>
                     <strong>{item.total}</strong> {extractionTypeLabels[item.type]}
                   </span>
                 ))
               )}
-              {approvedExtractions.length > 0 && <span className="extraction-chip extraction-chip-approved"><strong>{approvedExtractions.length}</strong> approved total</span>}
+            </div>
+            <div className="extraction-review-tabs" role="tablist" aria-label="Project update review tabs">
+              <button
+                type="button"
+                className={extractionReviewTab === "pending" ? "selected" : ""}
+                onClick={() => {
+                  cancelEditExtraction();
+                  setExtractionReviewTab("pending");
+                }}
+              >
+                Pending <strong>{draftExtractions.length}</strong>
+              </button>
+              <button
+                type="button"
+                className={extractionReviewTab === "approved" ? "selected" : ""}
+                onClick={() => {
+                  cancelEditExtraction();
+                  setExtractionReviewTab("approved");
+                }}
+              >
+                Approved <strong>{approvedExtractions.length}</strong>
+              </button>
             </div>
             <div className="extraction-review-list">
-              {activeExtractions.length === 0 && (
-                <p className="empty-inline">Compile a session after real decisions, tasks, risks, priorities, constraints, or deferred work appear in the scratch transcript.</p>
+              {reviewExtractions.length === 0 && (
+                <p className="empty-inline">
+                  {extractionReviewTab === "approved"
+                    ? "No approved canonical cards yet."
+                    : "Compile a session after real decisions, tasks, risks, priorities, constraints, or deferred work appear in the scratch transcript."}
+                </p>
               )}
-              {activeExtractions.map((item) => (
-                <article key={item.id} className={`extraction-item extraction-${item.type} extraction-status-${item.status}`}>
-                  <div className="extraction-topline">
-                    <span>{extractionTypeLabels[item.type]}</span>
-                    <em>{item.delta ? `${extractionStatusLabels[item.status]} · ${item.delta}` : extractionStatusLabels[item.status]}</em>
-                  </div>
-                  <h3>{item.title}</h3>
-                  <p>{item.body}</p>
-                  <div className="extraction-why">
-                    <strong>Why picked</strong>
-                    <span>{item.selectionReason ?? extractionReasons[item.type]}</span>
-                    {item.transcriptAnchor?.quote && (
+              {reviewExtractions.map((item) => {
+                const actionLabel = extractionActionLabel(item);
+                const editing = editingExtractionId === item.id;
+                const retired = item.lifecycleStatusAfter === "dropped";
+                return (
+                  <article key={item.id} className={`extraction-item extraction-${item.type} extraction-status-${item.status}`}>
+                    <div className="extraction-topline">
+                      <span>{extractionTypeLabels[item.type]}</span>
+                      <em>{retired ? "Retired" : actionLabel ? `${extractionStatusLabels[item.status]} · ${actionLabel}` : extractionStatusLabels[item.status]}</em>
+                    </div>
+                    {editing ? (
+                      <div className="extraction-edit-form">
+                        <label>
+                          <span>Title</span>
+                          <input value={editingExtractionTitle} onChange={(event) => setEditingExtractionTitle(event.target.value)} />
+                        </label>
+                        <label>
+                          <span>Body</span>
+                          <textarea value={editingExtractionBody} onChange={(event) => setEditingExtractionBody(event.target.value)} rows={5} />
+                        </label>
+                      </div>
+                    ) : (
                       <>
-                        <small>{extractionEvidenceLabel(item)}</small>
-                        <q>{item.transcriptAnchor.quote}</q>
+                        <h3>{item.title}</h3>
+                        <p>{item.body}</p>
                       </>
                     )}
-                    <em>{item.delta ? `Delta: ${item.delta}. ` : ""}Confidence {Math.round(item.confidence * 100)}%</em>
-                  </div>
-                  <div className="extraction-actions">
-                    <button type="button" onClick={() => void updateExtraction(item.id, "approved")} disabled={projectPending || item.status === "approved"}>Approve</button>
-                    <button type="button" onClick={() => void updateExtraction(item.id, "dismissed")} disabled={projectPending}>Dismiss</button>
-                  </div>
-                </article>
-              ))}
+                    <div className="extraction-why">
+                      <strong>Why picked</strong>
+                      <span>{item.selectionReason ?? extractionReasons[item.type]}</span>
+                      {item.transcriptAnchor?.quote && (
+                        <>
+                          <small>{extractionEvidenceLabel(item)}</small>
+                          <q>{item.transcriptAnchor.quote}</q>
+                        </>
+                      )}
+                      <em>{actionLabel ? `Action: ${actionLabel}. ` : item.delta ? `Delta: ${item.delta}. ` : ""}Confidence {Math.round(item.confidence * 100)}%</em>
+                    </div>
+                    <div className="extraction-actions">
+                      {editing ? (
+                        <>
+                          <button type="button" onClick={() => void saveExtractionEdit(item.id)} disabled={projectPending || !editingExtractionTitle.trim() || !editingExtractionBody.trim()}>Save</button>
+                          <button type="button" onClick={cancelEditExtraction} disabled={projectPending}>Cancel</button>
+                        </>
+                      ) : extractionReviewTab === "approved" ? (
+                        <>
+                          <button type="button" onClick={() => beginEditExtraction(item)} disabled={projectPending || retired}>Edit</button>
+                          <button type="button" onClick={() => void retireExtraction(item.id)} disabled={projectPending || retired}>{retired ? "Retired" : "Retire"}</button>
+                        </>
+                      ) : (
+                        <>
+                          <button type="button" onClick={() => void updateExtraction(item.id, "approved")} disabled={projectPending}>Approve</button>
+                          <button type="button" onClick={() => void updateExtraction(item.id, "dismissed")} disabled={projectPending}>Dismiss</button>
+                        </>
+                      )}
+                    </div>
+                  </article>
+                );
+              })}
             </div>
           </section>
         </div>
@@ -3717,7 +4448,7 @@ export function App() {
           <section className="handoff-review-modal" role="dialog" aria-modal="true" aria-label="Handoff review" onClick={(event) => event.stopPropagation()}>
             <div className="handoff-review-header">
               <div>
-                <span>{activeExtractions.length} candidates pending</span>
+                <span>{reviewExtractions.length} candidates pending</span>
                 <h2>Handoff Review</h2>
                 <p>Review the scratch handoff before carrying it back to the source thread.</p>
               </div>
@@ -3725,8 +4456,8 @@ export function App() {
             </div>
             <div className="handoff-review-body">
               <aside>
-                {activeExtractions.length === 0 && <p className="empty-inline">No extraction candidates yet.</p>}
-                {activeExtractions.slice(0, 5).map((item) => (
+                {reviewExtractions.length === 0 && <p className="empty-inline">No extraction candidates yet.</p>}
+                {reviewExtractions.slice(0, 5).map((item) => (
                   <article key={item.id} className={item.status === "approved" ? "active" : ""}>
                     <span>{extractionTypeLabels[item.type]}</span>
                     <strong>{item.title}</strong>
@@ -3766,6 +4497,219 @@ export function App() {
               <button type="button" onClick={() => void copyHandoffText(shortHandoff)} disabled={!shortHandoff}>Copy Short</button>
               <button type="button" className="primary-action" onClick={() => void copyHandoffText(fullHandoff || handoff)} disabled={!fullHandoff && !handoff}>Copy Full</button>
             </footer>
+          </section>
+        </div>
+      )}
+
+      {chartOpen && chartState && (
+        <div className="modal-backdrop" role="presentation" onClick={() => setChartOpen(false)}>
+          <section className="chart-modal" role="dialog" aria-modal="true" aria-label="Canonical delta chart" onClick={(event) => event.stopPropagation()}>
+            <div className="chart-modal-header">
+              <div>
+                <span>Canonical Chart</span>
+                <h2>{chartState.project.title}</h2>
+                <p>{chartState.chartPath}</p>
+              </div>
+              <div className="project-header-actions">
+                <button type="button" onClick={() => void refreshProjectChart({ preserveSelection: true })} disabled={chartPending}>Refresh</button>
+                <button type="button" onClick={() => setChartOpen(false)}>Close</button>
+              </div>
+            </div>
+            <div className="chart-toolbar">
+              <label>
+                <span>Search</span>
+                <input value={chartSearch} onChange={(event) => setChartSearch(event.target.value)} placeholder="Delta or artifact" />
+              </label>
+              <label>
+                <span>Type</span>
+                <select value={chartTypeFilter} onChange={(event) => setChartTypeFilter(event.target.value as ExtractedItem["type"] | "all")}>
+                  <option value="all">All</option>
+                  {extractionTypeOrder.map((type) => (
+                    <option key={type} value={type}>{extractionTypeShortLabels[type]}</option>
+                  ))}
+                </select>
+              </label>
+              <div className="chart-adapter-status">
+                <span>Codex</span>
+                <strong>{chartCodexStatus?.loginStatus ?? "unknown"}</strong>
+                {chartCodexStatus?.loginCommand && <code>{chartCodexStatus.loginCommand}</code>}
+              </div>
+            </div>
+            <div className="chart-body">
+              <aside className="chart-checkpoints">
+                <div className="chart-pane-heading">
+                  <span>Timeline</span>
+                  <strong>{chartCheckpoints.length}</strong>
+                </div>
+                {chartCheckpoints.length === 0 && <p className="empty-inline">No approved checkpoints yet.</p>}
+                <div className="chart-timeline">
+                  {chartTimelineCheckpoints.map((checkpoint) => {
+                    const checkpointDeltas = chartDeltas.filter((delta) => checkpoint.approvedDeltaIds.includes(delta.id));
+                    return (
+                      <article key={checkpoint.id} className={checkpoint.id === selectedChartCheckpoint?.id ? "selected-chart-timeline" : ""}>
+                        <button
+                          type="button"
+                          className="chart-timeline-checkpoint"
+                          onClick={() => {
+                            setSelectedChartCheckpointId(checkpoint.id);
+                            const firstDelta = checkpointDeltas[0];
+                            setSelectedChartDeltaId(firstDelta?.id ?? "");
+                          }}
+                        >
+                          <span>{chartDateLabel(checkpoint.approvedAt)}</span>
+                          <strong>{checkpoint.title}</strong>
+                          <em>{checkpoint.approvedDeltaIds.length} delta{checkpoint.approvedDeltaIds.length === 1 ? "" : "s"}{checkpoint.imported ? " · imported" : ""}</em>
+                        </button>
+                        <div className="chart-timeline-events">
+                          {checkpointDeltas.slice(0, 5).map((delta) => (
+                            <button
+                              key={delta.id}
+                              type="button"
+                              className={delta.id === selectedChartDelta?.id ? "selected-chart-node" : ""}
+                              onClick={() => {
+                                setSelectedChartCheckpointId(checkpoint.id);
+                                setSelectedChartDeltaId(delta.id);
+                              }}
+                            >
+                              <span>{deltaLifecycleLabel(delta)} · v{delta.version}</span>
+                              <strong>{delta.title}</strong>
+                            </button>
+                          ))}
+                          {checkpointDeltas.length > 5 && <em>{checkpointDeltas.length - 5} more deltas</em>}
+                        </div>
+                      </article>
+                    );
+                  })}
+                </div>
+              </aside>
+              <section className="chart-deltas">
+                <div className="chart-pane-heading">
+                  <span>Deltas</span>
+                  <strong>{visibleChartDeltas.length}</strong>
+                </div>
+                <div className="chart-type-row">
+                  {chartDeltaCounts.map((item) => (
+                    <span key={item.type} className={`extraction-chip extraction-chip-${item.type}`}>
+                      <strong>{item.total}</strong> {extractionTypeShortLabels[item.type]}
+                    </span>
+                  ))}
+                </div>
+                <div className="chart-delta-list">
+                  {visibleChartDeltas.length === 0 && <p className="empty-inline">No approved deltas match.</p>}
+                  {visibleChartDeltas.map((delta) => (
+                    <button
+                      key={delta.id}
+                      type="button"
+                      className={`chart-delta-card extraction-${delta.type} ${delta.id === selectedChartDelta?.id ? "selected-chart-node" : ""}`}
+                      onClick={() => setSelectedChartDeltaId(delta.id)}
+                    >
+                      <span>{extractionTypeLabels[delta.type]} · v{delta.version} · {delta.status} · {deltaLifecycleLabel(delta)}</span>
+                      <strong>{delta.title}</strong>
+                      <em>{artifactTitle(chartArtifacts.find((artifact) => artifact.id === delta.conversationArtifactId))}</em>
+                    </button>
+                  ))}
+                </div>
+              </section>
+              <section className="chart-provenance">
+                <div className="chart-pane-heading">
+                  <span>Provenance</span>
+                  <strong>{selectedChartDelta ? `v${selectedChartDelta.version}` : "-"}</strong>
+                </div>
+                {!selectedChartDelta && <p className="empty-inline">Select a delta.</p>}
+                {selectedChartDelta && (
+                  <>
+                    <article className="chart-detail-card">
+                      <span>{extractionTypeLabels[selectedChartDelta.type]}</span>
+                      <h3>{selectedChartDelta.title}</h3>
+                      <p>{selectedChartDelta.body}</p>
+                      <div className="chart-meta-grid">
+                        <span>Checkpoint</span>
+                        <strong>{selectedChartCheckpoint?.title ?? selectedChartDelta.checkpointId}</strong>
+                        <span>Stable key</span>
+                        <code>{selectedChartDelta.stableKey}</code>
+                        <span>Lifecycle</span>
+                        <strong>{deltaLifecycleLabel(selectedChartDelta)}</strong>
+                        <span>Canonical item</span>
+                        <code>{selectedChartDelta.canonicalItemId}</code>
+                        <span>Target</span>
+                        <code>{selectedChartDelta.targetCanonicalItemId ?? "new item"}</code>
+                        <span>Operation</span>
+                        <strong>{selectedChartDelta.canonicalOperation ?? "add"}</strong>
+                        <span>Artifact</span>
+                        <strong>{artifactTitle(selectedChartArtifact ?? undefined)}</strong>
+                        <span>Evidence</span>
+                        <strong>{selectedChartDelta.evidenceSource ?? "unknown"} {selectedChartDelta.evidenceEntryId ? `· ${selectedChartDelta.evidenceEntryId}` : ""}</strong>
+                      </div>
+                      {selectedChartDelta.reconciliationReason && <p>{selectedChartDelta.reconciliationReason}</p>}
+                      {selectedChartDelta.reconcilesWith && selectedChartDelta.reconcilesWith.length > 0 && (
+                        <div className="chart-reconcile-list">
+                          {selectedChartDelta.reconcilesWith.map((item) => (
+                            <span key={item.id}>{item.title} · {item.status} · {Math.round(item.score * 100)}%</span>
+                          ))}
+                        </div>
+                      )}
+                      {selectedChartDelta.evidenceQuote && <q>{selectedChartDelta.evidenceQuote}</q>}
+                    </article>
+                    <article className="chart-detail-card">
+                      <span>Local Artifact</span>
+                      <h3>{artifactTitle(selectedChartArtifact ?? undefined)}</h3>
+                      <div className="chart-path-list">
+                        {artifactPreview?.paths.transcript && <code>{artifactPreview.paths.transcript}</code>}
+                        {artifactPreview?.paths.handoff && <code>{artifactPreview.paths.handoff}</code>}
+                        {artifactPreview?.paths.eventLog && <code>{artifactPreview.paths.eventLog}</code>}
+                      </div>
+                      {artifactPending && <p className="empty-inline">Loading artifact.</p>}
+                      {artifactPreview?.transcriptPreview && (
+                        <details className="chart-preview" open>
+                          <summary>Transcript</summary>
+                          <ChartTranscriptPreview markdown={artifactPreview.transcriptPreview} />
+                        </details>
+                      )}
+                      {artifactPreview?.handoffPreview && (
+                        <details className="chart-preview">
+                          <summary>Handoff</summary>
+                          <pre>{artifactPreview.handoffPreview}</pre>
+                        </details>
+                      )}
+                      {artifactPreview?.eventPreview && (
+                        <details className="chart-preview">
+                          <summary>Events</summary>
+                          <pre>{artifactPreview.eventPreview}</pre>
+                        </details>
+                      )}
+                    </article>
+                    <article className="chart-detail-card">
+                      <span>Provider References</span>
+                      {selectedProviderRefs.length === 0 && <p className="empty-inline">No provider reference.</p>}
+                      {selectedProviderRefs.map((ref) => (
+                        <section key={ref.id} className="provider-ref-card">
+                          <div>
+                            <strong>{providerRefTitle(ref)}</strong>
+                            <code>{ref.providerRefId}</code>
+                          </div>
+                          <div className="chart-meta-grid">
+                            <span>Thread</span>
+                            <strong>{ref.threadId ?? "-"}</strong>
+                            <span>Access</span>
+                            <strong>{ref.accessPreset ?? "-"}</strong>
+                            <span>Resume</span>
+                            <strong>{providerActionText(ref.actions.resume, "resume")}</strong>
+                            <span>Fork</span>
+                            <strong>{providerActionText(ref.actions.fork, "fork")}</strong>
+                            <span>Archive</span>
+                            <strong>{providerActionText(ref.actions.archive, "archive")}</strong>
+                          </div>
+                          <div className="provider-ref-actions">
+                            <button type="button" onClick={() => void copyText(ref.openTarget ?? ref.providerRefId)} disabled={!ref.openTarget && !ref.providerRefId}>Copy</button>
+                            <button type="button" onClick={() => ref.openTarget && window.open(ref.openTarget, "_blank", "noopener,noreferrer")} disabled={!ref.openTarget}>Open</button>
+                          </div>
+                        </section>
+                      ))}
+                    </article>
+                  </>
+                )}
+              </section>
+            </div>
           </section>
         </div>
       )}

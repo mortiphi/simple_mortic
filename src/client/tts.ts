@@ -1,6 +1,9 @@
 import type { ElevenLabsWsServerMessage, TtsProvider } from "../shared/types.js";
 
 const ELEVENLABS_CLIENT_TIMEOUT_MS = 6000;
+const DEEPGRAM_CLIENT_TIMEOUT_MS = 15000;
+const DEEPGRAM_AUDIO_LEAD_SECONDS = 0.08;
+const DEEPGRAM_GAP_REPORT_THRESHOLD_MS = 40;
 const ELEVENLABS_FAILURE_COOLDOWN_MS = 30000;
 const ELEVENLABS_WS_CONNECT_TIMEOUT_MS = 6000;
 const PCM_WS_FIRST_AUDIO_TIMEOUT_MS = 7000;
@@ -123,7 +126,16 @@ export function createBrowserTtsProvider(): RuntimeTtsProvider {
   };
 }
 
-export function createElevenLabsTtsProvider(apiBase: string, fallback: RuntimeTtsProvider): RuntimeTtsProvider {
+function createHttpAudioTtsProvider(params: {
+  apiBase: string;
+  disableFallbackAfterAudioStarted?: boolean;
+  fallback: RuntimeTtsProvider;
+  id: TtsProvider;
+  label: string;
+  path: string;
+  retryAttempts?: number;
+  timeoutMs: number;
+}): RuntimeTtsProvider {
   let cancelGeneration = 0;
   let controller: AbortController | null = null;
   let audio: HTMLAudioElement | null = null;
@@ -131,6 +143,7 @@ export function createElevenLabsTtsProvider(apiBase: string, fallback: RuntimeTt
   let disabledUntil = 0;
   let lastFailure = "";
   let bypassCurrentTurn = false;
+  let playedAudioThisTurn = false;
 
   function cleanup(): void {
     if (objectUrl) {
@@ -142,7 +155,7 @@ export function createElevenLabsTtsProvider(apiBase: string, fallback: RuntimeTt
   }
 
   async function playAudioBlob(blob: Blob, generation: number, callbacks?: TtsSpeakCallbacks): Promise<TtsSpeakResult> {
-    if (generation !== cancelGeneration) return { spokenBy: "elevenlabs" };
+    if (generation !== cancelGeneration) return { spokenBy: params.id };
     objectUrl = URL.createObjectURL(blob);
     audio = new Audio(objectUrl);
     await new Promise<void>((resolve, reject) => {
@@ -151,44 +164,55 @@ export function createElevenLabsTtsProvider(apiBase: string, fallback: RuntimeTt
         return;
       }
 
-      audio.onplay = () => callbacks?.onStart?.();
+      audio.onplay = () => {
+        playedAudioThisTurn = true;
+        callbacks?.onStart?.();
+      };
       audio.onended = () => resolve();
-      audio.onerror = () => reject(new Error("ElevenLabs audio playback failed"));
+      audio.onerror = () => reject(new Error(`${params.label} audio playback failed`));
       const playPromise = audio.play();
       if (playPromise) {
-        playPromise.catch((error) => reject(new Error(`ElevenLabs audio playback failed: ${errorMessage(error)}`)));
+        playPromise.catch((error) => reject(new Error(`${params.label} audio playback failed: ${errorMessage(error)}`)));
       }
     });
-    return { spokenBy: "elevenlabs" };
+    return { spokenBy: params.id };
   }
 
   return {
-    id: "elevenlabs",
+    id: params.id,
     beginTurn(): void {
       bypassCurrentTurn = false;
+      playedAudioThisTurn = false;
     },
     async speak(text: string, callbacks?: TtsSpeakCallbacks): Promise<TtsSpeakResult> {
       const generation = cancelGeneration;
       if (bypassCurrentTurn || Date.now() < disabledUntil) {
         const reason = bypassCurrentTurn
-          ? `ElevenLabs unavailable this turn after ${lastFailure || "a recent failure"}`
-          : `ElevenLabs cooling down after ${lastFailure || "a recent failure"}`;
-        const fallbackResult = await fallback.speak(text, callbacks);
+          ? `${params.label} unavailable this turn after ${lastFailure || "a recent failure"}`
+          : `${params.label} cooling down after ${lastFailure || "a recent failure"}`;
+        if (params.disableFallbackAfterAudioStarted && playedAudioThisTurn) {
+          throw new Error(reason);
+        }
+        const fallbackResult = await params.fallback.speak(text, callbacks);
         return {
           spokenBy: fallbackResult.spokenBy,
           fallbackReason: fallbackChain(reason, fallbackResult.fallbackReason)
         };
       }
 
-      let timedOut = false;
-      let timeoutId: number | undefined;
-      try {
+      const maxAttempts = Math.max(1, 1 + (params.retryAttempts ?? 0));
+      let lastError: unknown;
+      let lastTimedOut = false;
+      for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+        let timedOut = false;
+        let timeoutId: number | undefined;
+        try {
         controller = new AbortController();
         timeoutId = window.setTimeout(() => {
           timedOut = true;
           controller?.abort();
-        }, ELEVENLABS_CLIENT_TIMEOUT_MS);
-        const response = await fetch(`${apiBase}/api/tts/elevenlabs/stream`, {
+        }, params.timeoutMs);
+        const response = await fetch(`${params.apiBase}${params.path}`, {
           method: "POST",
           headers: {
             "Content-Type": "application/json"
@@ -199,7 +223,7 @@ export function createElevenLabsTtsProvider(apiBase: string, fallback: RuntimeTt
 
         if (!response.ok) {
           const payload = await response.json().catch(() => null);
-          throw new Error(payload?.error ?? `ElevenLabs TTS failed: ${response.status}`);
+          throw new Error(payload?.error ?? `${params.label} TTS failed: ${response.status}`);
         }
 
         const blob = await response.blob();
@@ -209,21 +233,32 @@ export function createElevenLabsTtsProvider(apiBase: string, fallback: RuntimeTt
         return result;
       } catch (error) {
         if (generation !== cancelGeneration || (error instanceof DOMException && error.name === "AbortError" && !timedOut)) {
-          return { spokenBy: "elevenlabs" };
+          return { spokenBy: params.id };
         }
-        const fallbackReason = timedOut ? `timed out after ${ELEVENLABS_CLIENT_TIMEOUT_MS} ms` : errorMessage(error);
-        disabledUntil = Date.now() + ELEVENLABS_FAILURE_COOLDOWN_MS;
-        lastFailure = fallbackReason;
-        bypassCurrentTurn = true;
-        const fallbackResult = await fallback.speak(text, callbacks);
-        return {
-          spokenBy: fallbackResult.spokenBy,
-          fallbackReason: fallbackChain(`ElevenLabs failed: ${fallbackReason}`, fallbackResult.fallbackReason)
-        };
+        lastError = error;
+        lastTimedOut = timedOut;
+        if (attempt < maxAttempts) {
+          callbacks?.onStatus?.(`${params.label} retrying chunk after ${timedOut ? `timed out after ${params.timeoutMs} ms` : errorMessage(error)}`);
+          continue;
+        }
       } finally {
         if (timeoutId !== undefined) window.clearTimeout(timeoutId);
         cleanup();
       }
+      }
+
+      const fallbackReason = lastTimedOut ? `timed out after ${params.timeoutMs} ms` : errorMessage(lastError);
+      disabledUntil = Date.now() + ELEVENLABS_FAILURE_COOLDOWN_MS;
+      lastFailure = fallbackReason;
+      bypassCurrentTurn = true;
+      if (params.disableFallbackAfterAudioStarted && playedAudioThisTurn) {
+        throw new Error(`${params.label} stopped after audio started: ${fallbackReason}`);
+      }
+      const fallbackResult = await params.fallback.speak(text, callbacks);
+      return {
+        spokenBy: fallbackResult.spokenBy,
+        fallbackReason: fallbackChain(`${params.label} failed: ${fallbackReason}`, fallbackResult.fallbackReason)
+      };
     },
     cancel(): void {
       cancelGeneration += 1;
@@ -233,9 +268,244 @@ export function createElevenLabsTtsProvider(apiBase: string, fallback: RuntimeTt
         audio.src = "";
       }
       cleanup();
+      params.fallback.cancel();
+    }
+  };
+}
+
+function createDeepgramRestTtsProvider(apiBase: string, fallback: RuntimeTtsProvider): RuntimeTtsProvider {
+  let cancelGeneration = 0;
+  let audioContext: AudioContext | null = null;
+  let nextPlaybackTime = 0;
+  let disabledUntil = 0;
+  let lastFailure = "";
+  let bypassCurrentTurn = false;
+  let playedAudioThisTurn = false;
+  let firstAudioResponseReported = false;
+  let firstAudioChunkReported = false;
+  let firstAudioPlayReported = false;
+  let scheduledChunks = 0;
+  let maxGapMs = 0;
+  let turnCallbacks: TtsSpeakCallbacks | undefined;
+  const controllers = new Set<AbortController>();
+  const sources = new Set<AudioBufferSourceNode>();
+
+  function updateCallbacks(callbacks?: TtsSpeakCallbacks): void {
+    if (callbacks) turnCallbacks = callbacks;
+  }
+
+  function reportStatus(status: string): void {
+    turnCallbacks?.onStatus?.(status);
+  }
+
+  async function ensureAudioContext(): Promise<AudioContext> {
+    if (!audioContext) {
+      const Constructor = audioContextConstructor();
+      if (!Constructor) throw new Error("Web Audio is unavailable in this browser");
+      audioContext = new Constructor();
+      nextPlaybackTime = audioContext.currentTime;
+    }
+    if (audioContext.state === "suspended") {
+      await audioContext.resume();
+    }
+    return audioContext;
+  }
+
+  async function fetchAudioBuffer(text: string, generation: number, callbacks?: TtsSpeakCallbacks): Promise<AudioBuffer> {
+    updateCallbacks(callbacks);
+    const context = await ensureAudioContext();
+    let lastError: unknown;
+    let lastTimedOut = false;
+
+    for (let attempt = 1; attempt <= 2; attempt += 1) {
+      const controller = new AbortController();
+      controllers.add(controller);
+      let timedOut = false;
+      const timeoutId = window.setTimeout(() => {
+        timedOut = true;
+        controller.abort();
+      }, DEEPGRAM_CLIENT_TIMEOUT_MS);
+
+      try {
+        const response = await fetch(`${apiBase}/api/tts/deepgram/stream`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json"
+          },
+          body: JSON.stringify({ text }),
+          signal: controller.signal
+        });
+
+        if (!response.ok) {
+          const payload = await response.json().catch(() => null);
+          throw new Error(payload?.error ?? `Deepgram TTS failed: ${response.status}`);
+        }
+
+        if (!firstAudioResponseReported) {
+          firstAudioResponseReported = true;
+          turnCallbacks?.onConnect?.();
+        }
+        const audioBytes = await response.arrayBuffer();
+        if (generation !== cancelGeneration) throw new Error("Deepgram synthesis cancelled");
+        if (!firstAudioChunkReported) {
+          firstAudioChunkReported = true;
+          turnCallbacks?.onAudioChunk?.();
+        }
+        return await context.decodeAudioData(audioBytes.slice(0));
+      } catch (error) {
+        if (generation !== cancelGeneration || (error instanceof DOMException && error.name === "AbortError" && !timedOut)) {
+          throw error;
+        }
+        lastError = error;
+        lastTimedOut = timedOut;
+        if (attempt < 2) {
+          reportStatus(`Deepgram retrying chunk after ${timedOut ? `timed out after ${DEEPGRAM_CLIENT_TIMEOUT_MS} ms` : errorMessage(error)}`);
+        }
+      } finally {
+        window.clearTimeout(timeoutId);
+        controllers.delete(controller);
+      }
+    }
+
+    throw new Error(lastTimedOut ? `timed out after ${DEEPGRAM_CLIENT_TIMEOUT_MS} ms` : errorMessage(lastError));
+  }
+
+  async function scheduleAudioBuffer(buffer: AudioBuffer, generation: number, callbacks?: TtsSpeakCallbacks): Promise<void> {
+    updateCallbacks(callbacks);
+    if (generation !== cancelGeneration) return;
+    const context = await ensureAudioContext();
+    if (generation !== cancelGeneration) return;
+
+    const now = context.currentTime;
+    if (firstAudioPlayReported && nextPlaybackTime < now) {
+      const gapMs = Math.round((now - nextPlaybackTime) * 1000);
+      if (gapMs >= DEEPGRAM_GAP_REPORT_THRESHOLD_MS) {
+        maxGapMs = Math.max(maxGapMs, gapMs);
+        turnCallbacks?.onBufferUnderrun?.();
+        reportStatus(`Deepgram buffer gap ${gapMs} ms`);
+      }
+    }
+    if (nextPlaybackTime < now + DEEPGRAM_AUDIO_LEAD_SECONDS) {
+      nextPlaybackTime = now + DEEPGRAM_AUDIO_LEAD_SECONDS;
+    }
+
+    const source = context.createBufferSource();
+    source.buffer = buffer;
+    source.connect(context.destination);
+    sources.add(source);
+    source.onended = () => {
+      sources.delete(source);
+    };
+
+    const startAt = nextPlaybackTime;
+    const delayMs = Math.max(0, Math.round((startAt - context.currentTime) * 1000));
+    source.start(startAt);
+    nextPlaybackTime = startAt + buffer.duration;
+    scheduledChunks += 1;
+
+    if (!firstAudioPlayReported) {
+      firstAudioPlayReported = true;
+      window.setTimeout(() => {
+        if (generation !== cancelGeneration) return;
+        playedAudioThisTurn = true;
+        turnCallbacks?.onAudioPlay?.();
+        turnCallbacks?.onStart?.();
+      }, delayMs);
+    }
+  }
+
+  function stopAudio(): void {
+    for (const controller of controllers) controller.abort();
+    controllers.clear();
+    for (const source of sources) {
+      try {
+        source.stop();
+      } catch {
+        // Source may already have ended.
+      }
+    }
+    sources.clear();
+    nextPlaybackTime = audioContext?.currentTime ?? 0;
+  }
+
+  async function fallbackSpeak(text: string, reason: string, callbacks?: TtsSpeakCallbacks): Promise<TtsSpeakResult> {
+    if (playedAudioThisTurn) {
+      throw new Error(`Deepgram stopped after audio started: ${reason}`);
+    }
+    const fallbackResult = await fallback.speak(text, callbacks);
+    return {
+      spokenBy: fallbackResult.spokenBy,
+      fallbackReason: fallbackChain(`Deepgram failed: ${reason}`, fallbackResult.fallbackReason)
+    };
+  }
+
+  return {
+    id: "deepgram",
+    beginTurn(callbacks?: TtsSpeakCallbacks): void {
+      cancelGeneration += 1;
+      updateCallbacks(callbacks);
+      bypassCurrentTurn = false;
+      playedAudioThisTurn = false;
+      firstAudioResponseReported = false;
+      firstAudioChunkReported = false;
+      firstAudioPlayReported = false;
+      scheduledChunks = 0;
+      maxGapMs = 0;
+      stopAudio();
+    },
+    finishTurn(): void {
+      const generation = cancelGeneration;
+      const remainingMs = audioContext ? Math.max(0, Math.round((nextPlaybackTime - audioContext.currentTime) * 1000)) : 0;
+      window.setTimeout(() => {
+        if (generation !== cancelGeneration) return;
+        if (scheduledChunks > 0) {
+          const gapSummary = maxGapMs > 0 ? `; max buffer gap ${maxGapMs} ms` : "; max buffer gap 0 ms";
+          reportStatus(`Deepgram buffered ${scheduledChunks} chunks${gapSummary}`);
+        }
+      }, remainingMs);
+    },
+    async speak(text: string, callbacks?: TtsSpeakCallbacks): Promise<TtsSpeakResult> {
+      updateCallbacks(callbacks);
+      const generation = cancelGeneration;
+      if (bypassCurrentTurn || Date.now() < disabledUntil) {
+        const reason = bypassCurrentTurn
+          ? `Deepgram unavailable this turn after ${lastFailure || "a recent failure"}`
+          : `Deepgram cooling down after ${lastFailure || "a recent failure"}`;
+        return await fallbackSpeak(text, reason, callbacks);
+      }
+
+      try {
+        const buffer = await fetchAudioBuffer(text, generation, callbacks);
+        await scheduleAudioBuffer(buffer, generation, callbacks);
+        disabledUntil = 0;
+        lastFailure = "";
+        return { spokenBy: "deepgram" };
+      } catch (error) {
+        if (generation !== cancelGeneration) return { spokenBy: "deepgram" };
+        const reason = errorMessage(error);
+        disabledUntil = Date.now() + ELEVENLABS_FAILURE_COOLDOWN_MS;
+        lastFailure = reason;
+        bypassCurrentTurn = true;
+        return await fallbackSpeak(text, reason, callbacks);
+      }
+    },
+    cancel(): void {
+      cancelGeneration += 1;
+      stopAudio();
       fallback.cancel();
     }
   };
+}
+
+export function createElevenLabsTtsProvider(apiBase: string, fallback: RuntimeTtsProvider): RuntimeTtsProvider {
+  return createHttpAudioTtsProvider({
+    apiBase,
+    fallback,
+    id: "elevenlabs",
+    label: "ElevenLabs",
+    path: "/api/tts/elevenlabs/stream",
+    timeoutMs: ELEVENLABS_CLIENT_TIMEOUT_MS
+  });
 }
 
 function createPcmWsTtsProvider(params: {
@@ -244,6 +514,7 @@ function createPcmWsTtsProvider(params: {
   apiBase: string;
   path: string;
   fallback: RuntimeTtsProvider;
+  disableFallbackAfterAudioStarted?: boolean;
 }): RuntimeTtsProvider {
   let cancelGeneration = 0;
   let ws: WebSocket | null = null;
@@ -404,8 +675,8 @@ function createPcmWsTtsProvider(params: {
       return;
     }
     if (message.type === "audio") {
+      resolveAudioWaiter();
       void scheduleAudio(message.audio, message.format, generation)
-        .then(() => resolveAudioWaiter())
         .catch((error) => {
           markUnavailable(errorMessage(error));
         });
@@ -505,6 +776,9 @@ function createPcmWsTtsProvider(params: {
   }
 
   async function fallbackSpeak(text: string, callbacks?: TtsSpeakCallbacks, reason?: string): Promise<TtsSpeakResult> {
+    if (params.disableFallbackAfterAudioStarted && firstAudioPlayReported) {
+      throw new Error(`${params.label} stopped after audio started: ${reason ?? lastFailure}`);
+    }
     const fallbackResult = await params.fallback.speak(text, callbacks);
     return {
       spokenBy: fallbackResult.spokenBy,
@@ -559,6 +833,7 @@ function createPcmWsTtsProvider(params: {
         );
       }
 
+      const firstAudioPromise = waitForFirstAudio(text);
       try {
         await queueSend(async () => {
           await ensureSocket(callbacks);
@@ -573,9 +848,10 @@ function createPcmWsTtsProvider(params: {
             })
           );
         });
-        await waitForFirstAudio(text);
+        await firstAudioPromise;
         return { spokenBy: params.id };
       } catch (error) {
+        firstAudioPromise.catch(() => undefined);
         const reason = errorMessage(error);
         markUnavailable(reason, callbacks);
         return await fallbackSpeak(text, callbacks, reason);
@@ -590,6 +866,18 @@ function createPcmWsTtsProvider(params: {
       params.fallback.cancel();
     }
   };
+}
+
+export function createDeepgramTtsProvider(apiBase: string, fallback: RuntimeTtsProvider): RuntimeTtsProvider {
+  const restFallback = createDeepgramRestTtsProvider(apiBase, fallback);
+  return createPcmWsTtsProvider({
+    id: "deepgram",
+    label: "Deepgram WS",
+    apiBase,
+    path: "/api/tts/deepgram/ws",
+    fallback: restFallback,
+    disableFallbackAfterAudioStarted: true
+  });
 }
 
 export function createElevenLabsWsTtsProvider(apiBase: string, fallback: RuntimeTtsProvider): RuntimeTtsProvider {

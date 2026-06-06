@@ -13,11 +13,11 @@ export const scratchModes = ["voice", "text"] as const;
 
 export type ScratchMode = (typeof scratchModes)[number];
 
-export const ttsProviders = ["inworld-ws", "elevenlabs-ws", "elevenlabs", "browser"] as const;
+export const ttsProviders = ["inworld-ws", "deepgram", "elevenlabs-ws", "elevenlabs", "browser"] as const;
 
 export type TtsProvider = (typeof ttsProviders)[number];
 
-export const sttProviders = ["inworld-stt", "whisper", "browser"] as const;
+export const sttProviders = ["deepgram-stt", "inworld-stt", "whisper", "browser"] as const;
 
 export type SttProvider = (typeof sttProviders)[number];
 
@@ -218,6 +218,10 @@ export type SessionResponse = {
   defaultReasoningEffort: ReasoningEffort;
   defaultCodexModel: string;
   defaultScratchMode?: ScratchMode;
+  features?: {
+    speechProjection: boolean;
+    progressSounds: boolean;
+  };
   tts: TtsStatus;
   stt: SttStatus;
   livekit: LiveKitStatus;
@@ -238,6 +242,8 @@ export type TtsStatus = {
   inworldConfigured: boolean;
   inworldVoiceId?: string;
   inworldModelId?: string;
+  deepgramConfigured: boolean;
+  deepgramModelId?: string;
   elevenLabsConfigured: boolean;
   elevenLabsVoiceId?: string;
   elevenLabsModelId?: string;
@@ -246,6 +252,8 @@ export type TtsStatus = {
 export type SttStatus = {
   defaultProvider: SttProvider;
   availableProviders: SttProvider[];
+  deepgramConfigured: boolean;
+  deepgramModel?: string;
   inworldConfigured: boolean;
   inworldModel?: string;
   openAIConfigured: boolean;
@@ -350,12 +358,16 @@ export type SparkContextCompactResponse = {
   }>;
 };
 
-export type ElevenLabsHealthResponse = {
+export type TtsHealthResponse = {
   available: boolean;
   status: "ok" | "not_configured" | "auth_error" | "quota_or_rate_limit" | "timeout" | "network_error" | "server_error" | "unknown_error";
   detail?: string;
   elapsedMs: number;
 };
+
+export type ElevenLabsHealthResponse = TtsHealthResponse;
+
+export type DeepgramHealthResponse = TtsHealthResponse;
 
 export type TurnRequest = {
   text: string;
@@ -529,6 +541,8 @@ export type TurnResponse = {
 export type TurnStatusResponse = {
   turn: TurnRun | null;
   session: MorticSession;
+  replayText?: string;
+  replayUpdatedAt?: string;
 };
 
 export type HandoffRequest = {
@@ -553,6 +567,8 @@ export type TurnStreamEvent =
       type: "snapshot";
       turn: TurnRun | null;
       session: MorticSession;
+      replayText?: string;
+      replayUpdatedAt?: string;
     }
   | {
       type: "delta";
@@ -579,6 +595,38 @@ export const extractionStatuses = ["draft", "approved", "dismissed", "merged"] a
 
 export type ExtractionStatus = (typeof extractionStatuses)[number];
 
+export const canonicalLifecycleActions = [
+  "create",
+  "update",
+  "append_evidence",
+  "resolve",
+  "drop",
+  "supersede",
+  "reopen",
+  "no_op"
+] as const;
+
+export type CanonicalLifecycleAction = (typeof canonicalLifecycleActions)[number];
+
+export const canonicalLifecycleStatuses = [
+  "open",
+  "in_progress",
+  "resolved",
+  "dropped",
+  "superseded",
+  "stale"
+] as const;
+
+export type CanonicalLifecycleStatus = (typeof canonicalLifecycleStatuses)[number];
+
+export type CanonicalReconciledItem = {
+  id: string;
+  type: ExtractedItemType;
+  title: string;
+  status: CanonicalLifecycleStatus;
+  score: number;
+};
+
 export const scratchSessionStatuses = ["active", "draft", "committed", "archived", "discarded"] as const;
 
 export type ScratchSessionStatus = (typeof scratchSessionStatuses)[number];
@@ -588,6 +636,7 @@ export type ExtractedItem = {
   projectId: string;
   sourceThreadId: string;
   scratchSessionId: string;
+  sourceCompilationId?: string;
   sourceTurnId?: string;
   type: ExtractedItemType;
   title: string;
@@ -595,6 +644,16 @@ export type ExtractedItem = {
   confidence: number;
   status: ExtractionStatus;
   delta?: "new" | "changed" | "unchanged";
+  canonicalItemId?: string;
+  targetCanonicalItemId?: string | null;
+  lifecycleAction?: CanonicalLifecycleAction;
+  lifecycleStatusBefore?: CanonicalLifecycleStatus | null;
+  lifecycleStatusAfter?: CanonicalLifecycleStatus;
+  canonicalOperation?: string;
+  mergeStrategy?: string;
+  reconcilesWith?: CanonicalReconciledItem[];
+  reconciliationReason?: string;
+  conflicts?: string[];
   evidenceSource?: "transcript" | "handoff_short" | "handoff_full" | "handoff" | "session" | "production_json" | "production_md";
   selectionReason?: string;
   createdAt: string;
@@ -606,6 +665,153 @@ export type ExtractedItem = {
     quote?: string;
   };
   mergedIntoId?: string;
+};
+
+export type ProviderName = "codex";
+
+export type ProviderForkKind = "source" | "scratch" | "persisted" | "unknown";
+
+export type ProviderActionAvailability = {
+  available: boolean;
+  disabledReason?: string;
+};
+
+export type ProviderReference = {
+  id: string;
+  provider: ProviderName;
+  providerRefId: string;
+  accountId?: string;
+  conversationId?: string;
+  threadId?: string;
+  forkKind: ProviderForkKind;
+  ephemeral: boolean;
+  persisted: boolean;
+  cwd?: string;
+  accessPreset?: string;
+  capabilities: string[];
+  openTarget?: string;
+  actions: {
+    resume: ProviderActionAvailability;
+    fork: ProviderActionAvailability;
+    archive: ProviderActionAvailability;
+  };
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type ProviderAdapterStatus = {
+  provider: ProviderName;
+  available: boolean;
+  path?: string;
+  version?: string;
+  loginStatus: "logged-in" | "logged-out" | "unknown";
+  accountId?: string;
+  canStartLogin: boolean;
+  loginCommand?: string;
+  error?: string;
+};
+
+export type ConversationArtifact = {
+  id: string;
+  projectId: string;
+  title: string;
+  artifactKind: "scratch-session" | "source-thread" | "import";
+  sourceThreadId?: string;
+  sourceCheckpointId?: string;
+  scratchSessionId?: string;
+  transcriptPath?: string;
+  handoffPath?: string;
+  eventLogPath?: string;
+  providerRefIds: string[];
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type DraftCompilation = {
+  id: string;
+  projectId: string;
+  scratchSessionId: string;
+  conversationArtifactId: string;
+  candidateDeltaIds: string[];
+  extractedItemIds: string[];
+  transcriptStartEntryId?: string;
+  transcriptEndEntryId?: string;
+  transcriptEntryCount?: number;
+  transcriptHash?: string;
+  basisCheckpointId?: string;
+  basisDraftCompilationIds?: string[];
+  summary?: string;
+  status: "draft" | "partially-approved" | "approved" | "superseded";
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type CanonicalDelta = {
+  id: string;
+  projectId: string;
+  stableKey: string;
+  version: number;
+  type: ExtractedItemType;
+  title: string;
+  body: string;
+  status: "approved" | "superseded";
+  canonicalItemId: string;
+  targetCanonicalItemId?: string | null;
+  lifecycleAction: CanonicalLifecycleAction;
+  lifecycleStatusBefore?: CanonicalLifecycleStatus | null;
+  lifecycleStatusAfter: CanonicalLifecycleStatus;
+  canonicalOperation?: string;
+  mergeStrategy?: string;
+  reconcilesWith?: CanonicalReconciledItem[];
+  reconciliationReason?: string;
+  conflicts?: string[];
+  checkpointId: string;
+  previousDeltaId?: string;
+  sourceExtractedItemId?: string;
+  sourceCompilationId?: string;
+  conversationArtifactId: string;
+  providerRefIds: string[];
+  evidenceSource?: ExtractedItem["evidenceSource"];
+  evidenceEntryId?: string;
+  evidenceQuote?: string;
+  localPaths: {
+    transcript?: string;
+    handoff?: string;
+    eventLog?: string;
+  };
+  approvedAt: string;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type CanonicalItem = {
+  id: string;
+  projectId: string;
+  type: ExtractedItemType;
+  title: string;
+  body: string;
+  lifecycleStatus: CanonicalLifecycleStatus;
+  latestDeltaId: string;
+  deltaIds: string[];
+  conversationArtifactId: string;
+  providerRefIds: string[];
+  evidenceSource?: ExtractedItem["evidenceSource"];
+  evidenceEntryId?: string;
+  evidenceQuote?: string;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type CanonicalCheckpoint = {
+  id: string;
+  projectId: string;
+  title: string;
+  parentCheckpointId?: string;
+  approvedDeltaIds: string[];
+  sourceArtifactIds: string[];
+  createdAt: string;
+  approvedAt: string;
+  imported: boolean;
 };
 
 export type MorticProject = {
@@ -774,6 +980,45 @@ export type ProjectCanonicalStateResponse = {
   extractedItemsMarkdown: string;
 };
 
+export type ProjectChartResponse = {
+  projectDir: string;
+  chartPath: string;
+  project: MorticProject;
+  sourceThreads: SourceThreadNode[];
+  sourceCheckpoints: SourceCheckpointNode[];
+  checkpoints: CanonicalCheckpoint[];
+  canonicalItems: CanonicalItem[];
+  deltas: CanonicalDelta[];
+  draftCompilations: DraftCompilation[];
+  artifacts: ConversationArtifact[];
+  providerRefs: ProviderReference[];
+  providerAdapters: ProviderAdapterStatus[];
+};
+
+export type ProjectArtifactPreviewResponse = {
+  artifact: ConversationArtifact;
+  providerRefs: ProviderReference[];
+  transcriptPreview?: string;
+  handoffPreview?: string;
+  eventPreview?: string;
+  paths: {
+    transcript?: string;
+    handoff?: string;
+    eventLog?: string;
+  };
+};
+
+export type ApproveCompilationRequest = {
+  candidateDeltaIds?: string[];
+  extractedItemIds?: string[];
+};
+
+export type ApproveCompilationResponse = ProjectChartResponse & {
+  projectState: ProjectStateResponse;
+  checkpoint?: CanonicalCheckpoint;
+  approvedDeltaIds: string[];
+};
+
 export type CommitSessionRequest = {
   approveItemIds?: string[];
 };
@@ -788,4 +1033,5 @@ export type UpdateExtractedItemRequest = {
   title?: string;
   body?: string;
   mergeIntoId?: string;
+  retire?: boolean;
 };

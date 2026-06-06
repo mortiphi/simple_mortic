@@ -1,4 +1,5 @@
 import type {
+  DeepgramHealthResponse,
   ElevenLabsHealthResponse,
   ElevenLabsWsClientMessage,
   ElevenLabsWsServerMessage,
@@ -7,12 +8,17 @@ import type {
 } from "../shared/types.js";
 import { WebSocket as UpstreamWebSocket } from "ws";
 
-type ElevenLabsStream = {
+type TtsAudioStream = {
   body: ReadableStream<Uint8Array>;
   contentType: string;
   contentLength?: string;
 };
 
+const DEEPGRAM_BASE_URL = "https://api.deepgram.com";
+const DEEPGRAM_WS_URL = "wss://api.deepgram.com/v1/speak";
+const DEFAULT_DEEPGRAM_MODEL_ID = "aura-2-thalia-en";
+const DEFAULT_DEEPGRAM_TIMEOUT_MS = 15000;
+const DEEPGRAM_WS_SAMPLE_RATE = 16000;
 const ELEVENLABS_BASE_URL = "https://api.elevenlabs.io";
 const DEFAULT_ELEVENLABS_VOICE_ID = "JBFqnCBsd6RMkjVDRZzb";
 const DEFAULT_ELEVENLABS_MODEL_ID = "eleven_flash_v2_5";
@@ -48,6 +54,10 @@ function envValue(name: string): string | undefined {
 
 function elevenLabsApiKey(): string | undefined {
   return envValue("ELEVENLABS_API_KEY") ?? envValue("XI_API_KEY");
+}
+
+function deepgramApiKey(): string | undefined {
+  return envValue("DEEPGRAM_API_KEY");
 }
 
 function inworldApiKey(): string | undefined {
@@ -90,13 +100,33 @@ function configuredElevenLabsTimeoutMs(): number {
   return Math.max(500, Math.min(15000, Math.floor(parsed)));
 }
 
-function configuredDefaultProvider(params: { inworldConfigured: boolean; elevenLabsConfigured: boolean }): TtsProvider {
+function configuredDeepgramModelId(): string {
+  return envValue("DEEPGRAM_TTS_MODEL") ?? DEFAULT_DEEPGRAM_MODEL_ID;
+}
+
+function configuredDeepgramTimeoutMs(): number {
+  const parsed = Number(envValue("DEEPGRAM_TTS_TIMEOUT_MS"));
+  if (!Number.isFinite(parsed) || parsed <= 0) return DEFAULT_DEEPGRAM_TIMEOUT_MS;
+  return Math.max(500, Math.min(15000, Math.floor(parsed)));
+}
+
+function deepgramStreamingUrl(): string {
+  const url = new URL(DEEPGRAM_WS_URL);
+  url.searchParams.set("model", configuredDeepgramModelId());
+  url.searchParams.set("encoding", "linear16");
+  url.searchParams.set("sample_rate", String(DEEPGRAM_WS_SAMPLE_RATE));
+  return url.toString();
+}
+
+function configuredDefaultProvider(params: { inworldConfigured: boolean; deepgramConfigured: boolean; elevenLabsConfigured: boolean }): TtsProvider {
   const requested = envValue("MORTIC_TTS_PROVIDER");
   if (requested === "browser") return "browser";
   if (requested === "inworld-ws" && params.inworldConfigured) return "inworld-ws";
+  if (requested === "deepgram" && params.deepgramConfigured) return "deepgram";
   if (requested === "elevenlabs-ws" && params.elevenLabsConfigured) return "elevenlabs-ws";
   if (requested === "elevenlabs" && params.elevenLabsConfigured) return "elevenlabs";
   if (params.inworldConfigured) return "inworld-ws";
+  if (params.deepgramConfigured) return "deepgram";
   return params.elevenLabsConfigured ? "elevenlabs-ws" : "browser";
 }
 
@@ -109,17 +139,21 @@ function classifyElevenLabsStatus(status: number): ElevenLabsHealthResponse["sta
 
 export function getTtsStatus(): TtsStatus {
   const inworldConfigured = Boolean(inworldApiKey());
+  const deepgramConfigured = Boolean(deepgramApiKey());
   const elevenLabsConfigured = Boolean(elevenLabsApiKey());
   const availableProviders: TtsProvider[] = [];
   if (inworldConfigured) availableProviders.push("inworld-ws");
+  if (deepgramConfigured) availableProviders.push("deepgram");
   if (elevenLabsConfigured) availableProviders.push("elevenlabs-ws", "elevenlabs");
   availableProviders.push("browser");
   return {
-    defaultProvider: configuredDefaultProvider({ inworldConfigured, elevenLabsConfigured }),
+    defaultProvider: configuredDefaultProvider({ inworldConfigured, deepgramConfigured, elevenLabsConfigured }),
     availableProviders,
     inworldConfigured,
     inworldVoiceId: inworldConfigured ? configuredInworldVoiceId() : undefined,
     inworldModelId: inworldConfigured ? configuredInworldModelId() : undefined,
+    deepgramConfigured,
+    deepgramModelId: deepgramConfigured ? configuredDeepgramModelId() : undefined,
     elevenLabsConfigured,
     elevenLabsVoiceId: elevenLabsConfigured ? configuredElevenLabsVoiceId() : undefined,
     elevenLabsModelId: elevenLabsConfigured ? configuredElevenLabsModelId() : undefined
@@ -419,6 +453,243 @@ export function handleElevenLabsWsSession(local: LocalWebSocket): void {
   });
 }
 
+export function handleDeepgramWsSession(local: LocalWebSocket): void {
+  const startedAt = Date.now();
+  const apiKey = deepgramApiKey();
+  let upstream: UpstreamWebSocket | null = null;
+  let upstreamReady = false;
+  let upstreamClosed = false;
+  let localClosed = false;
+  const pendingUpstreamMessages: string[] = [];
+
+  function elapsedMs(): number {
+    return Date.now() - startedAt;
+  }
+
+  function sendError(error: string, status?: DeepgramHealthResponse["status"], code?: number): void {
+    sendLocal(local, {
+      type: "error",
+      error,
+      status,
+      code,
+      elapsedMs: elapsedMs()
+    });
+  }
+
+  function closeUpstream(code = 1000, reason = "done"): void {
+    if (!upstream || upstreamClosed) return;
+    upstreamClosed = true;
+    try {
+      upstream.close(code, reason);
+    } catch {
+      // Ignore close races between local interruption and upstream completion.
+    }
+  }
+
+  function closeLocal(code = 1000, reason = "done"): void {
+    if (localClosed) return;
+    localClosed = true;
+    try {
+      if (socketIsOpen(local)) local.close(code, reason);
+    } catch {
+      // Ignore close races between browser cancellation and upstream completion.
+    }
+  }
+
+  function closeBoth(code = 1000, reason = "done"): void {
+    closeUpstream(code, reason);
+    closeLocal(code, reason);
+  }
+
+  function sendUpstream(payload: unknown): void {
+    const serialized = JSON.stringify(payload);
+    if (upstream && upstreamReady && socketIsOpen(upstream)) {
+      upstream.send(serialized);
+      return;
+    }
+    pendingUpstreamMessages.push(serialized);
+  }
+
+  function drainPendingUpstreamMessages(): void {
+    if (!upstream || !upstreamReady || !socketIsOpen(upstream)) return;
+    while (pendingUpstreamMessages.length > 0) {
+      upstream.send(pendingUpstreamMessages.shift() as string);
+    }
+  }
+
+  function connectUpstream(): void {
+    if (upstream || upstreamClosed) return;
+    if (!apiKey) {
+      sendError("Deepgram is not configured. Set DEEPGRAM_API_KEY to enable it.", "not_configured");
+      closeLocal(1011, "not configured");
+      return;
+    }
+
+    upstream = new UpstreamWebSocket(deepgramStreamingUrl(), undefined, {
+      headers: {
+        Authorization: `Token ${apiKey}`
+      }
+    });
+
+    upstream.on("open", () => {
+      if (!upstream || upstreamClosed) return;
+      upstreamReady = true;
+      sendLocal(local, {
+        type: "ready",
+        elapsedMs: elapsedMs(),
+        format: "pcm_16000"
+      });
+      drainPendingUpstreamMessages();
+    });
+
+    upstream.on("message", (data, isBinary) => {
+      const buffer = Buffer.isBuffer(data)
+        ? data
+        : Array.isArray(data)
+          ? Buffer.concat(data)
+          : Buffer.from(data as ArrayBuffer);
+
+      if (isBinary || buffer[0] !== 0x7b) {
+        if (buffer.length === 0) return;
+        sendLocal(local, {
+          type: "audio",
+          audio: buffer.toString("base64"),
+          elapsedMs: elapsedMs(),
+          format: "pcm_16000"
+        });
+        return;
+      }
+
+      let payload: any;
+      try {
+        payload = JSON.parse(buffer.toString("utf8"));
+      } catch {
+        sendLocal(local, {
+          type: "status",
+          status: "unparseable_message",
+          detail: "Deepgram returned a message Mortic could not parse",
+          elapsedMs: elapsedMs()
+        });
+        return;
+      }
+
+      if (payload.type === "Metadata") {
+        sendLocal(local, {
+          type: "status",
+          status: "metadata",
+          detail: payload.request_id ? `request ${String(payload.request_id)}` : configuredDeepgramModelId(),
+          elapsedMs: elapsedMs()
+        });
+        return;
+      }
+
+      if (payload.type === "Flushed") {
+        sendLocal(local, {
+          type: "status",
+          status: "flushed",
+          detail: payload.sequence_id !== undefined ? `sequence ${String(payload.sequence_id)}` : undefined,
+          elapsedMs: elapsedMs()
+        });
+        return;
+      }
+
+      if (payload.type === "Cleared") {
+        sendLocal(local, {
+          type: "status",
+          status: "cleared",
+          detail: payload.sequence_id !== undefined ? `sequence ${String(payload.sequence_id)}` : undefined,
+          elapsedMs: elapsedMs()
+        });
+        return;
+      }
+
+      if (payload.type === "Warning") {
+        sendLocal(local, {
+          type: "status",
+          status: "warning",
+          detail: payload.description ?? payload.code,
+          elapsedMs: elapsedMs()
+        });
+        return;
+      }
+
+      if (payload.type === "Error" || payload.error) {
+        sendError(payload.description ?? payload.message ?? payload.error ?? "Deepgram WebSocket returned an error", "unknown_error", payload.code);
+        closeBoth(1011, "upstream error");
+      }
+    });
+
+    upstream.on("close", (code, reason) => {
+      upstreamClosed = true;
+      if (!localClosed) {
+        if (code !== 1000) {
+          const status = code === 1008 ? "auth_error" : code === 1011 ? "server_error" : "network_error";
+          sendError(reason.toString() || `Deepgram WebSocket closed with code ${code}`, status, code);
+          closeLocal(1011, "upstream closed");
+          return;
+        }
+        sendLocal(local, {
+          type: "final",
+          elapsedMs: elapsedMs()
+        });
+        closeLocal(1000, "final");
+      }
+    });
+
+    upstream.on("error", () => {
+      if (!localClosed) {
+        sendError("Deepgram WebSocket connection failed", "network_error");
+        closeLocal(1011, "upstream error");
+      }
+    });
+  }
+
+  local.on("message", (data) => {
+    void messageDataToString(data).then((text) => {
+      const message = parseClientMessage(text);
+      if (!message) {
+        sendError("Invalid WebSocket TTS message");
+        return;
+      }
+
+      if (message.type === "cancel") {
+        closeBoth(1000, "cancelled");
+        return;
+      }
+
+      connectUpstream();
+      if (message.type === "start") return;
+      if (message.type === "flush") {
+        sendUpstream({ type: "Flush" });
+        return;
+      }
+      if (message.type === "finish") {
+        sendUpstream({ type: "Close" });
+        return;
+      }
+      if (message.type === "text" && message.text.trim()) {
+        sendUpstream({
+          type: "Speak",
+          text: message.text.slice(0, 2000)
+        });
+        if (message.flush === true) {
+          sendUpstream({ type: "Flush" });
+        }
+      }
+    });
+  });
+
+  local.on("close", (code, reason) => {
+    localClosed = true;
+    closeUpstream(code || 1000, reason?.toString() || "local closed");
+  });
+
+  local.on("error", () => {
+    localClosed = true;
+    closeUpstream(1011, "local error");
+  });
+}
+
 export function handleInworldWsSession(local: LocalWebSocket): void {
   const startedAt = Date.now();
   const apiKey = inworldApiKey();
@@ -660,7 +931,57 @@ export function handleInworldWsSession(local: LocalWebSocket): void {
   });
 }
 
-export async function streamElevenLabsTts(text: string): Promise<ElevenLabsStream> {
+export async function streamDeepgramTts(text: string): Promise<TtsAudioStream> {
+  const apiKey = deepgramApiKey();
+  if (!apiKey) {
+    throw new Error("Deepgram is not configured. Set DEEPGRAM_API_KEY to enable it.");
+  }
+
+  const cleanText = text.trim();
+  if (!cleanText) {
+    throw new Error("TTS text is required");
+  }
+
+  const url = new URL("/v1/speak", DEEPGRAM_BASE_URL);
+  url.searchParams.set("model", configuredDeepgramModelId());
+  const timeoutMs = configuredDeepgramTimeoutMs();
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+
+  let response: Response;
+  try {
+    response = await fetch(url, {
+      method: "POST",
+      headers: {
+        Accept: "audio/mpeg",
+        Authorization: `Token ${apiKey}`,
+        "Content-Type": "text/plain"
+      },
+      signal: controller.signal,
+      body: cleanText
+    });
+  } catch (error) {
+    if (error instanceof DOMException && error.name === "AbortError") {
+      throw new Error(`Deepgram TTS timed out after ${timeoutMs} ms`);
+    }
+    throw error;
+  } finally {
+    clearTimeout(timeout);
+  }
+
+  if (!response.ok || !response.body) {
+    const detail = await response.text().catch(() => "");
+    throw new Error(`Deepgram TTS failed: ${response.status}${detail ? ` ${detail.slice(0, 240)}` : ""}`);
+  }
+
+  return {
+    body: response.body,
+    contentType: response.headers.get("content-type") ?? "audio/mpeg",
+    contentLength: response.headers.get("content-length") ?? undefined
+  };
+}
+
+export async function streamElevenLabsTts(text: string): Promise<TtsAudioStream> {
   const apiKey = elevenLabsApiKey();
   if (!apiKey) {
     throw new Error("ElevenLabs is not configured. Set ELEVENLABS_API_KEY to enable it.");
@@ -718,6 +1039,40 @@ export async function streamElevenLabsTts(text: string): Promise<ElevenLabsStrea
     contentType: response.headers.get("content-type") ?? "audio/mpeg",
     contentLength: response.headers.get("content-length") ?? undefined
   };
+}
+
+export async function probeDeepgramTts(): Promise<DeepgramHealthResponse> {
+  const startedAt = Date.now();
+  const apiKey = deepgramApiKey();
+  if (!apiKey) {
+    return {
+      available: false,
+      status: "not_configured",
+      detail: "DEEPGRAM_API_KEY is not set",
+      elapsedMs: Date.now() - startedAt
+    };
+  }
+
+  try {
+    const stream = await streamDeepgramTts("Probe.");
+    await stream.body.cancel().catch(() => undefined);
+    return {
+      available: true,
+      status: "ok",
+      elapsedMs: Date.now() - startedAt
+    };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    const statusMatch = message.match(/Deepgram TTS failed: (\d+)/);
+    const status = statusMatch ? Number(statusMatch[1]) : undefined;
+    const classified = status ? classifyElevenLabsStatus(status) : message.toLowerCase().includes("timed out") ? "timeout" : "network_error";
+    return {
+      available: false,
+      status: classified,
+      detail: message.slice(0, 240),
+      elapsedMs: Date.now() - startedAt
+    };
+  }
 }
 
 export async function probeElevenLabsTts(): Promise<ElevenLabsHealthResponse> {

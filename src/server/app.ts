@@ -36,6 +36,8 @@ import {
   extractionStatuses,
   ttsProviders,
   type AudioHealthRequest,
+  type ApproveCompilationRequest,
+  type DeepgramHealthResponse,
   type ElevenLabsHealthResponse,
   type ForkCheckpoint,
   type HandoffRequest,
@@ -63,7 +65,16 @@ import {
 } from "./sparkContext.js";
 import { getLiveKitStatus, createLiveKitToken } from "./livekit.js";
 import { configuredMaxSttPayloadBytes, getSttStatus, transcribeAudioWithFallback } from "./stt.js";
-import { getTtsStatus, handleElevenLabsWsSession, handleInworldWsSession, probeElevenLabsTts, streamElevenLabsTts } from "./tts.js";
+import {
+  getTtsStatus,
+  handleDeepgramWsSession,
+  handleElevenLabsWsSession,
+  handleInworldWsSession,
+  probeDeepgramTts,
+  probeElevenLabsTts,
+  streamDeepgramTts,
+  streamElevenLabsTts
+} from "./tts.js";
 
 type MorticServerOptions = {
   storage: SessionStorage;
@@ -212,6 +223,13 @@ function logEntry(startMs: number, label: string, detail?: string): TurnLogEntry
   };
 }
 
+function featureConfig() {
+  return {
+    speechProjection: process.env.MORTIC_SPEECH_PROJECTION !== "0",
+    progressSounds: process.env.MORTIC_PROGRESS_SOUNDS === "1"
+  };
+}
+
 async function addTurnLog(
   storage: SessionStorage,
   turnId: string,
@@ -247,13 +265,14 @@ function audioHealthDetail(metrics: TurnRun["metrics"]): string {
   const queuedRanges = metrics.queuedRanges ? ` queued ranges ${metrics.queuedRanges}` : "";
   const spokenRanges = metrics.spokenRanges ? ` spoken ranges ${metrics.spokenRanges}` : "";
   const status = metrics.ttsError ? `tts error: ${metrics.ttsError}` : "tts ok";
-  const wsTiming =
-    metrics.ttsProvider === "elevenlabs-ws" || metrics.ttsProvider === "inworld-ws"
-      ? ` · ws connect ${formatMetricMs(metrics.ttsConnectMs)} · ws audio ${formatMetricMs(metrics.firstAudioChunkMs)} · audio play ${formatMetricMs(metrics.firstAudioPlayMs)}`
+  const isStreamingWsTts = metrics.ttsProvider === "elevenlabs-ws" || metrics.ttsProvider === "inworld-ws";
+  const isBufferedTts = metrics.ttsProvider === "deepgram" || isStreamingWsTts;
+  const bufferedTiming = isBufferedTts
+    ? ` · ${isStreamingWsTts ? "ws connect" : "tts response"} ${formatMetricMs(metrics.ttsConnectMs)} · audio bytes ${formatMetricMs(metrics.firstAudioChunkMs)} · audio play ${formatMetricMs(metrics.firstAudioPlayMs)}`
       : "";
   const buffer = metrics.audioBufferUnderruns ? ` · underruns ${metrics.audioBufferUnderruns}` : "";
   const close = metrics.ttsCloseCode ? ` · close ${metrics.ttsCloseCode}${metrics.ttsCloseReason ? ` ${metrics.ttsCloseReason}` : ""}` : "";
-  const timing = `text first ${formatMetricMs(metrics.firstDeltaMs)} · visible ${formatMetricMs(metrics.firstVisibleTextMs)} · speakable ${formatMetricMs(metrics.firstSpeakableTextMs)} · queued ${formatMetricMs(metrics.firstSpeechQueuedMs)} · speech start ${formatMetricMs(metrics.firstSpeechStartMs)}${wsTiming} · final ${formatMetricMs(metrics.finalTextMs)} · speech after final ${formatSignedMetricMs(metrics.speechAfterFinalMs)}${buffer}${close}`;
+  const timing = `text first ${formatMetricMs(metrics.firstDeltaMs)} · visible ${formatMetricMs(metrics.firstVisibleTextMs)} · speakable ${formatMetricMs(metrics.firstSpeakableTextMs)} · queued ${formatMetricMs(metrics.firstSpeechQueuedMs)} · speech start ${formatMetricMs(metrics.firstSpeechStartMs)}${bufferedTiming} · final ${formatMetricMs(metrics.finalTextMs)} · speech after final ${formatSignedMetricMs(metrics.speechAfterFinalMs)}${buffer}${close}`;
   const providerStatus = metrics.ttsProviderStatus ? ` provider ${metrics.ttsProviderStatus}` : "";
   return `${provider}: ${timing}; streamed ${streamed} chars, final ${final} chars, queued ${queued} chars, spoken ${spoken} chars, chunks ${chunks}, ${status}${providerStatus}${queuedRanges}${spokenRanges}`;
 }
@@ -428,6 +447,7 @@ export async function createMorticServer(options: MorticServerOptions) {
     bodyLimit: configuredMaxSttPayloadBytes() + 512 * 1024
   });
   const turnStreams = new Map<string, Set<(event: unknown) => void>>();
+  const turnReplay = new Map<string, { text: string; updatedAt: string }>();
   let runtimeContext = options.runtimeContext;
 
   function currentRuntimeContext(session?: MorticSession): RuntimeContextRestore | undefined {
@@ -441,6 +461,7 @@ export async function createMorticServer(options: MorticServerOptions) {
       defaultReasoningEffort: DEFAULT_REASONING_EFFORT,
       defaultCodexModel: DEFAULT_CODEX_MODEL,
       defaultScratchMode: "voice",
+      features: featureConfig(),
       tts: getTtsStatus(),
       stt: getSttStatus(),
       livekit: getLiveKitStatus()
@@ -464,6 +485,17 @@ export async function createMorticServer(options: MorticServerOptions) {
         turnStreams.delete(turnId);
       }
     };
+  }
+
+  function updateTurnReplay(turnId: string, text: string): void {
+    turnReplay.set(turnId, {
+      text,
+      updatedAt: new Date().toISOString()
+    });
+  }
+
+  function clearTurnReplay(turnId: string): void {
+    turnReplay.delete(turnId);
   }
 
   function warnProjectStoreFailure(operation: string, error: unknown): void {
@@ -525,6 +557,46 @@ export async function createMorticServer(options: MorticServerOptions) {
       });
     }
     return options.projectStore.canonicalState();
+  });
+
+  app.get("/api/project/chart", async (_request, reply) => {
+    const session = await options.storage.read();
+    if (!options.projectStore) {
+      return reply.code(503).send({
+        error: "Project storage is unavailable"
+      });
+    }
+    return options.projectStore.chart(currentRuntimeContext(session));
+  });
+
+  app.get<{ Params: { artifactId: string } }>("/api/project/artifacts/:artifactId", async (request, reply) => {
+    const session = await options.storage.read();
+    if (!options.projectStore) {
+      return reply.code(503).send({
+        error: "Project storage is unavailable"
+      });
+    }
+    const preview = await options.projectStore.artifactPreview(request.params.artifactId, currentRuntimeContext(session));
+    if (!preview) {
+      return reply.code(404).send({ error: "Artifact not found" });
+    }
+    return preview;
+  });
+
+  app.post<{ Params: { compilationId: string }; Body: ApproveCompilationRequest }>("/api/project/compilations/:compilationId/approve", async (request, reply) => {
+    const session = await options.storage.read();
+    if (!options.projectStore) {
+      return reply.code(503).send({ error: "Project storage is unavailable", session });
+    }
+    if (session.activeTurn?.status === "running") {
+      return reply.code(409).send({ error: "A turn is running. Finish or interrupt it before approving canonical deltas.", session });
+    }
+    try {
+      return await options.projectStore.approveCompilation(request.params.compilationId, request.body, currentRuntimeContext(session));
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      return reply.code(message.includes("not found") ? 404 : 400).send({ error: message, session });
+    }
   });
 
   app.get<{
@@ -758,6 +830,7 @@ export async function createMorticServer(options: MorticServerOptions) {
     if (typeof request.body?.title === "string") patch.title = request.body.title;
     if (typeof request.body?.body === "string") patch.body = request.body.body;
     if (typeof request.body?.mergeIntoId === "string") patch.mergeIntoId = request.body.mergeIntoId;
+    if (request.body?.retire === true) patch.retire = true;
     return options.projectStore.updateExtractedItem(request.params.itemId, patch);
   });
 
@@ -795,8 +868,16 @@ export async function createMorticServer(options: MorticServerOptions) {
     return await probeElevenLabsTts();
   });
 
+  app.get("/api/tts/deepgram/health", async (): Promise<DeepgramHealthResponse> => {
+    return await probeDeepgramTts();
+  });
+
   app.get("/api/tts/elevenlabs/ws", { websocket: true }, (socket) => {
     handleElevenLabsWsSession(socket);
+  });
+
+  app.get("/api/tts/deepgram/ws", { websocket: true }, (socket) => {
+    handleDeepgramWsSession(socket);
   });
 
   app.get("/api/tts/inworld/ws", { websocket: true }, (socket) => {
@@ -811,6 +892,25 @@ export async function createMorticServer(options: MorticServerOptions) {
 
     try {
       const audio = await streamElevenLabsTts(text);
+      reply.header("Content-Type", audio.contentType);
+      reply.header("Cache-Control", "no-store");
+      if (audio.contentLength) reply.header("Content-Length", audio.contentLength);
+      return reply.send(Readable.fromWeb(audio.body));
+    } catch (error) {
+      return reply.code(502).send({
+        error: error instanceof Error ? error.message : String(error)
+      });
+    }
+  });
+
+  app.post<{ Body: TtsSynthesisRequest }>("/api/tts/deepgram/stream", async (request, reply) => {
+    const text = typeof request.body?.text === "string" ? request.body.text.trim() : "";
+    if (!text) {
+      return reply.code(400).send({ error: "TTS text is required" });
+    }
+
+    try {
+      const audio = await streamDeepgramTts(text);
       reply.header("Content-Type", audio.contentType);
       reply.header("Cache-Control", "no-store");
       if (audio.contentLength) reply.header("Content-Length", audio.contentLength);
@@ -1071,6 +1171,7 @@ export async function createMorticServer(options: MorticServerOptions) {
         const onDelta = (delta: string, text: string) =>
           void isCurrentTurnRunning().then((running) => {
             if (!running) return;
+            updateTurnReplay(turnId, text);
             emitTurnEvent(turnId, {
               type: "delta",
               turnId,
@@ -1173,6 +1274,7 @@ export async function createMorticServer(options: MorticServerOptions) {
           }
         });
         if (updated.activeTurn?.id === turnId) {
+          clearTurnReplay(turnId);
           emitTurnEvent(turnId, {
             type: "completed",
             turn: updated.activeTurn,
@@ -1208,6 +1310,7 @@ export async function createMorticServer(options: MorticServerOptions) {
           }
         });
         if (updated.activeTurn?.id === turnId) {
+          clearTurnReplay(turnId);
           emitTurnEvent(turnId, {
             type: "failed",
             turn: updated.activeTurn,
@@ -1233,7 +1336,13 @@ export async function createMorticServer(options: MorticServerOptions) {
       return reply.code(404).send({ turn: null, session });
     }
 
-    return { turn, session };
+    const replay = turn.status === "running" ? turnReplay.get(request.params.turnId) : undefined;
+    return {
+      turn,
+      session,
+      replayText: replay?.text,
+      replayUpdatedAt: replay?.updatedAt
+    };
   });
 
   app.post<{ Params: { turnId: string }; Body: AudioHealthRequest }>("/api/turn/:turnId/audio-health", async (request, reply) => {
@@ -1283,6 +1392,7 @@ export async function createMorticServer(options: MorticServerOptions) {
     await syncProjectSession(updated, "turn.interrupted", { turnId: request.params.turnId });
 
     if (updated.activeTurn?.id === request.params.turnId) {
+      clearTurnReplay(request.params.turnId);
       emitTurnEvent(request.params.turnId, {
         type: "interrupted",
         turn: updated.activeTurn,
@@ -1311,10 +1421,13 @@ export async function createMorticServer(options: MorticServerOptions) {
 
     const session = await options.storage.read();
     const turn = session.activeTurn?.id === request.params.turnId ? session.activeTurn : null;
+    const replay = turn?.status === "running" ? turnReplay.get(request.params.turnId) : undefined;
     writeEvent({
       type: "snapshot",
       turn,
-      session
+      session,
+      replayText: replay?.text,
+      replayUpdatedAt: replay?.updatedAt
     });
 
     if (!turn || turn.status !== "running") {

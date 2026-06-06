@@ -26,12 +26,14 @@ Mortic keeps browser-native speech APIs as the free fallback, but the voice laye
 
 ```text
 STT:
+- Deepgram Nova-2 when DEEPGRAM_API_KEY is set
 - Inworld STT when INWORLD_API_KEY is set
 - Whisper when OPENAI_API_KEY is set
 - browser SpeechRecognition fallback
 
 TTS:
 - Inworld WebSocket when INWORLD_API_KEY is set
+- Deepgram Aura when DEEPGRAM_API_KEY is set
 - ElevenLabs WebSocket / REST when ELEVENLABS_API_KEY is set
 - browser SpeechSynthesis fallback
 ```
@@ -41,11 +43,21 @@ Chrome is the first supported target. If remote STT credentials are missing or b
 Optional STT configuration:
 
 ```bash
-MORTIC_STT_PROVIDER=inworld-stt
+MORTIC_STT_PROVIDER=deepgram-stt
+DEEPGRAM_STT_MODEL=nova-2
 MORTIC_STT_INWORLD_MODEL=inworld/inworld-stt-1
 MORTIC_STT_WHISPER_MODEL=whisper-1
 MORTIC_STT_LANGUAGE=en-US
 MORTIC_MAX_STT_PAYLOAD_MB=8
+```
+
+Optional TTS configuration:
+
+```bash
+MORTIC_TTS_PROVIDER=deepgram
+DEEPGRAM_API_KEY=...
+DEEPGRAM_TTS_MODEL=aura-2-thalia-en
+DEEPGRAM_TTS_TIMEOUT_MS=15000
 ```
 
 If the app shows that microphone or browser speech recognition is not allowed, the browser denied speech capture for the localhost page. Allow microphone access for the page or use the text box fallback.

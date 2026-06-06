@@ -7,14 +7,14 @@ import { configuredMaxSttPayloadBytes, getSttStatus, transcribeAudioWithFallback
 import { createHandoffPrompt } from "../dist/node/server/codex.js";
 
 const validVoice = [
-  JSON.stringify({ type: "speak", text: "Inworld should be the first STT path, Whisper second, and Browser stays as fallback." }),
-  JSON.stringify({ type: "read", markdown: "- Primary STT: Inworld\n- Fallback STT: Whisper\n- Free fallback: Browser SpeechRecognition" })
+  JSON.stringify({ type: "speak", text: "Deepgram Nova-2 should be the first STT path, with Inworld, Whisper, and Browser available as fallbacks." }),
+  JSON.stringify({ type: "read", markdown: "- Primary STT: Deepgram Nova-2\n- Fallback STT: Inworld, then Whisper\n- Free fallback: Browser SpeechRecognition" })
 ].join("\n");
 
 const parsed = parseMorticVoice(validVoice);
 assert.equal(parsed.ok, true);
-assert.equal(parsed.ok ? parsed.parts.spokenText.includes("Inworld") : false, true);
-assert.equal(partialSpokenText(`${validVoice.split("\n")[0]}\n`), "Inworld should be the first STT path, Whisper second, and Browser stays as fallback.");
+assert.equal(parsed.ok ? parsed.parts.spokenText.includes("Deepgram") : false, true);
+assert.equal(partialSpokenText(`${validVoice.split("\n")[0]}\n`), "Deepgram Nova-2 should be the first STT path, with Inworld, Whisper, and Browser available as fallbacks.");
 
 const browserOnly = getSttStatus({});
 assert.equal(browserOnly.defaultProvider, "browser");
@@ -23,6 +23,11 @@ assert.deepEqual(browserOnly.availableProviders, ["browser"]);
 const whisperOnly = getSttStatus({ OPENAI_API_KEY: "test-openai" });
 assert.equal(whisperOnly.defaultProvider, "whisper");
 assert.deepEqual(whisperOnly.availableProviders, ["whisper", "browser"]);
+
+const deepgramOnly = getSttStatus({ DEEPGRAM_API_KEY: "test-deepgram" });
+assert.equal(deepgramOnly.defaultProvider, "deepgram-stt");
+assert.deepEqual(deepgramOnly.availableProviders, ["deepgram-stt", "browser"]);
+assert.equal(deepgramOnly.deepgramModel, "nova-2");
 
 const inworldOnly = getSttStatus({ INWORLD_API_KEY: "test-inworld" });
 assert.equal(inworldOnly.defaultProvider, "inworld-stt");
@@ -33,12 +38,26 @@ assert.equal(bothRemote.defaultProvider, "inworld-stt");
 assert.deepEqual(bothRemote.availableProviders, ["inworld-stt", "whisper", "browser"]);
 assert.equal(typeof bothRemote.maxPayloadBytes, "number");
 
+const allRemote = getSttStatus({ DEEPGRAM_API_KEY: "test-deepgram", INWORLD_API_KEY: "test-inworld", OPENAI_API_KEY: "test-openai" });
+assert.equal(allRemote.defaultProvider, "deepgram-stt");
+assert.deepEqual(allRemote.availableProviders, ["deepgram-stt", "inworld-stt", "whisper", "browser"]);
+
 const forcedWhisper = getSttStatus({
+  DEEPGRAM_API_KEY: "test-deepgram",
   INWORLD_API_KEY: "test-inworld",
   OPENAI_API_KEY: "test-openai",
   MORTIC_STT_PROVIDER: "whisper"
 });
 assert.equal(forcedWhisper.defaultProvider, "whisper");
+
+const forcedDeepgram = getSttStatus({
+  DEEPGRAM_API_KEY: "test-deepgram",
+  INWORLD_API_KEY: "test-inworld",
+  MORTIC_STT_PROVIDER: "deepgram-stt",
+  DEEPGRAM_STT_MODEL: "nova-2"
+});
+assert.equal(forcedDeepgram.defaultProvider, "deepgram-stt");
+assert.equal(forcedDeepgram.deepgramModel, "nova-2");
 
 await assert.rejects(
   () => transcribeAudioWithFallback({ provider: "inworld-stt", audioBase64: "AA==" }, {}),
