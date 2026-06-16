@@ -98,6 +98,12 @@ type TokenUsageSnapshot = {
   updatedAt: string;
 };
 
+type ScratchForkAccessPolicy = {
+  sandbox: "read-only";
+  approvalPolicy: "never";
+  networkPolicy?: "enabled";
+};
+
 type CompactedSparkBaseState = {
   sourceThreadId: string;
   compactedThreadId: string;
@@ -204,6 +210,20 @@ function chooseCompletedText(pending: PendingTurn): CompletedTextChoice {
 function readyTimeoutMs(): number {
   const raw = Number(process.env.MORTIC_APPSERVER_READY_TIMEOUT_MS);
   return Number.isFinite(raw) && raw > 0 ? raw : 15_000;
+}
+
+function scratchForkAccessPolicy(): ScratchForkAccessPolicy {
+  const networkRaw = (process.env.MORTIC_SCRATCH_FORK_NETWORK ?? process.env.MORTIC_SCRATCH_NETWORK ?? "").trim().toLowerCase();
+  return {
+    sandbox: "read-only",
+    approvalPolicy: "never",
+    ...(networkRaw === "1" || networkRaw === "true" || networkRaw === "enabled" ? { networkPolicy: "enabled" as const } : {})
+  };
+}
+
+function scratchForkAccessKey(): string {
+  const policy = scratchForkAccessPolicy();
+  return `sandbox=${policy.sandbox};approval=${policy.approvalPolicy};network=${policy.networkPolicy ?? "default"}`;
 }
 
 function itemTypeFromParams(params: any): string | undefined {
@@ -843,7 +863,7 @@ export class CodexAppServerBridge {
     voiceCaveman: boolean,
     developerInstructions?: string
   ): ScratchStateKey {
-    return `${sourceThreadId}|${cwd}|${model}|${effort}|${scratchMode}|${voiceCaveman ? "1" : "0"}|${developerInstructions ?? ""}`;
+    return `${sourceThreadId}|${cwd}|${model}|${effort}|${scratchMode}|${voiceCaveman ? "1" : "0"}|${scratchForkAccessKey()}|${developerInstructions ?? ""}`;
   }
 
   private compactedSparkBaseKey(
@@ -880,6 +900,7 @@ export class CodexAppServerBridge {
     onEvent?: (label: string, detail?: string) => void | Promise<void>
   ): Promise<string> {
     await onEvent?.("App-server compact-base fork started", sourceThreadId);
+    const accessPolicy = scratchForkAccessPolicy();
     const response = await this.request("thread/fork", {
       threadId: sourceThreadId,
       path: null,
@@ -887,9 +908,10 @@ export class CodexAppServerBridge {
       modelProvider: null,
       serviceTier: null,
       cwd,
-      approvalPolicy: "never",
+      approvalPolicy: accessPolicy.approvalPolicy,
       approvalsReviewer: null,
-      sandbox: "read-only",
+      sandbox: accessPolicy.sandbox,
+      ...(accessPolicy.networkPolicy ? { networkPolicy: accessPolicy.networkPolicy } : {}),
       config: {
         model_reasoning_effort: effort
       },
@@ -986,6 +1008,7 @@ export class CodexAppServerBridge {
     }
 
     await onEvent?.("App-server scratch fork started", sourceThreadId);
+    const accessPolicy = scratchForkAccessPolicy();
     const response = await this.request("thread/fork", {
       threadId: sourceThreadId,
       path: null,
@@ -993,9 +1016,10 @@ export class CodexAppServerBridge {
       modelProvider: null,
       serviceTier: null,
       cwd,
-      approvalPolicy: "never",
+      approvalPolicy: accessPolicy.approvalPolicy,
       approvalsReviewer: null,
-      sandbox: "read-only",
+      sandbox: accessPolicy.sandbox,
+      ...(accessPolicy.networkPolicy ? { networkPolicy: accessPolicy.networkPolicy } : {}),
       config: {
         model_reasoning_effort: effort
       },

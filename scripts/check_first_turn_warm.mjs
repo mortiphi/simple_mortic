@@ -26,6 +26,8 @@ const statsPath = path.join(statsDir, "stats.jsonl");
 process.env.PATH = `${fakeCodexDir}${path.delimiter}${process.env.PATH ?? ""}`;
 process.env.FAKE_CODEX_STATS = statsPath;
 process.env.MORTIC_APPSERVER_READY_TIMEOUT_MS = "2000";
+delete process.env.MORTIC_SCRATCH_FORK_NETWORK;
+delete process.env.MORTIC_SCRATCH_NETWORK;
 
 const { defaultScratchSettings } = await import("../dist/node/shared/scratchDefaults.js");
 const { CodexAppServerBridge } = await import("../dist/node/server/appServerBridge.js");
@@ -70,6 +72,28 @@ try {
   assert.equal(forks.length, 1, `concurrent prewarm + turn must create exactly one scratch fork, saw ${forks.length}`);
   assert.equal(turns.length, 1, "exactly one turn should reach the app-server");
   assert.equal(forks[0].sourceThreadId, "fake-source-thread", "fork must target the source thread");
+  assert.equal(forks[0].params?.sandbox, "read-only", "default scratch fork must stay read-only");
+  assert.equal(forks[0].params?.approvalPolicy, "never", "default scratch fork must not request approvals");
+  assert.equal(forks[0].params?.networkPolicy, undefined, "default scratch fork must not opt into network explicitly");
+
+  await bridge.shutdown("default access check complete");
+
+  // 4. Experimental progress-telemetry mode: give scratch forks network access
+  // while still forbidding filesystem writes and approval escalation.
+  process.env.MORTIC_SCRATCH_FORK_NETWORK = "1";
+  const networkBridge = new CodexAppServerBridge();
+  const networkText = await networkBridge.runTurn({ ...scratchParams, prompt: "network check" });
+  assert.equal(networkText, "fake answer", "network-enabled scratch should still complete");
+
+  const networkEvents = readFileSync(statsPath, "utf8")
+    .split("\n")
+    .filter(Boolean)
+    .map((line) => JSON.parse(line));
+  const networkFork = networkEvents.filter((event) => event.type === "fork").at(-1);
+  assert.equal(networkFork?.params?.sandbox, "read-only", "network-enabled scratch fork must stay read-only");
+  assert.equal(networkFork?.params?.approvalPolicy, "never", "network-enabled scratch fork must not request approvals");
+  assert.equal(networkFork?.params?.networkPolicy, "enabled", "network-enabled scratch fork must request network access");
+  await networkBridge.shutdown("network access check complete");
 } finally {
   await bridge.shutdown("check complete").catch(() => {});
   rmSync(statsDir, { recursive: true, force: true });

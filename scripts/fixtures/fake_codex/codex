@@ -61,7 +61,7 @@ wss.on("connection", (ws) => {
     }
     if (message.method === "thread/fork") {
       forkCount += 1;
-      record({ type: "fork", count: forkCount, sourceThreadId: message.params?.threadId });
+      record({ type: "fork", count: forkCount, sourceThreadId: message.params?.threadId, params: message.params });
       reply({ thread: { id: `fake-scratch-${forkCount}`, ephemeral: true } });
       return;
     }

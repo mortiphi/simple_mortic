@@ -308,12 +308,12 @@ textarea {
 
 .command-workspace {
   display: grid;
-  grid-template-columns: 320px minmax(0, 1fr);
+  grid-template-columns: minmax(0, 1fr);
   grid-template-areas:
-    "rail main"
-    "rail insights";
+    "main"
+    "insights";
   gap: 18px;
-  max-width: 1580px;
+  max-width: 1120px;
   margin: 0 auto;
 }
 
@@ -2996,10 +2996,10 @@ textarea {
 
 @media (max-width: 1180px) {
   .command-workspace {
-    grid-template-columns: 300px minmax(0, 1fr);
+    grid-template-columns: minmax(0, 1fr);
     grid-template-areas:
-      "rail main"
-      "insights insights";
+      "main"
+      "insights";
   }
 
   .insights-panel {

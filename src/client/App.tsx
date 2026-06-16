@@ -47,7 +47,7 @@ import { modelProfile } from "../shared/modelProfiles.js";
 import { ChartTranscriptPreview, MarkdownContent, TaskPlanDetails, dedupeExtractionItems, normalizeExtractionText } from "./components/Markdown.js";
 import { CanonicalStateModal, ChartModal } from "./components/ChartModal.js";
 import { ExtractionReviewModal, HandoffReviewModal, TranscriptDrawer } from "./components/SessionModals.js";
-import { InsightsPanel, SideRail } from "./components/ProjectPanels.js";
+import { InsightsPanel } from "./components/ProjectPanels.js";
 import { ForkActionSheet } from "./components/ForkActionSheet.js";
 import { OnboardingScreen } from "./components/OnboardingScreen.js";
 import { ThreadPicker } from "./components/ThreadPicker.js";
@@ -1406,37 +1406,6 @@ export function App() {
       </header>
 
       <section className="workspace command-workspace">
-        <SideRail
-          projectTitle={projectDisplayTitle}
-          refreshProject={refreshProject}
-          projectPending={projectPending}
-          openProjectChart={openProjectChart}
-          chartPending={chartPending}
-          openCanonicalState={openCanonicalState}
-          canonicalStatePending={canonicalStatePending}
-          scaffoldStats={scaffoldStats}
-          activeForkStatus={activeForkStatus}
-          activeForkTitle={activeForkTitle}
-          activeForkPersistence={activeForkPersistence}
-          activeForkAccess={activeForkAccess}
-          activeProviderReference={activeProviderReference}
-          activeProjectSession={activeProjectSession}
-          activeProjectSource={activeProjectSource}
-          session={session}
-          scaffoldTrace={scaffoldTrace}
-          scratchSessionsCount={scratchSessions.length}
-          recentForkSessions={recentForkSessions}
-          onSelectFork={openForkSheet}
-          canonicalChartSummary={canonicalChartSummary}
-          latestChartCheckpoint={latestChartCheckpoint}
-          latestChartDelta={latestChartDelta}
-          latestChartArtifact={latestChartArtifact}
-          approvedExtractions={approvedExtractions}
-          commitCurrentSession={() => commitCurrentSession()}
-          pending={pending}
-          transcriptLength={transcript.length}
-        />
-
         <section className="command-main">
           <details className="studio-settings">
             <summary>
