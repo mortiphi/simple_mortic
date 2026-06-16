@@ -1,0 +1,58 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "MorticCanonicalState",
+  "type": "object",
+  "required": [
+    "projectId",
+    "projectTitle",
+    "workspacePath",
+    "currentProjectSummary",
+    "canonicalSourceThreads",
+    "projectStateUpdates",
+    "prioritizationUpdates",
+    "taskUpdates",
+    "riskUpdates",
+    "backlogUpdates",
+    "linkedScratchSessions",
+    "linkedSourceThreads",
+    "updatedAt"
+  ],
+  "properties": {
+    "projectId": { "type": "string" },
+    "projectTitle": { "type": "string" },
+    "workspacePath": { "type": "string" },
+    "currentProjectSummary": { "type": "string" },
+    "canonicalSourceThreads": { "type": "array" },
+    "projectStateUpdates": { "type": "array" },
+    "prioritizationUpdates": { "type": "array" },
+    "taskUpdates": { "type": "array" },
+    "riskUpdates": { "type": "array" },
+    "backlogUpdates": { "type": "array" },
+    "linkedScratchSessions": { "type": "array" },
+    "linkedSourceThreads": { "type": "array" },
+    "lastApprovedHandoff": { "type": "string" },
+    "updatedAt": { "type": "string" }
+  },
+  "$defs": {
+    "canonicalItem": {
+      "type": "object",
+      "required": ["id", "title", "body", "status"],
+      "properties": {
+        "id": { "type": "string" },
+        "canonicalItemId": { "type": "string" },
+        "type": { "type": "string" },
+        "subtype": { "type": "string" },
+        "title": { "type": "string" },
+        "body": { "type": "string" },
+        "status": {
+          "enum": ["open", "in_progress", "resolved", "dropped", "superseded", "stale", "approved", "draft", "dismissed"]
+        },
+        "sources": { "type": "array" },
+        "createdAt": { "type": "string" },
+        "updatedAt": { "type": "string" }
+      },
+      "additionalProperties": true
+    }
+  },
+  "additionalProperties": true
+}

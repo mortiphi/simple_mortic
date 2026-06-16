@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Mortic Mock · Premium Command Center</title>
+  <link rel="stylesheet" href="./mock.css" />
+</head>
+<body class="mock command">
+  <main class="shell">
+    <header class="hero">
+      <div>
+        <p class="eyebrow">Transport health · Provider health · Scratch checkpoint</p>
+        <h1>Voice command center</h1>
+      </div>
+      <button class="danger">Kill audio</button>
+    </header>
+    <section class="rail">
+      <article class="panel meter"><span>Mic</span><strong>Armed</strong><meter min="0" max="1" value=".72"></meter><small>push-to-talk held</small></article>
+      <article class="panel meter"><span>Codex</span><strong>Thinking</strong><meter min="0" max="1" value=".42"></meter><small>first delta waiting</small></article>
+      <article class="panel meter"><span>Speech</span><strong>Speaking</strong><meter min="0" max="1" value=".91"></meter><small>barge-in ready</small></article>
+      <article class="panel meter"><span>Handoff</span><strong>Ready</strong><meter min="0" max="1" value="1"></meter><small>post-checkpoint actions</small></article>
+    </section>
+    <section class="layout">
+      <article class="panel transcript">
+        <h2>Live scratch</h2>
+        <div class="user">What breaks if LiveKit reconnects during a turn?</div>
+        <div class="agent">The transport can reconnect without touching Codex, but capture state must pause or segment cleanly so stale audio does not leak into the next turn.</div>
+        <details><summary>READ notes</summary><p>- reconnects: 1<br>- packet loss: 2<br>- track muted during interruption<br>- next validation: two fast back-to-back dictations</p></details>
+      </article>
+      <aside class="panel">
+        <h2>System health</h2>
+        <p class="okline">Source untouched</p>
+        <p class="okline">Scratch distinct</p>
+        <p class="warnline">Live mode requires turn-detection proof</p>
+        <textarea>Paste-ready prompt appears here...</textarea>
+      </aside>
+    </section>
+    <details class="diagnostics"><summary>Diagnostics</summary><p>RTT 46 ms · jitter 8 ms · loss 0 · STT final 1.2 s · interruption 140 ms · parser valid</p></details>
+  </main>
+</body>
+</html>

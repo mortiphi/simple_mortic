@@ -1,0 +1,194 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "CanonicalStateDeltaSet",
+  "type": "object",
+  "required": [
+    "schemaVersion",
+    "projectId",
+    "sourceThreadId",
+    "scratchSessionId",
+    "summary",
+    "candidateDeltas",
+    "rejectedCandidates",
+    "warnings",
+    "requiresHumanReview"
+  ],
+  "properties": {
+    "schemaVersion": { "const": "1.0" },
+    "projectId": { "type": "string", "minLength": 1 },
+    "sourceThreadId": { "type": "string", "minLength": 1 },
+    "scratchSessionId": { "type": "string", "minLength": 1 },
+    "transcriptRange": {
+      "type": "object",
+      "properties": {
+        "fromTurnId": { "type": "string" },
+        "toTurnId": { "type": "string" }
+      },
+      "additionalProperties": false
+    },
+    "summary": { "type": "string" },
+    "candidateDeltas": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/delta" }
+    },
+    "rejectedCandidates": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/rejectedCandidate" }
+    },
+    "warnings": { "type": "array", "items": { "type": "string" } },
+    "requiresHumanReview": { "type": "boolean" }
+  },
+  "additionalProperties": false,
+  "$defs": {
+    "delta": {
+      "type": "object",
+      "required": [
+        "id",
+        "type",
+        "subtype",
+        "operation",
+        "targetPath",
+        "targetId",
+        "title",
+        "body",
+        "rationale",
+        "evidence",
+        "confidence",
+        "reviewStatus",
+        "mergeStrategy",
+        "targetCanonicalItemId",
+        "lifecycleAction",
+        "statusBefore",
+        "statusAfter",
+        "reconcilesWith",
+        "reconciliationReason",
+        "conflicts"
+      ],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "type": {
+          "enum": [
+            "project_state_update",
+            "prioritisation_update",
+            "task_update",
+            "risk_update",
+            "backlog_update"
+          ]
+        },
+        "subtype": { "type": "string", "minLength": 1 },
+        "operation": {
+          "enum": [
+            "add",
+            "update",
+            "append_evidence",
+            "replace_summary",
+            "set_status",
+            "set_priority",
+            "mark_resolved",
+            "promote_backlog_to_task",
+            "demote_task_to_backlog",
+            "merge_duplicate",
+            "deprecate",
+            "no_op"
+          ]
+        },
+        "targetPath": { "type": "string", "minLength": 1 },
+        "targetId": { "type": ["string", "null"] },
+        "targetCanonicalItemId": { "type": ["string", "null"] },
+        "lifecycleAction": {
+          "enum": [
+            "create",
+            "update",
+            "append_evidence",
+            "resolve",
+            "drop",
+            "supersede",
+            "reopen",
+            "no_op"
+          ]
+        },
+        "statusBefore": {
+          "type": ["string", "null"],
+          "enum": ["open", "in_progress", "resolved", "dropped", "superseded", "stale", null]
+        },
+        "statusAfter": {
+          "enum": ["open", "in_progress", "resolved", "dropped", "superseded", "stale"]
+        },
+        "title": { "type": "string", "minLength": 1 },
+        "body": { "type": "string", "minLength": 1 },
+        "rationale": { "type": "string", "minLength": 1 },
+        "evidence": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/evidence" }
+        },
+        "confidence": { "type": "number", "minimum": 0, "maximum": 1 },
+        "reviewStatus": { "const": "candidate" },
+        "mergeStrategy": {
+          "enum": [
+            "append_unique",
+            "update_existing",
+            "merge_duplicate",
+            "replace_field",
+            "no_op"
+          ]
+        },
+        "reconcilesWith": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/reconciledItem" }
+        },
+        "reconciliationReason": { "type": "string", "minLength": 1 },
+        "conflicts": { "type": "array", "items": { "type": "string" } }
+      },
+      "additionalProperties": true
+    },
+    "evidence": {
+      "type": "object",
+      "required": ["source", "quote"],
+      "properties": {
+        "source": { "enum": ["transcript", "session", "production_json", "production_md"] },
+        "turnId": { "type": "string" },
+        "quote": { "type": "string", "minLength": 1 },
+        "range": {
+          "type": "object",
+          "properties": {
+            "start": { "type": "number" },
+            "end": { "type": "number" }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "reconciledItem": {
+      "type": "object",
+      "required": ["id", "type", "title", "status", "score"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "type": {
+          "enum": [
+            "project_state_update",
+            "prioritisation_update",
+            "task_update",
+            "risk_update",
+            "backlog_update"
+          ]
+        },
+        "title": { "type": "string" },
+        "status": { "enum": ["open", "in_progress", "resolved", "dropped", "superseded", "stale"] },
+        "score": { "type": "number", "minimum": 0, "maximum": 1 }
+      },
+      "additionalProperties": false
+    },
+    "rejectedCandidate": {
+      "type": "object",
+      "required": ["title", "reason"],
+      "properties": {
+        "title": { "type": "string" },
+        "reason": { "type": "string" },
+        "evidence": { "type": "array", "items": { "$ref": "#/$defs/evidence" } }
+      },
+      "additionalProperties": false
+    }
+  }
+}

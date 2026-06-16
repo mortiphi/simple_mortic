@@ -1,0 +1,81 @@
+[
+  {
+    "name": "plain prose",
+    "input": "I checked the implementation and the server is healthy.",
+    "mustIncludeSpeech": ["server is healthy"],
+    "mustNotIncludeSpeech": []
+  },
+  {
+    "name": "short inline filename",
+    "input": "The change belongs in `App.tsx`, not the storage layer.",
+    "mustIncludeSpeech": ["App dot tsx", "storage layer"],
+    "mustNotIncludeSpeech": ["`"]
+  },
+  {
+    "name": "typescript code block",
+    "input": "Use this helper:\n\n```ts\nexport function run() {\n  return { ok: true };\n}\n```\n\nThen rerun the check.",
+    "mustIncludeSpeech": ["I added a code snippet", "rerun the check"],
+    "mustNotIncludeSpeech": ["export function", "return {", "```"]
+  },
+  {
+    "name": "python code block",
+    "input": "I wrote the parser:\n\n```python\ndef parse(value):\n    return json.loads(value)\n```\n",
+    "mustIncludeSpeech": ["I added a code snippet"],
+    "mustNotIncludeSpeech": ["def parse", "json.loads"]
+  },
+  {
+    "name": "json fence",
+    "input": "The response was:\n\n```json\n{\"ok\": true, \"threadId\": \"019e8bef-2aba-77c1-87f8-95c9d9abff8c\"}\n```",
+    "mustIncludeSpeech": ["I included a JSON object"],
+    "mustNotIncludeSpeech": ["threadId", "019e8bef", "{\"ok\""]
+  },
+  {
+    "name": "raw json block",
+    "input": "{\n  \"status\": \"ready\",\n  \"scratchThreadId\": \"scratch-019e91d28dc871c283c767f546b4a802\"\n}",
+    "mustIncludeSpeech": ["I included a JSON object"],
+    "mustNotIncludeSpeech": ["scratchThreadId", "019e91d2"]
+  },
+  {
+    "name": "markdown table",
+    "input": "Here is the comparison:\n\n| Provider | Status |\n| --- | --- |\n| Codex | Ready |\n| TTS | Buffered |\n",
+    "mustIncludeSpeech": ["Here is the comparison", "I showed a table"],
+    "mustNotIncludeSpeech": ["|", "---"]
+  },
+  {
+    "name": "markdown bullets stay speakable",
+    "input": "Next steps:\n\n- Edit the approved item.\n- Run the projection eval.\n- Keep the chart readable.",
+    "mustIncludeSpeech": ["Next steps", "Edit the approved item", "Run the projection eval", "Keep the chart readable"],
+    "mustNotIncludeSpeech": ["I showed a code diff"]
+  },
+  {
+    "name": "image markdown",
+    "input": "Generated this:\n\n![Chart modal with readable transcript](/tmp/chart.png)",
+    "mustIncludeSpeech": ["Generated this", "I showed an image", "Chart modal with readable transcript"],
+    "mustNotIncludeSpeech": ["/tmp/chart.png", "!["]
+  },
+  {
+    "name": "diff block",
+    "input": "Patch:\n\n```diff\n- const raw = text;\n+ const projected = projectSpeech(text);\n```\n",
+    "mustIncludeSpeech": ["I showed a code diff"],
+    "mustNotIncludeSpeech": ["const raw", "projectSpeech(text)"]
+  },
+  {
+    "name": "stack trace",
+    "input": "It failed with:\n\nError: boom\n    at run (/Users/aeroknight/app.ts:12:4)\n    at main (/Users/aeroknight/main.ts:2:1)",
+    "mustIncludeSpeech": ["It failed with", "I included a log excerpt"],
+    "mustNotIncludeSpeech": ["/Users/aeroknight", "app.ts:12:4"]
+  },
+  {
+    "name": "opaque identifiers",
+    "input": "The scratch-16a087b9d5ed10cd turn came from codex://threads/019e8bef-2aba-77c1-87f8-95c9d9abff8c and event e28f9b3d-fc19-422c-9cf0-664939e6cb52.",
+    "mustIncludeSpeech": ["session reference", "Codex thread link"],
+    "mustNotIncludeSpeech": ["16a087b9d5ed10cd", "019e8bef", "e28f9b3d"]
+  },
+  {
+    "name": "exact read override",
+    "exact": true,
+    "input": "```ts\nconst value = { ok: true };\n```",
+    "mustIncludeSpeech": ["const value", "ok"],
+    "mustNotIncludeSpeech": ["I added a code snippet"]
+  }
+]

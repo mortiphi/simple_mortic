@@ -1,0 +1,12 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "mortic",
+      "runtimeExecutable": "node",
+      "runtimeArgs": ["dist/node/cli/main.js", "codex://threads/019e8bef-2aba-77c1-87f8-95c9d9abff8c", "--api-port", "5188", "--no-open"],
+      "port": 5188,
+      "autoPort": false
+    }
+  ]
+}

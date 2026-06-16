@@ -1,0 +1,89 @@
+#!/usr/bin/env node
+// Minimal fake `codex app-server` used by scripts/check_first_turn_warm.mjs.
+// Speaks just enough of the readyz + JSON-RPC websocket protocol for
+// CodexAppServerBridge: initialize, thread/fork, turn/start, thread/archive.
+// FAKE_CODEX_STATS appends one JSON line per fork/turn so checks can count
+// real fork requests. FAKE_CODEX_FAIL_READY=1 makes /readyz fail forever.
+import http from "node:http";
+import { appendFileSync } from "node:fs";
+import { WebSocketServer } from "ws";
+
+const args = process.argv.slice(2);
+if (args[0] !== "app-server") {
+  console.error(`fake codex: unsupported invocation: ${args.join(" ")}`);
+  process.exit(2);
+}
+
+const listen = args[args.indexOf("--listen") + 1];
+const port = Number(new URL(listen).port);
+const statsPath = process.env.FAKE_CODEX_STATS;
+const failReady = process.env.FAKE_CODEX_FAIL_READY === "1";
+
+function record(event) {
+  if (!statsPath) return;
+  appendFileSync(statsPath, `${JSON.stringify({ ...event, at: new Date().toISOString() })}\n`);
+}
+
+const server = http.createServer((req, res) => {
+  if (req.url === "/readyz") {
+    if (failReady) {
+      res.writeHead(500);
+      res.end("not ready");
+      return;
+    }
+    res.writeHead(200);
+    res.end("ok");
+    return;
+  }
+  res.writeHead(404);
+  res.end();
+});
+
+const wss = new WebSocketServer({ server });
+let forkCount = 0;
+let turnCount = 0;
+
+wss.on("connection", (ws) => {
+  ws.on("message", (raw) => {
+    let message;
+    try {
+      message = JSON.parse(String(raw));
+    } catch {
+      return;
+    }
+    if (!message.method || message.id === undefined) return;
+
+    const reply = (result) => ws.send(JSON.stringify({ id: message.id, result }));
+
+    if (message.method === "initialize") {
+      reply({});
+      return;
+    }
+    if (message.method === "thread/fork") {
+      forkCount += 1;
+      record({ type: "fork", count: forkCount, sourceThreadId: message.params?.threadId });
+      reply({ thread: { id: `fake-scratch-${forkCount}`, ephemeral: true } });
+      return;
+    }
+    if (message.method === "turn/start") {
+      turnCount += 1;
+      const turnId = `fake-turn-${turnCount}`;
+      const threadId = message.params?.threadId;
+      record({ type: "turn", count: turnCount, threadId });
+      reply({ turn: { id: turnId } });
+      setTimeout(() => {
+        ws.send(JSON.stringify({ method: "item/agentMessage/delta", params: { turnId, delta: "fake answer" } }));
+        ws.send(JSON.stringify({ method: "turn/completed", params: { threadId, turn: { id: turnId } } }));
+      }, 20);
+      return;
+    }
+    if (message.method === "thread/archive") {
+      record({ type: "archive", threadId: message.params?.threadId });
+      reply({});
+      return;
+    }
+    reply({});
+  });
+});
+
+server.listen(port, "127.0.0.1");

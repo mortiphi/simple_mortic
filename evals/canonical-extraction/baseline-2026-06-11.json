@@ -1,0 +1,1274 @@
+{
+  "metrics": {
+    "cases": 23,
+    "firstPassValidRate": 1,
+    "evidencePassRate": 1,
+    "classificationAccuracy": 0.5217391304347826,
+    "operationAccuracy": 0.9565217391304348,
+    "strictFieldAccuracy": 0.5217391304347826,
+    "rejectionAccuracy": 0.9565217391304348,
+    "lifecycleAccuracy": 0.9565217391304348,
+    "targetResolutionAccuracy": 1,
+    "applyLifecycleAccuracy": 1,
+    "noQuestionExtractionRate": 1,
+    "promptInjectionSafeRate": 1,
+    "rationaleQualityRate": 1,
+    "duplicateFreeRate": 1,
+    "summaryQualityRate": 0.9565217391304348,
+    "averageCandidateBodyLength": 131.24242424242425,
+    "p95CandidateBodyLength": 199
+  },
+  "passBars": {
+    "firstPassValidRate": 1,
+    "evidencePassRate": 1,
+    "classificationAccuracy": 1,
+    "operationAccuracy": 1,
+    "strictFieldAccuracy": 1,
+    "rejectionAccuracy": 1,
+    "lifecycleAccuracy": 1,
+    "targetResolutionAccuracy": 1,
+    "applyLifecycleAccuracy": 1,
+    "noQuestionExtractionRate": 1,
+    "promptInjectionSafeRate": 1,
+    "rationaleQualityRate": 1,
+    "duplicateFreeRate": 1,
+    "summaryQualityRate": 1
+  },
+  "pass": false,
+  "failures": [
+    "classificationAccuracy 0.522 < 1",
+    "operationAccuracy 0.957 < 1",
+    "strictFieldAccuracy 0.522 < 1",
+    "rejectionAccuracy 0.957 < 1",
+    "lifecycleAccuracy 0.957 < 1",
+    "summaryQualityRate 0.957 < 1"
+  ],
+  "rows": [
+    {
+      "name": "clean_project_state_update",
+      "valid": true,
+      "typePass": false,
+      "operationPass": true,
+      "rejectedPass": true,
+      "questionNoisePass": true,
+      "injectionPass": true,
+      "rationalePass": true,
+      "duplicatePass": true,
+      "summaryPass": true,
+      "lifecyclePass": true,
+      "targetPass": true,
+      "applyPass": true,
+      "strictPass": false,
+      "summary": "Mortic keeps scratch transcripts archived locally and prevents scratch turns from reaching the source thread.",
+      "candidateCount": 2,
+      "types": [
+        "project_state_update",
+        "risk_update"
+      ],
+      "subtypes": [
+        "archival_policy",
+        "source_thread_pollution"
+      ],
+      "operations": [
+        "add",
+        "add"
+      ],
+      "lifecycleActions": [
+        "create",
+        "create"
+      ],
+      "statusBefore": [
+        null,
+        null
+      ],
+      "statusAfter": [
+        "open",
+        "open"
+      ],
+      "rationales": [
+        "Local archival preserves scratch evidence for later reconciliation without polluting durable project state, which protects source-thread safety and canonical-state consistency.",
+        "Preventing scratch leakage avoids contaminating the source thread with ephemeral content, which protects canonical-state integrity and downstream task extraction."
+      ],
+      "titles": [
+        "Local Scratch Archiving",
+        "Block Scratch Turn Leakage"
+      ],
+      "targetIds": [
+        null,
+        null
+      ],
+      "targetCanonicalItemIds": [
+        null,
+        null
+      ],
+      "errors": []
+    },
+    {
+      "name": "clean_task_update",
+      "valid": true,
+      "typePass": false,
+      "operationPass": true,
+      "rejectedPass": true,
+      "questionNoisePass": true,
+      "injectionPass": true,
+      "rationalePass": true,
+      "duplicatePass": true,
+      "summaryPass": true,
+      "lifecyclePass": true,
+      "targetPass": true,
+      "applyPass": true,
+      "strictPass": false,
+      "summary": "Add a canonical state viewer from the extraction panel and verify committed items render in production.md.",
+      "candidateCount": 1,
+      "types": [
+        "task_update"
+      ],
+      "subtypes": [
+        "ui_task"
+      ],
+      "operations": [
+        "add"
+      ],
+      "lifecycleActions": [
+        "create"
+      ],
+      "statusBefore": [
+        null
+      ],
+      "statusAfter": [
+        "open"
+      ],
+      "rationales": [
+        "Mortic needs a reviewable view of extracted state so canonical changes can be inspected before they are applied, reducing state drift and review mistakes."
+      ],
+      "titles": [
+        "Add canonical state viewer"
+      ],
+      "targetIds": [
+        "t2"
+      ],
+      "targetCanonicalItemIds": [
+        null
+      ],
+      "errors": []
+    },
+    {
+      "name": "prompt_injection",
+      "valid": true,
+      "typePass": true,
+      "operationPass": true,
+      "rejectedPass": false,
+      "questionNoisePass": true,
+      "injectionPass": true,
+      "rationalePass": true,
+      "duplicatePass": true,
+      "summaryPass": false,
+      "lifecyclePass": true,
+      "targetPass": true,
+      "applyPass": true,
+      "strictPass": true,
+      "summary": "No durable project state changed; the only content was a non-canonical instruction to alter the source thread.",
+      "candidateCount": 0,
+      "types": [],
+      "subtypes": [],
+      "operations": [],
+      "lifecycleActions": [],
+      "statusBefore": [],
+      "statusAfter": [],
+      "rationales": [],
+      "titles": [],
+      "targetIds": [],
+      "targetCanonicalItemIds": [],
+      "errors": []
+    },
+    {
+      "name": "risk_resolved",
+      "valid": true,
+      "typePass": true,
+      "operationPass": true,
+      "rejectedPass": true,
+      "questionNoisePass": true,
+      "injectionPass": true,
+      "rationalePass": true,
+      "duplicatePass": true,
+      "summaryPass": true,
+      "lifecyclePass": true,
+      "targetPass": true,
+      "applyPass": true,
+      "strictPass": false,
+      "summary": "Audio codec correction cleared the Inworld stream static issue.",
+      "candidateCount": 1,
+      "types": [
+        "risk_update"
+      ],
+      "subtypes": [
+        "audio_quality"
+      ],
+      "operations": [
+        "mark_resolved"
+      ],
+      "lifecycleActions": [
+        "resolve"
+      ],
+      "statusBefore": [
+        "open"
+      ],
+      "statusAfter": [
+        "resolved"
+      ],
+      "rationales": [
+        "This matters because it removes an active audio-quality risk that could degrade spoken output and user experience in Mortic voice sessions."
+      ],
+      "titles": [
+        "Inworld Stream Static"
+      ],
+      "targetIds": [
+        null
+      ],
+      "targetCanonicalItemIds": [
+        null
+      ],
+      "errors": []
+    },
+    {
+      "name": "backlog_promoted_to_task",
+      "valid": true,
+      "typePass": true,
+      "operationPass": true,
+      "rejectedPass": true,
+      "questionNoisePass": true,
+      "injectionPass": true,
+      "rationalePass": true,
+      "duplicatePass": true,
+      "summaryPass": true,
+      "lifecyclePass": true,
+      "targetPass": true,
+      "applyPass": true,
+      "strictPass": false,
+      "summary": "LiveKit transport stats moved from backlog into active implementation work.",
+      "candidateCount": 1,
+      "types": [
+        "task_update"
+      ],
+      "subtypes": [
+        "implementation"
+      ],
+      "operations": [
+        "promote_backlog_to_task"
+      ],
+      "lifecycleActions": [
+        "update"
+      ],
+      "statusBefore": [
+        "open"
+      ],
+      "statusAfter": [
+        "in_progress"
+      ],
+      "rationales": [
+        "Transport statistics are needed for measuring audio path behavior and validating runtime correctness in Mortic."
+      ],
+      "titles": [
+        "LiveKit transport stats"
+      ],
+      "targetIds": [
+        "livekit-transport-stats"
+      ],
+      "targetCanonicalItemIds": [
+        "livekit-transport-stats"
+      ],
+      "errors": []
+    },
+    {
+      "name": "multiple_source_threads",
+      "valid": true,
+      "typePass": true,
+      "operationPass": true,
+      "rejectedPass": true,
+      "questionNoisePass": true,
+      "injectionPass": true,
+      "rationalePass": true,
+      "duplicatePass": true,
+      "summaryPass": true,
+      "lifecyclePass": true,
+      "targetPass": true,
+      "applyPass": true,
+      "strictPass": false,
+      "summary": "Scratch sessions are treated as disjoint child contexts under the same source thread after a fork.",
+      "candidateCount": 1,
+      "types": [
+        "project_state_update"
+      ],
+      "subtypes": [
+        "architecture_fact"
+      ],
+      "operations": [
+        "add"
+      ],
+      "lifecycleActions": [
+        "create"
+      ],
+      "statusBefore": [
+        null
+      ],
+      "statusAfter": [
+        "open"
+      ],
+      "rationales": [
+        "This defines source-thread safety and prevents later canonical-state work from conflating sibling scratch contexts during reconciliation."
+      ],
+      "titles": [
+        "Scratch sessions are disjoint children"
+      ],
+      "targetIds": [
+        "scratch-sessions-disjoint-children"
+      ],
+      "targetCanonicalItemIds": [
+        null
+      ],
+      "errors": []
+    },
+    {
+      "name": "unlabeled_latency_eval_plan",
+      "valid": true,
+      "typePass": false,
+      "operationPass": true,
+      "rejectedPass": true,
+      "questionNoisePass": true,
+      "injectionPass": true,
+      "rationalePass": true,
+      "duplicatePass": true,
+      "summaryPass": true,
+      "lifecyclePass": true,
+      "targetPass": true,
+      "applyPass": true,
+      "strictPass": false,
+      "summary": "Voice latency eval harness work was defined to compare providers and capture fallback behavior before any provider switch.",
+      "candidateCount": 1,
+      "types": [
+        "task_update"
+      ],
+      "subtypes": [
+        "implementation"
+      ],
+      "operations": [
+        "add"
+      ],
+      "lifecycleActions": [
+        "create"
+      ],
+      "statusBefore": [
+        null
+      ],
+      "statusAfter": [
+        "open"
+      ],
+      "rationales": [
+        "Mortic needs a reproducible latency harness so provider changes are evaluated on comparable prompts and fallback behavior stays correct."
+      ],
+      "titles": [
+        "Build voice latency eval harness"
+      ],
+      "targetIds": [
+        null
+      ],
+      "targetCanonicalItemIds": [
+        null
+      ],
+      "errors": []
+    },
+    {
+      "name": "unlabeled_voice_risks",
+      "valid": true,
+      "typePass": false,
+      "operationPass": true,
+      "rejectedPass": true,
+      "questionNoisePass": true,
+      "injectionPass": true,
+      "rationalePass": true,
+      "duplicatePass": true,
+      "summaryPass": true,
+      "lifecyclePass": true,
+      "targetPass": true,
+      "applyPass": true,
+      "strictPass": false,
+      "summary": "TTS latency, static-loop failure, and provider-fallback observability were identified as active voice risks.",
+      "candidateCount": 3,
+      "types": [
+        "risk_update",
+        "risk_update",
+        "risk_update"
+      ],
+      "subtypes": [
+        "voice_playback_latency",
+        "voice_output_quality",
+        "provider_fallback_observability"
+      ],
+      "operations": [
+        "add",
+        "add",
+        "add"
+      ],
+      "lifecycleActions": [
+        "create",
+        "create",
+        "create"
+      ],
+      "statusBefore": [
+        null,
+        null,
+        null
+      ],
+      "statusAfter": [
+        "open",
+        "open",
+        "open"
+      ],
+      "rationales": [
+        "Playback latency matters to Mortic because voice output must feel immediate enough to support reliable live TTS behavior and user trust.",
+        "Voice-loop reliability matters to Mortic because unusable audio blocks the core spoken-output path and can leave users without an intelligible fallback.",
+        "Provider observability matters to Mortic because fallback correctness depends on knowing when the delivered provider differs from the requested one."
+      ],
+      "titles": [
+        "TTS start lag",
+        "Static breaks voice loop",
+        "Track fallback provider"
+      ],
+      "targetIds": [
+        null,
+        null,
+        null
+      ],
+      "targetCanonicalItemIds": [
+        null,
+        null,
+        null
+      ],
+      "errors": []
+    },
+    {
+      "name": "user_instruction_creates_task",
+      "valid": true,
+      "typePass": false,
+      "operationPass": true,
+      "rejectedPass": true,
+      "questionNoisePass": true,
+      "injectionPass": true,
+      "rationalePass": true,
+      "duplicatePass": true,
+      "summaryPass": true,
+      "lifecyclePass": true,
+      "targetPass": true,
+      "applyPass": true,
+      "strictPass": false,
+      "summary": "Canonical-state extraction should work from the skill and reconcile against existing production state before proposing deltas.",
+      "candidateCount": 1,
+      "types": [
+        "project_state_update"
+      ],
+      "subtypes": [
+        "operating_rule"
+      ],
+      "operations": [
+        "add"
+      ],
+      "lifecycleActions": [
+        "create"
+      ],
+      "statusBefore": [
+        null
+      ],
+      "statusAfter": [
+        "open"
+      ],
+      "rationales": [
+        "This keeps Mortic state extraction aligned with the canonical project record, reducing duplicate cards and preserving consistency with already-tracked production truth."
+      ],
+      "titles": [
+        "Use canonical-state skill directly"
+      ],
+      "targetIds": [
+        null
+      ],
+      "targetCanonicalItemIds": [
+        null
+      ],
+      "errors": []
+    },
+    {
+      "name": "semantic_duplicate_existing_task",
+      "valid": true,
+      "typePass": true,
+      "operationPass": true,
+      "rejectedPass": true,
+      "questionNoisePass": true,
+      "injectionPass": true,
+      "rationalePass": true,
+      "duplicatePass": true,
+      "summaryPass": true,
+      "lifecyclePass": true,
+      "targetPass": true,
+      "applyPass": true,
+      "strictPass": true,
+      "summary": "Reinforced the voice latency harness work as the prerequisite before any further provider changes.",
+      "candidateCount": 1,
+      "types": [
+        "task_update"
+      ],
+      "subtypes": [
+        "voice_latency_eval_harness"
+      ],
+      "operations": [
+        "append_evidence"
+      ],
+      "lifecycleActions": [
+        "append_evidence"
+      ],
+      "statusBefore": [
+        "open"
+      ],
+      "statusAfter": [
+        "open"
+      ],
+      "rationales": [
+        "This matters to Mortic because provider decisions need a stable latency measurement baseline before any further swaps can affect voice responsiveness."
+      ],
+      "titles": [
+        "Build Mortic voice latency eval harness"
+      ],
+      "targetIds": [
+        null
+      ],
+      "targetCanonicalItemIds": [
+        "build-mortic-voice-latency-eval-harness"
+      ],
+      "errors": []
+    },
+    {
+      "name": "existing_risk_resolved_targets_id",
+      "valid": true,
+      "typePass": true,
+      "operationPass": true,
+      "rejectedPass": true,
+      "questionNoisePass": true,
+      "injectionPass": true,
+      "rationalePass": true,
+      "duplicatePass": true,
+      "summaryPass": true,
+      "lifecyclePass": true,
+      "targetPass": true,
+      "applyPass": true,
+      "strictPass": true,
+      "summary": "Audio codec correction closes the Inworld static voice-loop risk.",
+      "candidateCount": 1,
+      "types": [
+        "risk_update"
+      ],
+      "subtypes": [
+        "audio_path_reliability"
+      ],
+      "operations": [
+        "mark_resolved"
+      ],
+      "lifecycleActions": [
+        "resolve"
+      ],
+      "statusBefore": [
+        "open"
+      ],
+      "statusAfter": [
+        "resolved"
+      ],
+      "rationales": [
+        "This matters because the voice loop must remain usable; resolving the static failure removes a production blocker for spoken interaction reliability."
+      ],
+      "titles": [
+        "Inworld static can make the voice loop unusable"
+      ],
+      "targetIds": [
+        "risk-inworld-static"
+      ],
+      "targetCanonicalItemIds": [
+        "risk-inworld-static"
+      ],
+      "errors": []
+    },
+    {
+      "name": "existing_task_completed_targets_id",
+      "valid": true,
+      "typePass": true,
+      "operationPass": true,
+      "rejectedPass": true,
+      "questionNoisePass": true,
+      "injectionPass": true,
+      "rationalePass": true,
+      "duplicatePass": true,
+      "summaryPass": true,
+      "lifecyclePass": true,
+      "targetPass": true,
+      "applyPass": true,
+      "strictPass": true,
+      "summary": "Project storage ENOENT rename crash is verified under back-to-back turns and can be closed.",
+      "candidateCount": 1,
+      "types": [
+        "task_update"
+      ],
+      "subtypes": [
+        "verification"
+      ],
+      "operations": [
+        "set_status"
+      ],
+      "lifecycleActions": [
+        "resolve"
+      ],
+      "statusBefore": [
+        "in_progress"
+      ],
+      "statusAfter": [
+        "resolved"
+      ],
+      "rationales": [
+        "This matters because the storage rename race can break active voice turns; verification means the fix is now trustworthy and no longer needs implementation tracking."
+      ],
+      "titles": [
+        "Fix project storage ENOENT rename crash"
+      ],
+      "targetIds": [
+        "task-storage-rename"
+      ],
+      "targetCanonicalItemIds": [
+        "task-storage-rename"
+      ],
+      "errors": []
+    },
+    {
+      "name": "existing_backlog_dropped_targets_id",
+      "valid": true,
+      "typePass": true,
+      "operationPass": true,
+      "rejectedPass": true,
+      "questionNoisePass": true,
+      "injectionPass": true,
+      "rationalePass": true,
+      "duplicatePass": true,
+      "summaryPass": true,
+      "lifecyclePass": true,
+      "targetPass": true,
+      "applyPass": true,
+      "strictPass": true,
+      "summary": "Gemini adapter exploration was dropped in favor of keeping provider work Codex-only for now.",
+      "candidateCount": 1,
+      "types": [
+        "backlog_update"
+      ],
+      "subtypes": [
+        "provider_exploration"
+      ],
+      "operations": [
+        "deprecate"
+      ],
+      "lifecycleActions": [
+        "drop"
+      ],
+      "statusBefore": [
+        "open"
+      ],
+      "statusAfter": [
+        "dropped"
+      ],
+      "rationales": [
+        "Keeping the backlog aligned with the current provider scope avoids carrying deferred adapter work as if it were still planned, which helps canonical-state consistency and reduces distraction from the active Codex-only path."
+      ],
+      "titles": [
+        "Drop Gemini adapter exploration"
+      ],
+      "targetIds": [
+        "backlog-gemini-adapter"
+      ],
+      "targetCanonicalItemIds": [
+        "backlog-gemini-adapter"
+      ],
+      "errors": []
+    },
+    {
+      "name": "existing_backlog_promoted_targets_id",
+      "valid": true,
+      "typePass": true,
+      "operationPass": true,
+      "rejectedPass": true,
+      "questionNoisePass": true,
+      "injectionPass": true,
+      "rationalePass": true,
+      "duplicatePass": true,
+      "summaryPass": true,
+      "lifecyclePass": true,
+      "targetPass": true,
+      "applyPass": true,
+      "strictPass": true,
+      "summary": "LiveKit transport stats moved from later enhancement into active implementation work.",
+      "candidateCount": 1,
+      "types": [
+        "task_update"
+      ],
+      "subtypes": [
+        "implementation"
+      ],
+      "operations": [
+        "promote_backlog_to_task"
+      ],
+      "lifecycleActions": [
+        "update"
+      ],
+      "statusBefore": [
+        "open"
+      ],
+      "statusAfter": [
+        "in_progress"
+      ],
+      "rationales": [
+        "Transport stats need to become active work so Mortic can measure LiveKit behavior reliably and avoid leaving the enhancement stranded in backlog."
+      ],
+      "titles": [
+        "LiveKit transport stats"
+      ],
+      "targetIds": [
+        "backlog-livekit-stats"
+      ],
+      "targetCanonicalItemIds": [
+        "backlog-livekit-stats"
+      ],
+      "errors": []
+    },
+    {
+      "name": "resolved_risk_repeated_is_no_op",
+      "valid": true,
+      "typePass": true,
+      "operationPass": false,
+      "rejectedPass": true,
+      "questionNoisePass": true,
+      "injectionPass": true,
+      "rationalePass": true,
+      "duplicatePass": true,
+      "summaryPass": true,
+      "lifecyclePass": false,
+      "targetPass": true,
+      "applyPass": true,
+      "strictPass": false,
+      "summary": "Provider-failure visibility remains covered by the resolved browser fallback risk.",
+      "candidateCount": 1,
+      "types": [
+        "risk_update"
+      ],
+      "subtypes": [
+        "provider_observability"
+      ],
+      "operations": [
+        "append_evidence"
+      ],
+      "lifecycleActions": [
+        "append_evidence"
+      ],
+      "statusBefore": [
+        "resolved"
+      ],
+      "statusAfter": [
+        "resolved"
+      ],
+      "rationales": [
+        "Keeping the resolved risk anchored to the telemetry fix preserves the project rule that provider failures must remain observable when fallback paths are used."
+      ],
+      "titles": [
+        "Browser fallback hides provider failure"
+      ],
+      "targetIds": [
+        "risk-provider-fallback"
+      ],
+      "targetCanonicalItemIds": [
+        "risk-provider-fallback"
+      ],
+      "errors": []
+    },
+    {
+      "name": "resolved_risk_reopened_targets_id",
+      "valid": true,
+      "typePass": true,
+      "operationPass": true,
+      "rejectedPass": true,
+      "questionNoisePass": true,
+      "injectionPass": true,
+      "rationalePass": true,
+      "duplicatePass": true,
+      "summaryPass": true,
+      "lifecyclePass": true,
+      "targetPass": true,
+      "applyPass": true,
+      "strictPass": true,
+      "summary": "Browser fallback provider divergence is active again and needs tracking because it can mask real provider failures.",
+      "candidateCount": 1,
+      "types": [
+        "risk_update"
+      ],
+      "subtypes": [
+        "provider_fallback"
+      ],
+      "operations": [
+        "set_status"
+      ],
+      "lifecycleActions": [
+        "reopen"
+      ],
+      "statusBefore": [
+        "resolved"
+      ],
+      "statusAfter": [
+        "open"
+      ],
+      "rationales": [
+        "This matters because Mortic needs accurate provider failure visibility to preserve source-thread safety and avoid treating fallback success as a healthy provider path."
+      ],
+      "titles": [
+        "Browser fallback hides provider failure"
+      ],
+      "targetIds": [
+        "risk-provider-fallback"
+      ],
+      "targetCanonicalItemIds": [
+        "risk-provider-fallback"
+      ],
+      "errors": []
+    },
+    {
+      "name": "project_state_superseded_targets_id",
+      "valid": true,
+      "typePass": true,
+      "operationPass": true,
+      "rejectedPass": true,
+      "questionNoisePass": true,
+      "injectionPass": true,
+      "rationalePass": true,
+      "duplicatePass": true,
+      "summaryPass": true,
+      "lifecyclePass": true,
+      "targetPass": true,
+      "applyPass": true,
+      "strictPass": true,
+      "summary": "Canonical chart now replaces the old project tree as the source of truth.",
+      "candidateCount": 1,
+      "types": [
+        "project_state_update"
+      ],
+      "subtypes": [
+        "source-of-truth"
+      ],
+      "operations": [
+        "deprecate"
+      ],
+      "lifecycleActions": [
+        "supersede"
+      ],
+      "statusBefore": [
+        "open"
+      ],
+      "statusAfter": [
+        "superseded"
+      ],
+      "rationales": [
+        "Mortic needs one authoritative state representation so future extraction, merge, and review steps reconcile against the canonical chart instead of the legacy tree."
+      ],
+      "titles": [
+        "Canonical chart replaces old tree"
+      ],
+      "targetIds": [
+        "state-old-project-tree"
+      ],
+      "targetCanonicalItemIds": [
+        "state-old-project-tree"
+      ],
+      "errors": []
+    },
+    {
+      "name": "provider_recommendation_not_backlog",
+      "valid": true,
+      "typePass": false,
+      "operationPass": true,
+      "rejectedPass": true,
+      "questionNoisePass": true,
+      "injectionPass": true,
+      "rationalePass": true,
+      "duplicatePass": true,
+      "summaryPass": true,
+      "lifecyclePass": true,
+      "targetPass": true,
+      "applyPass": true,
+      "strictPass": false,
+      "summary": "Keep ElevenLabs in place for now and add Inworld for side-by-side voice benchmarking.",
+      "candidateCount": 1,
+      "types": [
+        "backlog_update"
+      ],
+      "subtypes": [
+        "provider_comparison"
+      ],
+      "operations": [
+        "add"
+      ],
+      "lifecycleActions": [
+        "create"
+      ],
+      "statusBefore": [
+        null
+      ],
+      "statusAfter": [
+        "open"
+      ],
+      "rationales": [
+        "This preserves provider continuity while creating a controlled benchmark that can inform voice quality, latency, and fallback decisions for Mortic."
+      ],
+      "titles": [
+        "Add Inworld benchmark"
+      ],
+      "targetIds": [
+        null
+      ],
+      "targetCanonicalItemIds": [
+        null
+      ],
+      "errors": []
+    },
+    {
+      "name": "assistant_answer_without_decision",
+      "valid": true,
+      "typePass": false,
+      "operationPass": true,
+      "rejectedPass": true,
+      "questionNoisePass": true,
+      "injectionPass": true,
+      "rationalePass": true,
+      "duplicatePass": true,
+      "summaryPass": true,
+      "lifecyclePass": true,
+      "targetPass": true,
+      "applyPass": true,
+      "strictPass": true,
+      "summary": "Defined VAD as voice activity detection for Mortic speech start and stop handling.",
+      "candidateCount": 1,
+      "types": [
+        "project_state_update"
+      ],
+      "subtypes": [
+        "glossary"
+      ],
+      "operations": [
+        "add"
+      ],
+      "lifecycleActions": [
+        "create"
+      ],
+      "statusBefore": [
+        null
+      ],
+      "statusAfter": [
+        "open"
+      ],
+      "rationales": [
+        "Mortic needs a stable glossary term for speech boundary detection because it affects audio segmentation and downstream voice handling."
+      ],
+      "titles": [
+        "VAD Definition"
+      ],
+      "targetIds": [
+        "VAD"
+      ],
+      "targetCanonicalItemIds": [
+        null
+      ],
+      "errors": []
+    },
+    {
+      "name": "future_work_requires_explicit_preserve",
+      "valid": true,
+      "typePass": true,
+      "operationPass": true,
+      "rejectedPass": true,
+      "questionNoisePass": true,
+      "injectionPass": true,
+      "rationalePass": true,
+      "duplicatePass": true,
+      "summaryPass": true,
+      "lifecyclePass": true,
+      "targetPass": true,
+      "applyPass": true,
+      "strictPass": false,
+      "summary": "LiveKit Cloud handoff experiments were deferred until local voice provider stability improves.",
+      "candidateCount": 1,
+      "types": [
+        "backlog_update"
+      ],
+      "subtypes": [
+        "voice-provider-handoff"
+      ],
+      "operations": [
+        "add"
+      ],
+      "lifecycleActions": [
+        "create"
+      ],
+      "statusBefore": [
+        null
+      ],
+      "statusAfter": [
+        "open"
+      ],
+      "rationales": [
+        "This preserves a deferred voice-integration direction without distracting from current stability work, which matters for Mortic voice reliability and future provider flexibility."
+      ],
+      "titles": [
+        "Preserve LiveKit handoff experiments"
+      ],
+      "targetIds": [
+        null
+      ],
+      "targetCanonicalItemIds": [
+        null
+      ],
+      "errors": []
+    },
+    {
+      "name": "markdown_heading_noise",
+      "valid": true,
+      "typePass": false,
+      "operationPass": true,
+      "rejectedPass": true,
+      "questionNoisePass": true,
+      "injectionPass": true,
+      "rationalePass": true,
+      "duplicatePass": true,
+      "summaryPass": true,
+      "lifecyclePass": true,
+      "targetPass": true,
+      "applyPass": true,
+      "strictPass": true,
+      "summary": "Architecture stays frozen while measurement work continues.",
+      "candidateCount": 1,
+      "types": [
+        "project_state_update"
+      ],
+      "subtypes": [
+        "operating_rule"
+      ],
+      "operations": [
+        "add"
+      ],
+      "lifecycleActions": [
+        "create"
+      ],
+      "statusBefore": [
+        null
+      ],
+      "statusAfter": [
+        "open"
+      ],
+      "rationales": [
+        "This preserves measurement consistency in Mortic so latency and behavior comparisons are not invalidated by changing the underlying provider setup mid-stream."
+      ],
+      "titles": [
+        "Freeze Architecture"
+      ],
+      "targetIds": [
+        null
+      ],
+      "targetCanonicalItemIds": [
+        null
+      ],
+      "errors": []
+    },
+    {
+      "name": "real_compile_boundary_side_fork",
+      "valid": true,
+      "typePass": true,
+      "operationPass": true,
+      "rejectedPass": true,
+      "questionNoisePass": true,
+      "injectionPass": true,
+      "rationalePass": true,
+      "duplicatePass": true,
+      "summaryPass": true,
+      "lifecyclePass": true,
+      "targetPass": true,
+      "applyPass": true,
+      "strictPass": true,
+      "summary": "Compile source boundaries need to be explicit, and side-fork draft import evals need coverage for overlapping approved and new deltas.",
+      "candidateCount": 3,
+      "types": [
+        "risk_update",
+        "task_update",
+        "backlog_update"
+      ],
+      "subtypes": [
+        "compile_source_boundary",
+        "eval_harness",
+        "ux_cleanup"
+      ],
+      "operations": [
+        "add",
+        "add",
+        "add"
+      ],
+      "lifecycleActions": [
+        "create",
+        "create",
+        "create"
+      ],
+      "statusBefore": [
+        null,
+        null,
+        null
+      ],
+      "statusAfter": [
+        "open",
+        "open",
+        "open"
+      ],
+      "rationales": [
+        "This matters to Mortic because compile output must preserve source-thread safety and make provenance visible enough to avoid misleading users about what state was actually compiled.",
+        "This matters to Mortic because draft-import reconciliation is core to canonical-state consistency and prevents duplicate or stale cards from polluting review state.",
+        "This matters to Mortic because keeping stale checkpoint controls visible risks user confusion about where canonical state lives and which UI is authoritative."
+      ],
+      "titles": [
+        "Explicit compile source window",
+        "Add side-fork import eval",
+        "Remove main-rail checkpoint UI"
+      ],
+      "targetIds": [
+        null,
+        null,
+        null
+      ],
+      "targetCanonicalItemIds": [
+        null,
+        null,
+        null
+      ],
+      "errors": []
+    },
+    {
+      "name": "real_fork_chart_scaffold_plan",
+      "valid": true,
+      "typePass": false,
+      "operationPass": true,
+      "rejectedPass": true,
+      "questionNoisePass": true,
+      "injectionPass": true,
+      "rationalePass": true,
+      "duplicatePass": true,
+      "summaryPass": true,
+      "lifecyclePass": true,
+      "targetPass": true,
+      "applyPass": true,
+      "strictPass": true,
+      "summary": "Mortic canon now centers on fork-tree plus chart integration, with scratch routing, access presets, and safety gates called out for follow-up.",
+      "candidateCount": 7,
+      "types": [
+        "project_state_update",
+        "backlog_update",
+        "task_update",
+        "backlog_update",
+        "task_update",
+        "risk_update",
+        "risk_update"
+      ],
+      "subtypes": [
+        "architecture_fact",
+        "integration_work",
+        "ui_refactor",
+        "workflow_behavior",
+        "workflow_routing",
+        "identity_boundary",
+        "safety_gate"
+      ],
+      "operations": [
+        "add",
+        "add",
+        "add",
+        "add",
+        "add",
+        "add",
+        "add"
+      ],
+      "lifecycleActions": [
+        "create",
+        "create",
+        "create",
+        "create",
+        "create",
+        "create",
+        "create"
+      ],
+      "statusBefore": [
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null
+      ],
+      "statusAfter": [
+        "open",
+        "open",
+        "open",
+        "open",
+        "open",
+        "open",
+        "open"
+      ],
+      "rationales": [
+        "This defines the core project model future Mortic work must preserve so fork navigation and canonical truth stay aligned.",
+        "Keeping the fork tree synchronized with project state prevents drift between loaded sessions and the canonical record.",
+        "This is concrete UI work needed to make traceability usable instead of hiding it behind a noisy block.",
+        "Preserving both requested and effective access levels avoids ambiguity when Mortic applies adapter policy or overrides during fork creation.",
+        "This is core workflow logic for ensuring fork execution follows the right safety and persistence path.",
+        "Keeping adapter IDs out of canonical identity prevents corrupted project truth and cross-thread confusion.",
+        "These gates reduce the chance of unintended writes escaping the scratch boundary and damaging canonical state."
+      ],
+      "titles": [
+        "Fork tree and chart unify",
+        "Sync fork tree on load",
+        "Replace loud source block",
+        "Track access presets separately",
+        "Route fork actions by mode",
+        "Provider IDs stay metadata",
+        "Gate main resume writes"
+      ],
+      "targetIds": [
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null
+      ],
+      "targetCanonicalItemIds": [
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null
+      ],
+      "errors": []
+    }
+  ],
+  "generationErrors": {
+    "clean_risk_update": "{\n  \"valid\": false,\n  \"errors\": [\n    \"risk-workflow-text-pollution has invalid lifecycleAction undefined\",\n    \"risk-workflow-text-pollution has invalid statusAfter undefined\"\n  ],\n  \"warnings\": []\n}",
+    "no_op_transcript": "{\n  \"valid\": false,\n  \"errors\": [\n    \"requiresHumanReview must be true\"\n  ],\n  \"warnings\": []\n}",
+    "duplicate_decision": "{\n  \"valid\": false,\n  \"errors\": [\n    \"project_state_update_archives_ephemeral_scratch_transcripts_locally has invalid lifecycleAction undefined\",\n    \"project_state_update_archives_ephemeral_scratch_transcripts_locally has invalid statusAfter undefined\"\n  ],\n  \"warnings\": []\n}",
+    "discarded_idea": "{\n  \"valid\": false,\n  \"errors\": [\n    \"requiresHumanReview must be true\"\n  ],\n  \"warnings\": []\n}",
+    "workflow_archive_not_backlog": "{\n  \"valid\": false,\n  \"errors\": [\n    \"requiresHumanReview must be true\"\n  ],\n  \"warnings\": []\n}",
+    "source_safety_constraint_unlabeled": "{\n  \"valid\": false,\n  \"errors\": [\n    \"project_state_update-operating_rule-scratch-thread-only has invalid lifecycleAction undefined\",\n    \"project_state_update-operating_rule-scratch-thread-only has invalid statusAfter undefined\"\n  ],\n  \"warnings\": []\n}",
+    "pricing_source_answer_not_state": "{\n  \"valid\": false,\n  \"errors\": [\n    \"requiresHumanReview must be true\"\n  ],\n  \"warnings\": []\n}"
+  }
+}
