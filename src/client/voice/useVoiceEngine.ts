@@ -26,8 +26,8 @@ import {
 import { partialSpokenText } from "../../shared/voiceResponse.js";
 import { projectSpeech, shouldUseExactSpeechProjection } from "../../shared/speechProjection.js";
 import { attributeSttFailure } from "../../shared/sttFailure.js";
+import { hasAssistantOutputForBargeIn } from "../../shared/bargeInControl.js";
 import {
-  interruptResumeAction,
   isCurrentRecognitionSession,
   isEditableShortcutTarget,
   keyboardIntentForKeyDown,
@@ -51,6 +51,21 @@ import { needsModelTransitionPreflight } from "../lib/spark.js";
 import { HARD_STT_SEGMENT_MS, LIVE_MODE_RUNTIME_ENABLED, MAX_LOCAL_SEGMENT_BYTES, REMOTE_STT_SAMPLE_RATE, SOFT_STT_SEGMENT_MS, audioContextConstructor, bytesToBase64, chooseSpeakableEnd, downsampleFloat32, encodeWavPcm16, friendlySpeechError, isBufferedTtsProvider, isSpeakableText, mergeFloat32, rangeSummary } from "../lib/voice.js";
 
 const TTS_CHUNK_WATCHDOG_MS = 12000;
+
+type BargeInSource = "push-to-talk" | "interrupt-button" | "live-vad";
+
+type BargeInPhase = "idle" | "barge_capture" | "transcribing" | "queued_next_turn";
+
+type BargeInState = {
+  id: number;
+  source: BargeInSource;
+  phase: BargeInPhase;
+  startedAt: number;
+  outputTurnId: string | null;
+  pendingAtStart: boolean;
+  firstMicFrameAt?: number;
+  firstSpeechDetectedAt?: number;
+};
 
 export interface VoiceEngineParams {
   api: string;
@@ -113,8 +128,6 @@ export function useVoiceEngine(params: VoiceEngineParams) {
     pending,
     pendingRef,
     setTurnPending,
-    setPrewarm,
-    prewarmKeyRef,
     prewarmAnnouncementKeyRef,
     speechProjectionEnabled,
     progressSoundsEnabled,
@@ -195,6 +208,8 @@ export function useVoiceEngine(params: VoiceEngineParams) {
   const speechPlaybackGenerationRef = useRef(0);
   const mutedSpeechTurnIdRef = useRef<string | null>(null);
   const bargeInCaptureRef = useRef(false);
+  const bargeInStateRef = useRef<BargeInState | null>(null);
+  const bargeInSequenceRef = useRef(0);
   const bargeInNoSpeechTimerRef = useRef<number | null>(null);
   const pttViewportRestoreRef = useRef<{ x: number; y: number; until: number } | null>(null);
   const ttsRuntimeRef = useRef<RuntimeTtsProvider | null>(null);
@@ -768,7 +783,14 @@ export function useVoiceEngine(params: VoiceEngineParams) {
           ttsCloseCode: health.ttsCloseCode,
           ttsCloseReason: health.ttsCloseReason,
           finalTextMs: health.finalTextMs,
-          speechAfterFinalMs: health.speechAfterFinalMs
+          speechAfterFinalMs: health.speechAfterFinalMs,
+          bargeInStartedMs: health.bargeInStartedMs,
+          bargeInAudioStopMs: health.bargeInAudioStopMs,
+          bargeInCaptureStartMs: health.bargeInCaptureStartMs,
+          bargeInFirstMicFrameMs: health.bargeInFirstMicFrameMs,
+          bargeInFirstSpeechDetectedMs: health.bargeInFirstSpeechDetectedMs,
+          bargeInQueuedMs: health.bargeInQueuedMs,
+          interruptionLatencyMs: health.interruptionLatencyMs
         })
       });
       const payload = await response.json();
@@ -804,23 +826,35 @@ export function useVoiceEngine(params: VoiceEngineParams) {
     if (patch) updateAudioHealthAndSync(patch);
   }
 
-  function ttsDiagnosticsCallbacks(onStart?: () => void): TtsSpeakCallbacks {
+  function ttsDiagnosticsCallbacks(onStart?: () => void, playbackGeneration = speechPlaybackGenerationRef.current): TtsSpeakCallbacks {
+    const active = () => playbackGeneration === speechPlaybackGenerationRef.current && !speechMutedForCurrentTurn();
     return {
-      onStart,
-      onConnect: () => recordFirstAudioTiming("ttsConnectMs"),
-      onAudioChunk: () => recordFirstAudioTiming("firstAudioChunkMs"),
-      onAudioPlay: () => recordFirstAudioTiming("firstAudioPlayMs"),
+      onStart: () => {
+        if (active()) onStart?.();
+      },
+      onConnect: () => {
+        if (active()) recordFirstAudioTiming("ttsConnectMs");
+      },
+      onAudioChunk: () => {
+        if (active()) recordFirstAudioTiming("firstAudioChunkMs");
+      },
+      onAudioPlay: () => {
+        if (active()) recordFirstAudioTiming("firstAudioPlayMs");
+      },
       onBufferUnderrun: () => {
+        if (!active()) return;
         const current = audioHealthRef.current?.audioBufferUnderruns ?? 0;
         updateAudioHealthAndSync({ audioBufferUnderruns: current + 1 });
       },
       onClose: (code, reason) => {
+        if (!active()) return;
         updateAudioHealthAndSync({
           ttsCloseCode: code,
           ttsCloseReason: reason
         });
       },
       onStatus: (status) => {
+        if (!active()) return;
         updateAudioHealthAndSync({ ttsProviderStatus: status });
       }
     };
@@ -906,7 +940,7 @@ export function useVoiceEngine(params: VoiceEngineParams) {
         });
         if (currentTurnIdRef.current) scheduleAudioHealthSync(currentTurnIdRef.current, 120);
       };
-      const result = await speakWithWatchdog(provider, next.text, ttsDiagnosticsCallbacks(recordSpeechStart));
+      const result = await speakWithWatchdog(provider, next.text, ttsDiagnosticsCallbacks(recordSpeechStart, playbackGeneration));
       if (playbackGeneration !== speechPlaybackGenerationRef.current) return;
       const ttsResolvedPatch = firstTimingPatch("firstTtsResolvedMs");
       if (ttsResolvedPatch) updateAudioHealthAndSync(ttsResolvedPatch);
@@ -1020,6 +1054,7 @@ export function useVoiceEngine(params: VoiceEngineParams) {
     currentTurnScratchModeRef.current = null;
     mutedSpeechTurnIdRef.current = null;
     bargeInCaptureRef.current = false;
+    bargeInStateRef.current = null;
     clearBargeInNoSpeechTimer();
     assistantVisibleStartedRef.current = false;
     exactSpeechProjectionRef.current = false;
@@ -1036,22 +1071,88 @@ export function useVoiceEngine(params: VoiceEngineParams) {
     if (clearDraft) setDraft("");
   }
 
-  function interruptSpeechOnly(): void {
-    resetProgressSpeech(false);
+  function assistantOutputActiveForBargeIn(): boolean {
+    return hasAssistantOutputForBargeIn({
+      pending: pendingRef.current,
+      speechPhase: speechPhaseRef.current,
+      speaking: speakingRef.current,
+      speechQueueLength: speechQueueRef.current.length,
+      progressSpeechActive: progressSpeechActiveRef.current,
+      liveAssistantText: liveAssistantTextRef.current
+    });
+  }
+
+  function setBargeInPhase(phase: BargeInPhase): void {
+    const current = bargeInStateRef.current;
+    if (!current) return;
+    bargeInStateRef.current = { ...current, phase };
+  }
+
+  function patchBargeInAudioHealth(patch: Partial<AudioHealthState>, delayMs = 60): void {
+    const turnId = currentTurnIdRef.current ?? state.session?.activeTurn?.id ?? null;
+    if (!turnId) return;
+    updateAudioHealth(patch);
+    scheduleAudioHealthSync(turnId, delayMs);
+  }
+
+  function recordBargeInCaptureStart(): void {
+    if (!bargeInStateRef.current) return;
+    patchBargeInAudioHealth({ bargeInCaptureStartMs: elapsedSinceTurnStart() }, 80);
+  }
+
+  function recordBargeInFirstMicFrame(): void {
+    const current = bargeInStateRef.current;
+    if (!current || current.firstMicFrameAt !== undefined) return;
+    bargeInStateRef.current = { ...current, firstMicFrameAt: performance.now() };
+    patchBargeInAudioHealth({ bargeInFirstMicFrameMs: elapsedSinceTurnStart() }, 80);
+  }
+
+  function recordBargeInFirstSpeechDetected(): void {
+    const current = bargeInStateRef.current;
+    if (!current || current.firstSpeechDetectedAt !== undefined) return;
+    bargeInStateRef.current = { ...current, firstSpeechDetectedAt: performance.now() };
+    patchBargeInAudioHealth({ bargeInFirstSpeechDetectedMs: elapsedSinceTurnStart() }, 80);
+  }
+
+  function recordBargeInQueued(): void {
+    const current = bargeInStateRef.current;
+    if (!current) return;
+    setBargeInPhase("queued_next_turn");
+    patchBargeInAudioHealth({ bargeInQueuedMs: elapsedSinceTurnStart() }, 80);
+  }
+
+  function beginLocalBargeIn(source: BargeInSource, captureNextTurn = true): boolean {
+    const outputActive = assistantOutputActiveForBargeIn();
+    if (!outputActive) return false;
     const activeTurnId = currentTurnIdRef.current ?? state.session?.activeTurn?.id ?? null;
-    const shouldMuteActiveTurn =
-      Boolean(activeTurnId) &&
-      (pendingRef.current ||
-        speechPhaseRef.current !== "idle" ||
-        speakingRef.current ||
-        speechQueueRef.current.length > 0);
-    if (activeTurnId && shouldMuteActiveTurn) {
+    bargeInSequenceRef.current += 1;
+    bargeInStateRef.current = {
+      id: bargeInSequenceRef.current,
+      source,
+      phase: captureNextTurn ? "barge_capture" : "idle",
+      startedAt: performance.now(),
+      outputTurnId: activeTurnId,
+      pendingAtStart: pendingRef.current
+    };
+    bargeInCaptureRef.current = captureNextTurn;
+    if (activeTurnId) {
       mutedSpeechTurnIdRef.current = activeTurnId;
       currentTurnIdRef.current = activeTurnId;
-      updateAudioHealth({ ttsProviderStatus: "Local audio muted for next voice turn" });
-      scheduleAudioHealthSync(activeTurnId, 60);
+      patchBargeInAudioHealth({
+        ttsProviderStatus: "Local audio muted for barge-in",
+        bargeInStartedMs: elapsedSinceTurnStart(),
+        bargeInAudioStopMs: elapsedSinceTurnStart(),
+        interruptionLatencyMs: 0
+      });
     }
     cancelSpeechAudio();
+    setSttProviderNotice(captureNextTurn ? "Audio muted. Listening for next turn." : "Audio muted.");
+    return true;
+  }
+
+  function interruptSpeechOnly(source: BargeInSource = "push-to-talk", captureNextTurn = true): void {
+    resetProgressSpeech(false);
+    if (!beginLocalBargeIn(source, captureNextTurn)) cancelSpeechAudio();
   }
 
   function preservePushToTalkViewport(): void {
@@ -1364,11 +1465,13 @@ export function useVoiceEngine(params: VoiceEngineParams) {
     if (!clean) return;
     if (pendingRef.current) {
       queuedTurnRef.current = { text: clean, options };
+      recordBargeInQueued();
       setQueuedTurnPreview(clean);
       setDraft("");
       return;
     }
     const turnScratchMode = scratchMode;
+    if (bargeInStateRef.current) setBargeInPhase("idle");
     if (needsModelTransitionPreflight(effectiveCodexModel) && (sparkPreflightPending || sparkCompactionPending || !sparkApproved)) {
       setState((current) => ({
         ...current,
@@ -1577,63 +1680,8 @@ export function useVoiceEngine(params: VoiceEngineParams) {
     }
   }
 
-  function resumeCaptureAfterInterrupt(): void {
-    const action = interruptResumeAction({ liveModeActive: liveModeActiveRef.current, pushToTalkHeld: pushToTalkHeldRef.current });
-    if (action === "listen-live") {
-      window.setTimeout(() => {
-        if (liveModeActiveRef.current && !pendingRef.current && !recognizingRef.current) startRecognition();
-      }, 80);
-      return;
-    }
-    if (action === "capture-push-to-talk" && !pendingRef.current && !recognizingRef.current) {
-      window.setTimeout(() => {
-        if (pushToTalkHeldRef.current && !liveModeActiveRef.current && !pendingRef.current && !recognizingRef.current) {
-          startPushToTalkCapture();
-        }
-      }, 80);
-    }
-  }
-
-  async function interruptTurn() {
-    const turnId = state.session?.activeTurn?.status === "running" ? state.session.activeTurn.id : null;
-    if (turnId) {
-      syncAudioLedger();
-      updateAudioHealth({
-        streamedChars: liveAssistantTextRef.current.length,
-        finalChars: liveAssistantTextRef.current.length,
-        spokenChunks: speechLedgerRef.current.length
-      });
-      void syncAudioHealth(turnId);
-    }
-    resetSpeechPlayback();
-    setTurnPending(false);
-    if (!turnId) {
-      resumeCaptureAfterInterrupt();
-      return;
-    }
-
-    try {
-      const response = await fetch(`${api}/api/turn/${turnId}/interrupt`, {
-        method: "POST"
-      });
-      const payload = await response.json();
-      if (payload.session) {
-        setState({ session: payload.session, loading: false, error: response.ok ? null : payload.error ?? "Could not interrupt turn" });
-        if (response.ok) {
-          prewarmKeyRef.current = "";
-          prewarmAnnouncementKeyRef.current = "";
-          setPrewarm({ status: "idle" });
-        }
-      }
-    } catch (error) {
-      setState((current) => ({
-        ...current,
-        loading: false,
-        error: error instanceof Error ? error.message : String(error)
-      }));
-    } finally {
-      resumeCaptureAfterInterrupt();
-    }
+  function interruptTurn() {
+    interruptSpeechOnly("interrupt-button", false);
   }
 
   async function transcribeRemoteAudio(recording: {
@@ -1646,6 +1694,7 @@ export function useVoiceEngine(params: VoiceEngineParams) {
     sessionId: number;
   }) {
     if (!isCurrentRecognitionSession(recognitionSessionRef.current, recording.sessionId)) return;
+    if (bargeInCaptureRef.current) setBargeInPhase("transcribing");
     setSttPhase("transcribing");
     sttPhaseRef.current = "transcribing";
     setCaptureState("finalizing");
@@ -1829,6 +1878,7 @@ export function useVoiceEngine(params: VoiceEngineParams) {
       let lastSpeechAt = 0;
       processor.onaudioprocess = (event: AudioProcessingEvent) => {
         if (!isCurrentRecognitionSession(recognitionSessionRef.current, sessionId) || !audioCaptureRef.current) return;
+        if (bargeInCaptureRef.current) recordBargeInFirstMicFrame();
         const input = new Float32Array(event.inputBuffer.getChannelData(0));
         const capture = audioCaptureRef.current;
         capture.chunks.push(input);
@@ -1842,8 +1892,9 @@ export function useVoiceEngine(params: VoiceEngineParams) {
           if (bargeInCaptureRef.current) clearBargeInNoSpeechTimer();
           if (capture.firstSpeechDetectedMs === undefined) {
             capture.firstSpeechDetectedMs = Math.round(now - capture.sessionStartedAt);
-            if (liveModeActiveRef.current && (speechPhaseRef.current === "speaking" || speechPhaseRef.current === "buffering")) {
-              interruptSpeechOnly();
+            if (bargeInCaptureRef.current) recordBargeInFirstSpeechDetected();
+            if (liveModeActiveRef.current && assistantOutputActiveForBargeIn()) {
+              interruptSpeechOnly("live-vad");
             }
           }
         }
@@ -1895,6 +1946,7 @@ export function useVoiceEngine(params: VoiceEngineParams) {
       setSttPhase("listening");
       setCaptureState("capturing");
       setSttProviderNotice(`${sttProviderLabels[sttProvider]} listening`);
+      if (bargeInCaptureRef.current) recordBargeInCaptureStart();
       if (bargeInCaptureRef.current) scheduleBargeInNoSpeechTimeout(sessionId);
     } catch (error) {
       bargeInCaptureRef.current = false;
@@ -1957,7 +2009,7 @@ export function useVoiceEngine(params: VoiceEngineParams) {
   }
 
   function startRecognition() {
-    if (speechPhaseRef.current === "speaking" || speechPhaseRef.current === "buffering") {
+    if (!bargeInCaptureRef.current && assistantOutputActiveForBargeIn()) {
       interruptSpeechOnly();
     }
     if (sttProvider !== "browser") {
@@ -1986,15 +2038,18 @@ export function useVoiceEngine(params: VoiceEngineParams) {
     recognition.onresult = (event) => {
       if (!isCurrentRecognitionSession(recognitionSessionRef.current, sessionId) || recognitionRef.current !== recognition) return;
       interimBufferRef.current = "";
+      let heardSpeech = false;
       for (let i = event.resultIndex ?? 0; i < event.results.length; i += 1) {
         const result = event.results[i];
         const transcript = result[0]?.transcript ?? "";
+        if (transcript.trim()) heardSpeech = true;
         if (result.isFinal) {
           speechBufferRef.current = `${speechBufferRef.current} ${transcript}`.trim();
         } else {
           interimBufferRef.current = `${interimBufferRef.current} ${transcript}`.trim();
         }
       }
+      if (bargeInCaptureRef.current && heardSpeech) recordBargeInFirstSpeechDetected();
       setDraft(`${speechBufferRef.current} ${interimBufferRef.current}`.trim());
     };
 
@@ -2031,6 +2086,7 @@ export function useVoiceEngine(params: VoiceEngineParams) {
     setRecognizing(true);
     try {
       recognition.start();
+      if (bargeInCaptureRef.current) recordBargeInCaptureStart();
     } catch (error) {
       if (isCurrentRecognitionSession(recognitionSessionRef.current, sessionId)) {
         invalidateRecognition(true);
@@ -2095,11 +2151,7 @@ export function useVoiceEngine(params: VoiceEngineParams) {
       stopRecognition({ submit: true, emptyNotice: false });
       return;
     }
-    const shouldStartBargeIn = pendingRef.current || speechPhaseRef.current === "speaking" || speechPhaseRef.current === "buffering";
-    if (shouldStartBargeIn) {
-      bargeInCaptureRef.current = true;
-      interruptSpeechOnly();
-    }
+    beginLocalBargeIn("push-to-talk");
     if (liveModeActiveRef.current || recognizingRef.current || sttPhaseRef.current === "transcribing") return;
     pushToTalkHeldRef.current = true;
     setInputPolicy("push_to_talk");

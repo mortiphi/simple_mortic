@@ -8,6 +8,7 @@ import {
   keyboardIntentForKeyUp,
   shouldSubmitCapturedTurn
 } from "../dist/node/shared/inputControl.js";
+import { hasAssistantOutputForBargeIn } from "../dist/node/shared/bargeInControl.js";
 
 assert.equal(
   keyboardIntentForKeyDown({ code: "ShiftLeft", metaKey: true, shiftKey: true }),
@@ -135,6 +136,55 @@ assert.equal(
   interruptResumeAction({ liveModeActive: false, pushToTalkHeld: false }),
   "idle",
   "interrupt in idle push-to-talk stays idle"
+);
+
+assert.equal(
+  hasAssistantOutputForBargeIn({
+    pending: true,
+    speechPhase: "idle",
+    speaking: false,
+    speechQueueLength: 0,
+    progressSpeechActive: false,
+    liveAssistantText: ""
+  }),
+  true,
+  "barge-in should mute future assistant speech while a turn is still pending"
+);
+assert.equal(
+  hasAssistantOutputForBargeIn({
+    pending: false,
+    speechPhase: "speaking",
+    speaking: false,
+    speechQueueLength: 0,
+    progressSpeechActive: false,
+    liveAssistantText: ""
+  }),
+  true,
+  "barge-in should mute while speech phase is active"
+);
+assert.equal(
+  hasAssistantOutputForBargeIn({
+    pending: false,
+    speechPhase: "idle",
+    speaking: false,
+    speechQueueLength: 0,
+    progressSpeechActive: false,
+    liveAssistantText: "buffered assistant text"
+  }),
+  true,
+  "barge-in should still mute post-completion buffered playback"
+);
+assert.equal(
+  hasAssistantOutputForBargeIn({
+    pending: false,
+    speechPhase: "idle",
+    speaking: false,
+    speechQueueLength: 0,
+    progressSpeechActive: false,
+    liveAssistantText: ""
+  }),
+  false,
+  "idle push-to-talk should not be treated as barge-in"
 );
 
 console.log("Input control checks passed");

@@ -385,7 +385,11 @@ function audioHealthDetail(metrics: TurnRun["metrics"]): string {
       : "";
   const buffer = metrics.audioBufferUnderruns ? ` · underruns ${metrics.audioBufferUnderruns}` : "";
   const close = metrics.ttsCloseCode ? ` · close ${metrics.ttsCloseCode}${metrics.ttsCloseReason ? ` ${metrics.ttsCloseReason}` : ""}` : "";
-  const timing = `text first ${formatMetricMs(metrics.firstDeltaMs)}${localGaps} · visible ${formatMetricMs(metrics.firstVisibleTextMs)} · speakable ${formatMetricMs(metrics.firstSpeakableTextMs)} · queued ${formatMetricMs(metrics.firstSpeechQueuedMs)} · speech start ${formatMetricMs(metrics.firstSpeechStartMs)}${bufferedTiming} · final ${formatMetricMs(metrics.finalTextMs)} · speech after final ${formatSignedMetricMs(metrics.speechAfterFinalMs)}${buffer}${close}`;
+  const barge =
+    metrics.bargeInStartedMs !== undefined
+      ? ` · barge start ${formatMetricMs(metrics.bargeInStartedMs)} · audio stop ${formatMetricMs(metrics.bargeInAudioStopMs)} · capture ${formatMetricMs(metrics.bargeInCaptureStartMs)} · mic frame ${formatMetricMs(metrics.bargeInFirstMicFrameMs)} · speech ${formatMetricMs(metrics.bargeInFirstSpeechDetectedMs)} · queued ${formatMetricMs(metrics.bargeInQueuedMs)}`
+      : "";
+  const timing = `text first ${formatMetricMs(metrics.firstDeltaMs)}${localGaps} · visible ${formatMetricMs(metrics.firstVisibleTextMs)} · speakable ${formatMetricMs(metrics.firstSpeakableTextMs)} · queued ${formatMetricMs(metrics.firstSpeechQueuedMs)} · speech start ${formatMetricMs(metrics.firstSpeechStartMs)}${bufferedTiming} · final ${formatMetricMs(metrics.finalTextMs)} · speech after final ${formatSignedMetricMs(metrics.speechAfterFinalMs)}${buffer}${close}${barge}`;
   const providerStatus = metrics.ttsProviderStatus ? ` provider ${metrics.ttsProviderStatus}` : "";
   return `${provider}: ${timing}; streamed ${streamed} chars, final ${final} chars, queued ${queued} chars, spoken ${spoken} chars, chunks ${chunks}, ${status}${providerStatus}${queuedRanges}${spokenRanges}`;
 }
@@ -430,7 +434,14 @@ async function updateAudioHealth(
       ttsCloseCode: nonNegativeInt(body.ttsCloseCode) ?? turn.metrics.ttsCloseCode,
       ttsCloseReason: typeof body.ttsCloseReason === "string" ? body.ttsCloseReason.slice(0, 160) : turn.metrics.ttsCloseReason,
       finalTextMs: nonNegativeInt(body.finalTextMs) ?? turn.metrics.finalTextMs,
-      speechAfterFinalMs
+      speechAfterFinalMs,
+      bargeInStartedMs: nonNegativeInt(body.bargeInStartedMs) ?? turn.metrics.bargeInStartedMs,
+      bargeInAudioStopMs: nonNegativeInt(body.bargeInAudioStopMs) ?? turn.metrics.bargeInAudioStopMs,
+      bargeInCaptureStartMs: nonNegativeInt(body.bargeInCaptureStartMs) ?? turn.metrics.bargeInCaptureStartMs,
+      bargeInFirstMicFrameMs: nonNegativeInt(body.bargeInFirstMicFrameMs) ?? turn.metrics.bargeInFirstMicFrameMs,
+      bargeInFirstSpeechDetectedMs: nonNegativeInt(body.bargeInFirstSpeechDetectedMs) ?? turn.metrics.bargeInFirstSpeechDetectedMs,
+      bargeInQueuedMs: nonNegativeInt(body.bargeInQueuedMs) ?? turn.metrics.bargeInQueuedMs,
+      interruptionLatencyMs: nonNegativeInt(body.interruptionLatencyMs) ?? turn.metrics.interruptionLatencyMs
     };
     const detail = audioHealthDetail(metrics);
     const entry = logEntry(startMs, "Audio health", detail);

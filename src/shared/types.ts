@@ -100,6 +100,12 @@ export type TurnMetrics = {
   ttsProvider?: TtsProvider;
   ttsError?: string;
   ttsProviderStatus?: string;
+  bargeInStartedMs?: number;
+  bargeInAudioStopMs?: number;
+  bargeInCaptureStartMs?: number;
+  bargeInFirstMicFrameMs?: number;
+  bargeInFirstSpeechDetectedMs?: number;
+  bargeInQueuedMs?: number;
   sttProvider?: SttProvider;
   sttSegmentCount?: number;
   sttPayloadBytes?: number;
@@ -533,6 +539,13 @@ export type AudioHealthRequest = {
   ttsCloseReason?: string;
   finalTextMs?: number;
   speechAfterFinalMs?: number;
+  bargeInStartedMs?: number;
+  bargeInAudioStopMs?: number;
+  bargeInCaptureStartMs?: number;
+  bargeInFirstMicFrameMs?: number;
+  bargeInFirstSpeechDetectedMs?: number;
+  bargeInQueuedMs?: number;
+  interruptionLatencyMs?: number;
 };
 
 export type ElevenLabsWsClientMessage =
