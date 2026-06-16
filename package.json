@@ -21,7 +21,7 @@
     "build": "tsc -p tsconfig.node.json && vite build",
     "prepack": "npm run build",
     "typecheck": "tsc -p tsconfig.node.json --noEmit && tsc -p tsconfig.web.json --noEmit",
-    "test": "npm run build && node scripts/check_voice_pipeline.mjs && node scripts/check_first_turn_warm.mjs && node scripts/check_skill_sync.mjs && node scripts/check_spark_context.mjs && node scripts/check_input_control.mjs && node scripts/check_speech_projection.mjs && node scripts/check_provider_adapters.mjs && node scripts/check_project_storage.mjs && node scripts/check_project_api_import.mjs && node scripts/check_canonical_state_skill.mjs && node scripts/check_pack_contents.mjs",
+    "test": "npm run build && node scripts/check_voice_pipeline.mjs && node scripts/check_first_turn_warm.mjs && node scripts/check_skill_sync.mjs && node scripts/check_spark_context.mjs && node scripts/check_input_control.mjs && node scripts/check_speech_projection.mjs && node scripts/check_app_server_events.mjs && node scripts/check_provider_adapters.mjs && node scripts/check_project_storage.mjs && node scripts/check_project_api_import.mjs && node scripts/check_canonical_state_skill.mjs && node scripts/check_pack_contents.mjs",
     "start": "node dist/node/cli/main.js",
     "eval:mortic-voice:generate": "node evals/mortic-voice-output/run.mjs generate",
     "eval:mortic-voice:score": "node evals/mortic-voice-output/run.mjs score",

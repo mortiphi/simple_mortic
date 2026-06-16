@@ -13,6 +13,7 @@ import {
   getCodexSparkCompactedBase,
   getCodexStatus,
   interruptCodexScratch,
+  listCodexRecentThreads,
   prepareCodexContextScratch,
   prewarmCodexScratch,
   resetCodexScratch,
@@ -41,6 +42,7 @@ import {
   extractedItemTypes,
   providerForkContinuations,
   ttsProviders,
+  type AppServerActivity,
   type AudioHealthRequest,
   type ApproveCompilationRequest,
   type DeepgramHealthResponse,
@@ -245,7 +247,9 @@ function featureConfig() {
     speechProjection: process.env.MORTIC_SPEECH_PROJECTION !== "0",
     progressSounds: process.env.MORTIC_PROGRESS_SOUNDS === "1",
     progressSpeech: process.env.MORTIC_PROGRESS_SPEECH === "1",
-    progressSpeechTrace: process.env.MORTIC_PROGRESS_SPEECH_TRACE === "1" || process.env.MORTIC_PROGRESS_SPEECH === "1"
+    progressSpeechTrace: process.env.MORTIC_PROGRESS_SPEECH_TRACE === "1" || process.env.MORTIC_PROGRESS_SPEECH === "1",
+    appServerActivity: true,
+    appServerTrace: true
   };
 }
 
@@ -1102,7 +1106,7 @@ export async function createMorticServer(options: MorticServerOptions) {
 
   app.get<{ Querystring: { limit?: string } }>("/api/provider/threads", async (request) => {
     const limit = Number(request.query.limit);
-    const threads = await codexProviderAdapter.listRecentThreads({
+    const threads = await listCodexRecentThreads({
       limit: Number.isFinite(limit) && limit > 0 ? Math.floor(limit) : undefined
     });
     return {
@@ -1362,11 +1366,12 @@ export async function createMorticServer(options: MorticServerOptions) {
     const startMs = Date.now();
     const progressFeatures = featureConfig();
     const progressTrace: ProgressSpeechTrace | undefined =
-      progressFeatures.progressSpeechTrace && effectiveScratchMode === "voice"
+      effectiveScratchMode === "voice"
         ? {
             enabled: progressFeatures.progressSpeech,
             rawNotifications: [],
             mappedEvents: [],
+            activities: [],
             decisions: [],
             spokenStatuses: []
           }
@@ -1405,6 +1410,7 @@ export async function createMorticServer(options: MorticServerOptions) {
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
       logs: [logEntry(startMs, "Request received", `${Buffer.byteLength(userEntry.text, "utf8")} user-text bytes`)],
+      appServerTrace: progressTrace,
       progressTrace,
       metrics: {
         serverAcceptMs: Date.now() - requestStartMs,
@@ -1454,12 +1460,15 @@ export async function createMorticServer(options: MorticServerOptions) {
         const promptBytes = Buffer.byteLength(prompt, "utf8");
         let appTurnStartElapsedMs: number | undefined;
         let firstDeltaElapsedMs: number | undefined;
+        let activitySequence = 0;
+        let firstActivityElapsedMs: number | undefined;
         const updateProgressTrace = async () => {
           if (!progressTrace) return;
           await options.storage.updateActiveTurn((turn) => {
             if (!turn || turn.id !== turnId) return turn;
             return {
               ...turn,
+              appServerTrace: { ...progressTrace },
               progressTrace: { ...progressTrace },
               updatedAt: new Date().toISOString()
             };
@@ -1480,6 +1489,40 @@ export async function createMorticServer(options: MorticServerOptions) {
             speakableText
           });
           await updateProgressTrace();
+        };
+        const onVoiceActivity = async (rawActivity: Omit<AppServerActivity, "id" | "elapsedMs">) => {
+          if (!progressTrace || effectiveScratchMode !== "voice") return;
+          if (!(await isCurrentTurnRunning())) return;
+          const elapsedMs = Date.now() - startMs;
+          const activity: AppServerActivity = {
+            ...rawActivity,
+            id: `${turnId}:activity:${activitySequence++}`,
+            elapsedMs
+          };
+          progressTrace.activities.push(activity);
+          if (progressTrace.firstActivityMs === undefined && activity.display) {
+            progressTrace.firstActivityMs = elapsedMs;
+            firstActivityElapsedMs = elapsedMs;
+          }
+          await options.storage.updateActiveTurn((turn) => {
+            if (!turn || turn.id !== turnId) return turn;
+            return {
+              ...turn,
+              appServerTrace: { ...progressTrace },
+              progressTrace: { ...progressTrace },
+              metrics: firstActivityElapsedMs !== undefined && turn.metrics.firstAppServerActivityMs === undefined
+                ? { ...turn.metrics, firstAppServerActivityMs: firstActivityElapsedMs }
+                : turn.metrics,
+              updatedAt: new Date().toISOString()
+            };
+          });
+          if (firstDeltaElapsedMs !== undefined || progressTrace.firstAssistantDeltaMs !== undefined || !activity.display) return;
+          emitTurnEvent(turnId, {
+            type: "voiceActivity",
+            turnId,
+            activity,
+            scratchMode: effectiveScratchMode
+          });
         };
         await logAndEmit(
           "Utterance prepared",
@@ -1621,6 +1664,7 @@ export async function createMorticServer(options: MorticServerOptions) {
             onDelta,
             onEvent,
             onProgress,
+            onVoiceActivity,
             onProgressTrace
           });
 
@@ -1676,10 +1720,12 @@ export async function createMorticServer(options: MorticServerOptions) {
           entryId: assistantEntry.id,
           parserMode: assistantEntry.parserMode
         });
+        const finalizedTrace = finalizeProgress();
         const updated = await logAndEmit("Assistant response appended", `${Buffer.byteLength(assistantText, "utf8")} display bytes`, {
           status: "completed",
           responseEntryId: assistantEntry.id,
-          progressTrace: finalizeProgress(),
+          appServerTrace: finalizedTrace,
+          progressTrace: finalizedTrace,
           metrics: {
             codexLatencyMs: Date.now() - codexStartMs,
             totalMs: Date.now() - startMs,
@@ -1713,11 +1759,13 @@ export async function createMorticServer(options: MorticServerOptions) {
           entryId: assistantEntry.id,
           error: message
         });
+        const finalizedTrace = finalizeProgress();
         const updated = await logAndEmit("Turn failed", message, {
           status: "failed",
           error: message,
           responseEntryId: assistantEntry.id,
-          progressTrace: finalizeProgress(),
+          appServerTrace: finalizedTrace,
+          progressTrace: finalizedTrace,
           metrics: {
             codexLatencyMs: Date.now() - codexStartMs,
             totalMs: Date.now() - startMs

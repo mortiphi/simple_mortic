@@ -9,5 +9,6 @@
     "types": ["node"],
     "noEmit": false
   },
-  "include": ["src/cli/**/*.ts", "src/server/**/*.ts", "src/shared/**/*.ts"]
+  "include": ["src/cli/**/*.ts", "src/server/**/*.ts", "src/shared/**/*.ts"],
+  "exclude": ["src/server/codexAppServerProtocol/**/*.ts"]
 }

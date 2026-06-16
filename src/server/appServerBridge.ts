@@ -4,7 +4,13 @@ import { homedir } from "node:os";
 import path from "node:path";
 import net from "node:net";
 
-import type { ReasoningEffort, ScratchMode } from "../shared/types.js";
+import type { AppServerActivity, ProviderThreadSummary, ReasoningEffort, ScratchMode } from "../shared/types.js";
+import {
+  appServerItemId,
+  appServerItemType,
+  appServerTurnId,
+  normalizeAppServerNotification
+} from "./appServerEvents.js";
 import { codexProviderAdapter } from "./providerAdapters.js";
 
 type JsonMessage = {
@@ -41,6 +47,7 @@ type PendingTurn = {
   reject: (reason: Error) => void;
   onEvent?: (label: string, detail?: string) => void | Promise<void>;
   onProgress?: (progress: CodexTurnProgress) => void | Promise<void>;
+  onVoiceActivity?: (activity: CodexVoiceActivity) => void | Promise<void>;
   onProgressTrace?: (event: CodexProgressTraceEvent) => void | Promise<void>;
 };
 
@@ -50,6 +57,8 @@ export type CodexTurnProgress = {
   label: string;
   detail?: string;
 };
+
+export type CodexVoiceActivity = Omit<AppServerActivity, "id" | "elapsedMs">;
 
 export type CodexProgressTraceEvent =
   | {
@@ -125,7 +134,8 @@ type ScratchStateKey = string;
 const HOST = "127.0.0.1";
 const MORTIC_VOICE_SKILL_PATH = path.join(homedir(), ".codex", "skills", "mortic-voice-output", "SKILL.md");
 const VOICE_DEVELOPER_INSTRUCTIONS = `This is a disposable Mortic voice scratch fork. Use the $mortic-voice-output skill for every response in this voice scratch fork.
-Output exactly two newline-delimited JSON records and nothing else.
+If the active Codex app-server turn provides an output schema, obey that schema exactly.
+Otherwise, output exactly two newline-delimited JSON records and nothing else.
 The first record must have type "speak" and string field "text"; its text must be the complete conversational answer to the user's latest message.
 The second record must have type "read" and string field "markdown"; its markdown must be the readable screen version of the same answer plus exact artifacts.
 Do not output legacy labels, XML tags, Markdown fences, wrapper prose, examples, or placeholder text.
@@ -226,6 +236,36 @@ function scratchForkAccessKey(): string {
   return `sandbox=${policy.sandbox};approval=${policy.approvalPolicy};network=${policy.networkPolicy ?? "default"}`;
 }
 
+function voiceOutputSchemaEnabled(): boolean {
+  return process.env.MORTIC_VOICE_OUTPUT_SCHEMA !== "0";
+}
+
+function morticVoiceOutputSchema(): Record<string, unknown> {
+  return {
+    type: "object",
+    additionalProperties: false,
+    required: ["speak", "read"],
+    properties: {
+      speak: {
+        type: "object",
+        additionalProperties: false,
+        required: ["text"],
+        properties: {
+          text: { type: "string", minLength: 1 }
+        }
+      },
+      read: {
+        type: "object",
+        additionalProperties: false,
+        required: ["markdown"],
+        properties: {
+          markdown: { type: "string" }
+        }
+      }
+    }
+  };
+}
+
 function itemTypeFromParams(params: any): string | undefined {
   const item = params?.item;
   const candidates = [item?.type, params?.itemType, params?.type];
@@ -237,10 +277,43 @@ function itemIdFromParams(params: any): string | undefined {
   return typeof value === "string" ? value : undefined;
 }
 
+function stringCandidate(...values: unknown[]): string | undefined {
+  for (const value of values) {
+    if (typeof value === "string" && value.trim()) return value;
+  }
+  return undefined;
+}
+
+function safeSnippet(value: string, max = 180): string {
+  return value.replace(/\s+/g, " ").trim().slice(0, max);
+}
+
 function safeNotificationDetail(method: string, params: any): string | undefined {
   if (method === "item/commandExecution/outputDelta") {
     const delta = typeof params?.delta === "string" ? params.delta : "";
     return `output delta ${Buffer.byteLength(delta, "utf8")} bytes`;
+  }
+  if (method === "item/commandExecution/terminalInteraction") return "terminal interaction";
+  if (method === "item/fileChange/outputDelta") {
+    const delta = typeof params?.delta === "string" ? params.delta : "";
+    return `file output delta ${Buffer.byteLength(delta, "utf8")} bytes`;
+  }
+  if (method === "item/fileChange/patchUpdated") return "patch updated";
+  if (method === "item/mcpToolCall/progress") {
+    const message = stringCandidate(params?.message, params?.progress?.message, params?.detail);
+    return message ? `tool progress: ${safeSnippet(message)}` : "tool progress";
+  }
+  if (method === "item/reasoning/summaryTextDelta") {
+    const delta = stringCandidate(params?.delta, params?.text, params?.summaryTextDelta, params?.item?.text);
+    return delta ? `summary: ${safeSnippet(delta)}` : "summary text delta";
+  }
+  if (method === "item/reasoning/summaryPartAdded") {
+    const text = stringCandidate(params?.part?.text, params?.summary?.text, params?.item?.text);
+    return text ? `summary part: ${safeSnippet(text)}` : "summary part added";
+  }
+  if (method === "item/reasoning/textDelta") {
+    const delta = typeof params?.delta === "string" ? params.delta : "";
+    return `reasoning text delta ${Buffer.byteLength(delta, "utf8")} bytes`;
   }
   if (method === "turn/plan/updated") return "plan updated";
   if (method === "turn/diff/updated") return "diff updated";
@@ -306,6 +379,42 @@ export class CodexAppServerBridge {
   private scratchArchives = new Set<string>();
   private operationQueue: Promise<void> = Promise.resolve();
 
+  async listRecentThreads(params: {
+    limit?: number;
+    cwd?: string | string[];
+    searchTerm?: string;
+    onEvent?: (label: string, detail?: string) => void | Promise<void>;
+  } = {}): Promise<ProviderThreadSummary[]> {
+    return await this.withOperationLock(async () => {
+      await this.ensureReady("default", "none", params.onEvent);
+      const response = await this.request("thread/list", {
+        limit: Math.max(1, Math.min(params.limit ?? 20, 100)),
+        sortKey: "updated_at",
+        sortDirection: "desc",
+        sourceKinds: ["cli", "vscode"],
+        archived: false,
+        cwd: params.cwd ?? null,
+        searchTerm: params.searchTerm ?? null
+      });
+      const data = Array.isArray(response?.data) ? response.data : [];
+      return data
+        .filter((thread: any) => typeof thread?.id === "string")
+        .map((thread: any): ProviderThreadSummary => ({
+          provider: "codex",
+          threadId: thread.id,
+          sourceUri: `codex://threads/${thread.id}`,
+          threadName: typeof thread.name === "string" && thread.name.trim()
+            ? thread.name.trim()
+            : typeof thread.preview === "string" && thread.preview.trim()
+              ? thread.preview.trim()
+              : undefined,
+          cwd: typeof thread.cwd === "string" ? thread.cwd : undefined,
+          source: typeof thread.source === "string" ? thread.source : undefined,
+          updatedAt: typeof thread.updatedAt === "number" ? new Date(thread.updatedAt * 1000).toISOString() : new Date().toISOString()
+        }));
+    });
+  }
+
   async runTurn(params: {
     sourceThreadId: string;
     cwd: string;
@@ -318,6 +427,7 @@ export class CodexAppServerBridge {
     onDelta?: (delta: string, text: string) => void | Promise<void>;
     onEvent?: (label: string, detail?: string) => void | Promise<void>;
     onProgress?: (progress: CodexTurnProgress) => void | Promise<void>;
+    onVoiceActivity?: (activity: CodexVoiceActivity) => void | Promise<void>;
     onProgressTrace?: (event: CodexProgressTraceEvent) => void | Promise<void>;
   }): Promise<string> {
     return this.withOperationLock(async () => {
@@ -356,10 +466,12 @@ export class CodexAppServerBridge {
         prompt: params.prompt,
         model: params.model,
         reasoningEffort: params.reasoningEffort,
+        scratchMode: params.scratchMode,
         eventLabelPrefix: "App-server",
         onDelta: params.onDelta,
         onEvent: params.onEvent,
         onProgress: params.onProgress,
+        onVoiceActivity: params.onVoiceActivity,
         onProgressTrace: params.onProgressTrace
       });
     });
@@ -438,6 +550,7 @@ export class CodexAppServerBridge {
         prompt: params.confirmationPrompt,
         model: params.model,
         reasoningEffort: params.reasoningEffort,
+        scratchMode,
         eventLabelPrefix: "App-server prewarm confirmation",
         onEvent: params.onEvent
       });
@@ -1061,10 +1174,12 @@ export class CodexAppServerBridge {
     prompt: string;
     model: string;
     reasoningEffort: ReasoningEffort;
+    scratchMode: ScratchMode;
     eventLabelPrefix: string;
     onDelta?: (delta: string, text: string) => void | Promise<void>;
     onEvent?: (label: string, detail?: string) => void | Promise<void>;
     onProgress?: (progress: CodexTurnProgress) => void | Promise<void>;
+    onVoiceActivity?: (activity: CodexVoiceActivity) => void | Promise<void>;
     onProgressTrace?: (event: CodexProgressTraceEvent) => void | Promise<void>;
   }): Promise<string> {
     await params.onEvent?.(`${params.eventLabelPrefix} turn/start sent`, `scratch ${params.scratchThreadId}`);
@@ -1078,7 +1193,9 @@ export class CodexAppServerBridge {
         }
       ],
       model: params.model === "default" ? null : params.model,
-      effort: params.reasoningEffort
+      effort: params.reasoningEffort,
+      summary: params.scratchMode === "voice" ? "concise" : null,
+      outputSchema: params.scratchMode === "voice" && voiceOutputSchemaEnabled() ? morticVoiceOutputSchema() : null
     });
 
     const turnId = response?.turn?.id;
@@ -1100,6 +1217,7 @@ export class CodexAppServerBridge {
         reject,
         onEvent: params.onEvent,
         onProgress: params.onProgress,
+        onVoiceActivity: params.onVoiceActivity,
         onProgressTrace: params.onProgressTrace
       });
     });
@@ -1163,20 +1281,25 @@ export class CodexAppServerBridge {
   private async handleNotification(message: JsonMessage): Promise<void> {
     const method = message.method;
     if (!method) return;
+    const normalized = normalizeAppServerNotification({ method, params: message.params });
     const traceRaw = async (pending: PendingTurn | undefined) => {
       if (!pending) return;
       await pending.onProgressTrace?.({
         type: "raw",
-        method,
-        turnId: message.params?.turnId ?? message.params?.turn?.id,
-        itemType: itemTypeFromParams(message.params),
-        itemId: itemIdFromParams(message.params),
-        detail: safeNotificationDetail(method, message.params)
+        method: normalized.raw.method,
+        turnId: normalized.raw.turnId,
+        itemType: normalized.raw.itemType,
+        itemId: normalized.raw.itemId,
+        detail: normalized.raw.detail
       });
     };
     const traceMapped = async (pending: PendingTurn | undefined, progress: CodexTurnProgress | null) => {
       if (!pending || !progress) return;
       await pending.onProgressTrace?.({ type: "mapped", progress });
+    };
+    const emitVoiceActivity = async (pending: PendingTurn | undefined) => {
+      if (!pending || pending.sawDelta || !normalized.activity) return;
+      await pending.onVoiceActivity?.(normalized.activity);
     };
 
     if (method === "thread/tokenUsage/updated") {
@@ -1193,7 +1316,7 @@ export class CodexAppServerBridge {
       pending.text += delta;
       await pending.onDelta?.(delta, pending.text);
       if (isFirstDelta) {
-        await pending.onProgressTrace?.({ type: "first-delta", detail: safeNotificationDetail(method, message.params) });
+        await pending.onProgressTrace?.({ type: "first-delta", detail: normalized.raw.detail });
         await pending.onEvent?.(`${pending.eventLabelPrefix} first model delta`, delta);
       }
       return;
@@ -1203,8 +1326,9 @@ export class CodexAppServerBridge {
       const turnId = message.params?.turnId;
       const pending = this.pendingTurns.get(turnId);
       await traceRaw(pending);
+      await emitVoiceActivity(pending);
       if (pending && !pending.sawDelta) {
-        const progress = progressForItem("item-started", itemTypeFromParams(message.params));
+        const progress = progressForItem("item-started", appServerItemType(message.params));
         await traceMapped(pending, progress);
         if (progress) await pending.onProgress?.(progress);
       }
@@ -1221,11 +1345,12 @@ export class CodexAppServerBridge {
       }
       const pending = this.pendingTurns.get(turnId);
       await traceRaw(pending);
+      await emitVoiceActivity(pending);
       if (pending && item?.type === "agentMessage" && typeof item.text === "string") {
         pending.finalText = item.text;
       }
       if (pending && !pending.sawDelta) {
-        const progress = progressForItem("item-completed", itemTypeFromParams(message.params));
+        const progress = progressForItem("item-completed", appServerItemType(message.params));
         await traceMapped(pending, progress);
         if (progress) await pending.onProgress?.(progress);
       }
@@ -1236,6 +1361,7 @@ export class CodexAppServerBridge {
       const turnId = message.params?.turnId;
       const pending = this.pendingTurns.get(turnId);
       await traceRaw(pending);
+      await emitVoiceActivity(pending);
       if (pending && !pending.sawDelta) {
         const progress: CodexTurnProgress = { kind: "command-output", itemType: "commandExecution", label: "Reading tool output" };
         await traceMapped(pending, progress);
@@ -1244,10 +1370,27 @@ export class CodexAppServerBridge {
       return;
     }
 
+    if (
+      method === "item/commandExecution/terminalInteraction" ||
+      method === "item/fileChange/outputDelta" ||
+      method === "item/fileChange/patchUpdated" ||
+      method === "item/mcpToolCall/progress" ||
+      method === "item/reasoning/summaryTextDelta" ||
+      method === "item/reasoning/summaryPartAdded" ||
+      method === "item/reasoning/textDelta"
+    ) {
+      const turnId = message.params?.turnId;
+      const pending = this.pendingTurns.get(turnId);
+      await traceRaw(pending);
+      await emitVoiceActivity(pending);
+      return;
+    }
+
     if (method === "turn/plan/updated" || method === "turn/diff/updated") {
       const turnId = message.params?.turnId ?? message.params?.turn?.id;
       const pending = this.pendingTurns.get(turnId);
       await traceRaw(pending);
+      await emitVoiceActivity(pending);
       if (!pending || pending.sawDelta) return;
       const progress: CodexTurnProgress =
         method === "turn/plan/updated"
@@ -1293,10 +1436,10 @@ export class CodexAppServerBridge {
         await pending.onProgressTrace?.({
           type: "raw",
           method,
-          turnId: message.params?.turnId ?? message.params?.turn?.id,
-          itemType: itemTypeFromParams(message.params),
-          itemId: itemIdFromParams(message.params),
-          detail: safeNotificationDetail(method, message.params)
+          turnId: normalized.raw.turnId,
+          itemType: normalized.raw.itemType,
+          itemId: normalized.raw.itemId,
+          detail: normalized.raw.detail
         });
         pending.reject(new Error(JSON.stringify(message.params ?? message)));
       }
@@ -1309,13 +1452,13 @@ export class CodexAppServerBridge {
       return;
     }
 
-    const turnId =
-      message.params?.turnId ??
-      message.params?.turn?.id ??
-      message.params?.item?.turnId ??
-      message.params?.item?.turn_id;
+    const turnId = appServerTurnId(message.params);
+    if (!turnId) return;
     const pending = this.pendingTurns.get(turnId);
     if (!pending) return;
+
+    await traceRaw(pending);
+    await emitVoiceActivity(pending);
 
     if (pending.telemetryMethods.has(method)) return;
     pending.telemetryMethods.add(method);

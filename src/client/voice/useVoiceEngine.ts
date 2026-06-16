@@ -1596,6 +1596,35 @@ export function useVoiceEngine(params: VoiceEngineParams) {
         return;
       }
 
+      if (payload.type === "voiceActivity") {
+        setState((current) => {
+          const turn = current.session?.activeTurn;
+          if (!turn || turn.id !== payload.turnId) return current;
+          const previousTrace = turn.appServerTrace ?? turn.progressTrace;
+          const nextTrace = previousTrace
+            ? {
+                ...previousTrace,
+                firstActivityMs: previousTrace.firstActivityMs ?? payload.activity.elapsedMs,
+                activities: previousTrace.activities.some((activity) => activity.id === payload.activity.id)
+                  ? previousTrace.activities
+                  : [...previousTrace.activities, payload.activity]
+              }
+            : undefined;
+          return {
+            ...current,
+            session: {
+              ...current.session,
+              activeTurn: {
+                ...turn,
+                appServerTrace: nextTrace,
+                progressTrace: nextTrace ?? turn.progressTrace
+              }
+            }
+          };
+        });
+        return;
+      }
+
       if (payload.type === "delta") {
         handleDeltaText(payload.text, payload.scratchMode);
         return;

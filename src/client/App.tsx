@@ -26,6 +26,9 @@ import {
   type ProviderForkAccessResponse,
   type ProviderForkContinuation,
   type ProviderReference,
+  type AppServerActivity,
+  type AppServerTrace,
+  type ProgressSpeechTrace,
   type ReasoningEffort,
   type ScratchSessionNode,
   type ScratchMode,
@@ -64,6 +67,165 @@ function workspaceTitle(workspacePath: string | undefined): string | null {
   const normalized = workspacePath.replace(/\\/g, "/").replace(/\/+$/, "");
   const title = normalized.split("/").filter(Boolean).at(-1);
   return title || null;
+}
+
+type LatentTraceLine = {
+  key: string;
+  elapsedMs: number;
+  kind: string;
+  text: string;
+};
+
+function codexLatentTraceLines(trace: AppServerTrace | ProgressSpeechTrace | undefined): LatentTraceLine[] {
+  if (!trace) return [];
+  const lines: LatentTraceLine[] = [];
+
+  (trace.activities ?? []).forEach((event, index) => {
+    const parts = [event.label, event.detail, event.itemType].filter(Boolean);
+    lines.push({
+      key: `activity-${index}`,
+      elapsedMs: event.elapsedMs,
+      kind: event.display ? "activity" : "hidden",
+      text: parts.join(" · ")
+    });
+  });
+
+  trace.rawNotifications.forEach((event, index) => {
+    const parts = [event.method, event.itemType, event.detail].filter(Boolean);
+    lines.push({
+      key: `raw-${index}`,
+      elapsedMs: event.elapsedMs,
+      kind: "raw",
+      text: parts.join(" · ")
+    });
+  });
+
+  trace.mappedEvents.forEach((event, index) => {
+    const parts = [event.label, event.itemType, event.detail].filter(Boolean);
+    lines.push({
+      key: `mapped-${index}`,
+      elapsedMs: event.elapsedMs,
+      kind: "mapped",
+      text: parts.join(" · ")
+    });
+  });
+
+  trace.decisions.forEach((event, index) => {
+    const parts = [
+      event.label,
+      event.decision,
+      event.reason ? `reason: ${event.reason}` : undefined
+    ].filter(Boolean);
+    lines.push({
+      key: `decision-${index}`,
+      elapsedMs: event.elapsedMs,
+      kind: "decision",
+      text: parts.join(" · ")
+    });
+  });
+
+  if (trace.firstAssistantDeltaMs !== undefined) {
+    lines.push({
+      key: "first-delta",
+      elapsedMs: trace.firstAssistantDeltaMs,
+      kind: "delta",
+      text: "first assistant delta"
+    });
+  }
+
+  return lines
+    .sort((left, right) => left.elapsedMs - right.elapsedMs || left.key.localeCompare(right.key))
+    .slice(-32);
+}
+
+function visibleVoiceActivities(trace: AppServerTrace | ProgressSpeechTrace | undefined): AppServerActivity[] {
+  return (trace?.activities ?? [])
+    .filter((activity) => activity.display)
+    .sort((left, right) => left.elapsedMs - right.elapsedMs)
+    .slice(-6);
+}
+
+function CodexWorkingBuffer({ trace, pending, hasAssistantText }: {
+  trace: AppServerTrace | ProgressSpeechTrace | undefined;
+  pending: boolean;
+  hasAssistantText: boolean;
+}) {
+  if (!pending || hasAssistantText) return null;
+  const activities = visibleVoiceActivities(trace);
+  const latest = activities.at(-1);
+  return (
+    <section className="codex-working-buffer" aria-label="Codex working activity">
+      <div>
+        <span>Working</span>
+        <strong>{latest ? latest.label : "Starting"}</strong>
+      </div>
+      {latest?.detail ? <p>{latest.detail}</p> : <p>Waiting for Codex activity.</p>}
+      {activities.length > 1 && (
+        <details>
+          <summary>{activities.length} activity updates</summary>
+          <ol>
+            {activities.map((activity) => (
+              <li key={activity.id}>
+                <time>{formatMs(activity.elapsedMs)}</time>
+                <span>{activity.label}</span>
+                {activity.detail ? <em>{activity.detail}</em> : null}
+              </li>
+            ))}
+          </ol>
+        </details>
+      )}
+    </section>
+  );
+}
+
+function CodexLatentTraceBubble({ trace, pending }: { trace: AppServerTrace | ProgressSpeechTrace | undefined; pending: boolean }) {
+  const lines = codexLatentTraceLines(trace);
+  if (!trace && !pending) return null;
+
+  const summary =
+    lines.length > 0
+      ? `${lines.length} event${lines.length === 1 ? "" : "s"}`
+      : trace
+        ? "Waiting"
+        : "Trace off";
+
+  return (
+    <details className="latent-trace-bubble">
+      <summary>
+        <span>Codex debug trace</span>
+        <strong>{summary}</strong>
+      </summary>
+      <div className="latent-trace-body">
+        {!trace ? (
+          <p>Progress trace is not enabled for this server run.</p>
+        ) : lines.length === 0 ? (
+          <p>No Codex lifecycle events yet.</p>
+        ) : (
+          <ol>
+            {lines.map((line) => (
+              <li key={line.key}>
+                <time>{formatMs(line.elapsedMs)}</time>
+                <em>{line.kind}</em>
+                <span>{line.text}</span>
+              </li>
+            ))}
+          </ol>
+        )}
+        {trace?.spokenStatuses.length ? (
+          <div className="latent-trace-spoken">
+            <span>status text</span>
+            <p>{trace.spokenStatuses.join(" · ")}</p>
+          </div>
+        ) : null}
+        {trace?.verdict && (
+          <div className={`latent-trace-verdict latent-trace-${trace.verdict}`}>
+            <span>{trace.verdict}</span>
+            <p>{trace.reasons?.join(" · ") || "No verdict detail."}</p>
+          </div>
+        )}
+      </div>
+    </details>
+  );
 }
 
 export function App() {
@@ -163,6 +325,7 @@ export function App() {
   const session = state.session;
   const transcript = session?.transcript ?? [];
   const activeTurn = session?.activeTurn;
+  const activeAppServerTrace = activeTurn?.appServerTrace ?? activeTurn?.progressTrace;
   const currentSparkPreflight =
     sparkPreflight?.threadId === session?.threadId && sparkPreflight?.candidateModel === effectiveCodexModel
       ? sparkPreflight
@@ -1541,7 +1704,7 @@ export function App() {
               ) : pending ? (
                 <section className="compact-turn compact-assistant compact-thinking">
                   <span>Mortic</span>
-                  <p>Thinking.</p>
+                  <p>Waiting for the first answer chunk.</p>
                 </section>
               ) : compactAssistantEntry && (
                 <section className="compact-turn compact-assistant">
@@ -1562,6 +1725,8 @@ export function App() {
                 </section>
               )}
             </article>
+            <CodexWorkingBuffer trace={activeAppServerTrace} pending={pending} hasAssistantText={Boolean(liveAssistantText.trim())} />
+            <CodexLatentTraceBubble trace={activeAppServerTrace} pending={pending} />
             <nav className="bottom-voice-dock" aria-label="Voice controls">
               <button
                 type="button"

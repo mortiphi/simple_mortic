@@ -2,9 +2,9 @@ import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
-import type { CodexStatus, ForkCheckpoint, ReasoningEffort, RuntimeContextRestore, ScratchMode } from "../shared/types.js";
+import type { CodexStatus, ForkCheckpoint, ProviderThreadSummary, ReasoningEffort, RuntimeContextRestore, ScratchMode } from "../shared/types.js";
 import { codexAppServerBridge } from "./appServerBridge.js";
-import type { CodexProgressTraceEvent, CodexTurnProgress } from "./appServerBridge.js";
+import type { CodexProgressTraceEvent, CodexTurnProgress, CodexVoiceActivity } from "./appServerBridge.js";
 import { codexCliPtyBridge } from "./cliPtyBridge.js";
 import { codexProviderAdapter } from "./providerAdapters.js";
 
@@ -16,10 +16,11 @@ type ContinueCheck = () => boolean | Promise<boolean>;
 
 function voicePromptWithContract(prompt: string): string {
   return [
-    "Voice output reminder: reply with exactly two newline-delimited JSON records and nothing else.",
-    "Line 1: {\"type\":\"speak\",\"text\":\"complete spoken answer\"}",
-    "Line 2: {\"type\":\"read\",\"markdown\":\"screen notes, with newlines escaped as \\\\n\"}",
-    "No prose before or after the two JSON lines.",
+    "Voice output reminder: if this turn has an output schema, return the schema object with speak.text and read.markdown.",
+    "If no output schema is active, reply with exactly two newline-delimited JSON records and nothing else.",
+    "Fallback line 1: {\"type\":\"speak\",\"text\":\"complete spoken answer\"}",
+    "Fallback line 2: {\"type\":\"read\",\"markdown\":\"screen notes, with newlines escaped as \\\\n\"}",
+    "Do not add prose outside the schema object or the two fallback JSON lines.",
     "",
     "User turn:",
     prompt
@@ -34,6 +35,14 @@ export async function getCodexStatus(): Promise<CodexStatus> {
     version: status.version,
     error: status.error
   };
+}
+
+export async function listCodexRecentThreads(options?: { limit?: number }): Promise<ProviderThreadSummary[]> {
+  try {
+    return await codexAppServerBridge.listRecentThreads({ limit: options?.limit });
+  } catch {
+    return await codexProviderAdapter.listRecentThreads(options);
+  }
 }
 
 function reasoningConfigArg(reasoningEffort: ReasoningEffort): string {
@@ -220,6 +229,7 @@ export async function runCodexTurn(params: {
   onDelta?: (delta: string, text: string) => void | Promise<void>;
   onEvent?: (label: string, detail?: string) => void | Promise<void>;
   onProgress?: (progress: CodexTurnProgress) => void | Promise<void>;
+  onVoiceActivity?: (activity: CodexVoiceActivity) => void | Promise<void>;
   onProgressTrace?: (event: CodexProgressTraceEvent) => void | Promise<void>;
 }): Promise<string> {
   const model = params.codexModel || DEFAULT_CODEX_MODEL;
@@ -247,6 +257,7 @@ export async function runCodexTurn(params: {
       onDelta: params.onDelta,
       onEvent: params.onEvent,
       onProgress: params.onProgress,
+      onVoiceActivity: params.onVoiceActivity,
       onProgressTrace: params.onProgressTrace
     });
 

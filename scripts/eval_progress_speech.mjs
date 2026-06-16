@@ -184,9 +184,13 @@ function evaluateCase(testCase, turn, wallMs) {
   const decisions = trace?.decisions ?? [];
   const mapped = trace?.mappedEvents ?? [];
   const raw = trace?.rawNotifications ?? [];
+  const activities = trace?.activities ?? [];
   const usefulMappedBeforeDelta = mapped.filter((event) => {
     if (event.label === "Writing answer") return false;
     return firstDeltaMs === undefined || event.elapsedMs <= firstDeltaMs;
+  });
+  const visibleActivitiesBeforeDelta = activities.filter((event) => {
+    return event.display && (firstDeltaMs === undefined || event.elapsedMs <= firstDeltaMs);
   });
 
   if (!trace) failures.push("missing progressTrace");
@@ -237,12 +241,21 @@ function evaluateCase(testCase, turn, wallMs) {
     failures,
     warnings,
     firstAssistantDeltaMs: firstDeltaMs,
+    firstActivityMs: trace?.firstActivityMs,
     spokenStatuses: spoken,
+    visibleActivities: visibleActivitiesBeforeDelta.map((activity) => ({
+      elapsedMs: activity.elapsedMs,
+      kind: activity.kind,
+      label: activity.label,
+      detail: activity.detail
+    })),
     serverTraceVerdict: trace?.verdict,
     serverTraceReasons: trace?.reasons ?? [],
     counts: {
       rawNotifications: raw.length,
       mappedEvents: mapped.length,
+      activities: activities.length,
+      visibleActivitiesBeforeDelta: visibleActivitiesBeforeDelta.length,
       decisions: decisions.length,
       usefulMappedBeforeDelta: usefulMappedBeforeDelta.length
     },
@@ -356,7 +369,9 @@ async function main() {
       name: result.name,
       verdict: result.verdict,
       spoken: result.spokenStatuses ?? [],
+      visibleActivities: result.visibleActivities ?? [],
       firstAssistantDeltaMs: result.firstAssistantDeltaMs,
+      firstActivityMs: result.firstActivityMs,
       failures: result.failures,
       warnings: result.warnings
     }))

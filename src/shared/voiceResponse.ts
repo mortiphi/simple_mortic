@@ -1,4 +1,4 @@
-export type VoiceParserMode = "ndjson" | "invalid";
+export type VoiceParserMode = "ndjson" | "schema" | "invalid";
 
 export type VoiceResponseParts = {
   displayText: string;
@@ -24,6 +24,8 @@ type JsonVoiceRecord = {
   type?: unknown;
   text?: unknown;
   markdown?: unknown;
+  speak?: unknown;
+  read?: unknown;
 };
 
 function cleanText(text: string): string {
@@ -56,6 +58,27 @@ function parseJsonVoiceRecord(line: string): { record?: JsonVoiceRecord; error?:
       error: error instanceof Error ? error.message : String(error)
     };
   }
+}
+
+function parseJsonVoiceObject(raw: string): { record?: JsonVoiceRecord; error?: string } {
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+      return { error: "response is not a JSON object" };
+    }
+    return { record: parsed as JsonVoiceRecord };
+  } catch (error) {
+    return {
+      error: error instanceof Error ? error.message : String(error)
+    };
+  }
+}
+
+function schemaString(value: unknown, key: "text" | "markdown"): string | undefined {
+  if (typeof value === "string") return value;
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const nested = (value as Record<string, unknown>)[key];
+  return typeof nested === "string" ? nested : undefined;
 }
 
 function parseJsonStringPrefix(source: string, quoteIndex: number): { value: string; closed: boolean; nextIndex: number } | null {
@@ -197,6 +220,29 @@ function partialSpeakTextFromOpenJson(rawText: string): string {
   return "";
 }
 
+function partialSchemaSpeakText(rawText: string): string {
+  const raw = rawText.trimStart();
+  if (!raw.startsWith("{")) return "";
+  const speakKey = raw.search(/"speak"\s*:/);
+  if (speakKey < 0) return "";
+  const colonIndex = raw.indexOf(":", speakKey);
+  if (colonIndex < 0) return "";
+  const valueStart = skipJsonWhitespace(raw, colonIndex + 1);
+  if (raw[valueStart] === "\"") {
+    const value = parseJsonStringPrefix(raw, valueStart);
+    return value ? cleanText(value.value) : "";
+  }
+  if (raw[valueStart] !== "{") return "";
+  const textKey = raw.indexOf("\"text\"", valueStart);
+  if (textKey < 0) return "";
+  const textColonIndex = raw.indexOf(":", textKey);
+  if (textColonIndex < 0) return "";
+  const textStart = skipJsonWhitespace(raw, textColonIndex + 1);
+  if (raw[textStart] !== "\"") return "";
+  const value = parseJsonStringPrefix(raw, textStart);
+  return value ? cleanText(value.value) : "";
+}
+
 function parserWarningMarkdown(message: string, raw?: string): string {
   const rawBlock = raw ? `\n\nRaw payload:\n\n\`\`\`text\n${raw.trim()}\n\`\`\`` : "";
   return `Mortic parser warning: ${message}${rawBlock}`;
@@ -210,6 +256,22 @@ export function parseMorticVoice(rawText: string): VoiceParseResult {
       parserMode: "invalid",
       error: "empty voice response",
       rawText
+    };
+  }
+
+  const schemaParse = parseJsonVoiceObject(raw);
+  const schemaRecord = schemaParse.record;
+  const schemaSpokenText = cleanText(schemaString(schemaRecord?.speak, "text") ?? "");
+  if (schemaRecord && schemaSpokenText) {
+    const schemaNotesText = cleanText(schemaString(schemaRecord.read, "markdown") ?? "") || undefined;
+    return {
+      ok: true,
+      parts: {
+        displayText: schemaSpokenText,
+        spokenText: schemaSpokenText,
+        notesText: schemaNotesText,
+        parserMode: "schema"
+      }
     };
   }
 
@@ -288,6 +350,9 @@ export function parseMorticVoice(rawText: string): VoiceParseResult {
 export function partialSpokenText(rawText: string): string {
   const raw = rawText.trimStart();
   if (!raw) return "";
+
+  const schemaText = partialSchemaSpeakText(raw);
+  if (schemaText) return schemaText;
 
   const firstLineEnd = raw.search(/\r?\n/);
   if (firstLineEnd < 0) return partialSpeakTextFromOpenJson(raw);

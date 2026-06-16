@@ -45,7 +45,7 @@ export type TranscriptEntry = {
   notesText?: string;
   sourcesText?: string;
   rawText?: string;
-  parserMode?: "ndjson" | "invalid";
+  parserMode?: "ndjson" | "schema" | "invalid";
   parserError?: string;
   createdAt: string;
   reasoningEffort?: ReasoningEffort;
@@ -119,6 +119,7 @@ export type TurnMetrics = {
   sendAfterSpeechMs?: number;
   recognitionErrors?: string;
   interruptionLatencyMs?: number;
+  firstAppServerActivityMs?: number;
   transportProvider?: TransportProvider;
   transportState?: TransportState;
   transportPacketLoss?: number;
@@ -142,12 +143,37 @@ export type TurnRun = {
   updatedAt: string;
   logs: TurnLogEntry[];
   metrics: TurnMetrics;
+  appServerTrace?: AppServerTrace;
   progressTrace?: ProgressSpeechTrace;
   error?: string;
   responseEntryId?: string;
 };
 
-export type ProgressTraceRawNotification = {
+export type AppServerActivityKind =
+  | "reasoning"
+  | "plan"
+  | "diff"
+  | "command"
+  | "tool"
+  | "search"
+  | "file"
+  | "assistant"
+  | "turn"
+  | "system";
+
+export type AppServerActivity = {
+  id: string;
+  elapsedMs: number;
+  kind: AppServerActivityKind;
+  label: string;
+  detail?: string;
+  itemType?: string;
+  itemId?: string;
+  method?: string;
+  display: boolean;
+};
+
+export type AppServerTraceRawNotification = {
   elapsedMs: number;
   method: string;
   turnId?: string;
@@ -156,7 +182,7 @@ export type ProgressTraceRawNotification = {
   detail?: string;
 };
 
-export type ProgressTraceMappedEvent = {
+export type AppServerTraceMappedEvent = {
   elapsedMs: number;
   kind: string;
   label: string;
@@ -164,7 +190,7 @@ export type ProgressTraceMappedEvent = {
   detail?: string;
 };
 
-export type ProgressTraceDecision = {
+export type AppServerTraceDecision = {
   elapsedMs: number;
   label: string;
   decision: "eligible" | "spoken" | "suppressed";
@@ -172,16 +198,20 @@ export type ProgressTraceDecision = {
   speakableText?: string;
 };
 
-export type ProgressSpeechTrace = {
+export type AppServerTrace = {
   enabled: boolean;
-  rawNotifications: ProgressTraceRawNotification[];
-  mappedEvents: ProgressTraceMappedEvent[];
-  decisions: ProgressTraceDecision[];
+  rawNotifications: AppServerTraceRawNotification[];
+  mappedEvents: AppServerTraceMappedEvent[];
+  activities: AppServerActivity[];
+  decisions: AppServerTraceDecision[];
   firstAssistantDeltaMs?: number;
+  firstActivityMs?: number;
   spokenStatuses: string[];
   verdict?: "pass" | "warn" | "fail";
   reasons?: string[];
 };
+
+export type ProgressSpeechTrace = AppServerTrace;
 
 export type CodexStatus = {
   available: boolean;
@@ -269,6 +299,8 @@ export type SessionResponse = {
     progressSounds: boolean;
     progressSpeech: boolean;
     progressSpeechTrace: boolean;
+    appServerActivity: boolean;
+    appServerTrace: boolean;
   };
   tts: TtsStatus;
   stt: SttStatus;
@@ -652,6 +684,12 @@ export type TurnStreamEvent =
       label: string;
       detail?: string;
       speakable: boolean;
+      scratchMode: ScratchMode;
+    }
+  | {
+      type: "voiceActivity";
+      turnId: string;
+      activity: AppServerActivity;
       scratchMode: ScratchMode;
     }
   | {
