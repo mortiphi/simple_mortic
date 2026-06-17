@@ -67,4 +67,26 @@ function normalize(method, params) {
   assert.doesNotMatch(event.activity?.detail ?? "", /Users\/aeroknight/);
 }
 
+{
+  const event = normalize("item/started", {
+    threadId: "thread",
+    turnId: "turn",
+    item: { type: "contextCompaction", id: "compact-1" }
+  });
+  assert.equal(event.activity?.kind, "system");
+  assert.equal(event.activity?.label, "Compacting context");
+  assert.equal(event.activity?.display, true);
+}
+
+{
+  const event = normalize("thread/compacted", {
+    threadId: "thread",
+    turnId: "turn"
+  });
+  assert.equal(event.raw.detail, "thread compacted");
+  assert.equal(event.activity?.kind, "system");
+  assert.equal(event.activity?.label, "Context compacted");
+  assert.equal(event.activity?.display, true);
+}
+
 console.log("app-server event normalization checks passed");

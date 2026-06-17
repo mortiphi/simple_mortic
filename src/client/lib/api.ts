@@ -1,12 +1,13 @@
 import type {
   InputPolicy,
+  CodexAccessPreset,
   ReasoningEffort,
   ScratchMode,
   SttProvider,
   TransportProvider,
   TtsProvider
 } from "../../shared/types.js";
-import { reasoningEfforts, scratchModes, sttProviders, transportProviders, ttsProviders } from "../../shared/types.js";
+import { codexAccessPresets, reasoningEfforts, scratchModes, sttProviders, transportProviders, ttsProviders } from "../../shared/types.js";
 
 import { SETTINGS_VERSION } from "./labels.js";
 export function apiBase(): string {
@@ -39,6 +40,18 @@ export function readStoredEffort(defaultEffort: ReasoningEffort): ReasoningEffor
 export function readStoredModel(defaultModel: string): string {
   if (storedSetting("mortic.settingsVersion") !== SETTINGS_VERSION) return defaultModel;
   return storedSetting("mortic.codexModel") || defaultModel;
+}
+
+export function readStoredServiceTier(defaultServiceTier: string | null): string | null {
+  if (storedSetting("mortic.settingsVersion") !== SETTINGS_VERSION) return defaultServiceTier;
+  const stored = storedSetting("mortic.serviceTier");
+  return stored && stored.trim() ? stored.trim() : defaultServiceTier;
+}
+
+export function readStoredCodexAccess(defaultPreset: CodexAccessPreset): CodexAccessPreset {
+  if (storedSetting("mortic.settingsVersion") !== SETTINGS_VERSION) return defaultPreset;
+  const stored = storedSetting("mortic.codexAccess");
+  return codexAccessPresets.includes(stored as CodexAccessPreset) ? (stored as CodexAccessPreset) : defaultPreset;
 }
 
 export function readStoredScratchMode(defaultMode: ScratchMode): ScratchMode {

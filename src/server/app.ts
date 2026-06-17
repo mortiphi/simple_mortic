@@ -10,6 +10,7 @@ import {
   DEFAULT_CODEX_MODEL,
   compactCodexThread,
   createHandoffPrompt,
+  getCodexAppServerConfig,
   getCodexSparkCompactedBase,
   getCodexStatus,
   interruptCodexScratch,
@@ -30,7 +31,6 @@ import { defaultScratchSettings } from "../shared/scratchDefaults.js";
 import { estimateTextTokens } from "../shared/tokenEstimate.js";
 import { parseMorticVoice } from "../shared/voiceResponse.js";
 import { effectiveReasoningForModel } from "../shared/modelPolicy.js";
-import { modelProfile } from "../shared/modelProfiles.js";
 import {
   prewarmReadyText,
   prewarmThreadName
@@ -42,7 +42,11 @@ import {
   extractedItemTypes,
   providerForkContinuations,
   ttsProviders,
+  codexApprovalPolicies,
+  codexFilesystemModes,
+  type AppServerConfigMetadata,
   type AppServerActivity,
+  type CodexRuntimePolicy,
   type AudioHealthRequest,
   type ApproveCompilationRequest,
   type DeepgramHealthResponse,
@@ -106,6 +110,8 @@ type EffectiveScratchSettings = {
   scratchMode: ScratchMode;
   reasoningEffort: ReasoningEffort;
   codexModel: string;
+  serviceTier?: string | null;
+  codexRuntimePolicy: CodexRuntimePolicy;
   voiceCaveman: boolean;
 };
 
@@ -135,6 +141,32 @@ function normalizeCodexModel(value: unknown): string {
   return clean || DEFAULT_CODEX_MODEL;
 }
 
+function normalizeServiceTier(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const clean = value.trim();
+  return clean || null;
+}
+
+function defaultCodexRuntimePolicy(): CodexRuntimePolicy {
+  const networkRaw = (process.env.MORTIC_SCRATCH_FORK_NETWORK ?? process.env.MORTIC_SCRATCH_NETWORK ?? "").trim().toLowerCase();
+  return {
+    filesystem: "readOnly",
+    networkAccess: networkRaw === "1" || networkRaw === "true" || networkRaw === "enabled",
+    approvalPolicy: "never"
+  };
+}
+
+function normalizeCodexRuntimePolicy(value: unknown): CodexRuntimePolicy {
+  const defaults = defaultCodexRuntimePolicy();
+  if (!value || typeof value !== "object") return defaults;
+  const raw = value as Partial<CodexRuntimePolicy>;
+  return {
+    filesystem: codexFilesystemModes.includes(raw.filesystem as CodexRuntimePolicy["filesystem"]) ? raw.filesystem as CodexRuntimePolicy["filesystem"] : defaults.filesystem,
+    networkAccess: typeof raw.networkAccess === "boolean" ? raw.networkAccess : defaults.networkAccess,
+    approvalPolicy: codexApprovalPolicies.includes(raw.approvalPolicy as CodexRuntimePolicy["approvalPolicy"]) ? raw.approvalPolicy as CodexRuntimePolicy["approvalPolicy"] : defaults.approvalPolicy
+  };
+}
+
 function nonNegativeInt(value: unknown): number | undefined {
   if (typeof value !== "number" || !Number.isFinite(value)) return undefined;
   return Math.max(0, Math.floor(value));
@@ -159,6 +191,8 @@ function effectiveScratchSettings(params: {
   scratchMode: ScratchMode;
   reasoningEffort: ReasoningEffort;
   codexModel?: string;
+  serviceTier?: string | null;
+  codexRuntimePolicy?: CodexRuntimePolicy;
   voiceCaveman?: boolean;
 }): EffectiveScratchSettings {
   const codexModel = normalizeCodexModel(params.codexModel);
@@ -170,12 +204,14 @@ function effectiveScratchSettings(params: {
     scratchMode: params.scratchMode,
     reasoningEffort: effectiveReasoningForModel(codexModel, requestedReasoning),
     codexModel,
+    serviceTier: normalizeServiceTier(params.serviceTier),
+    codexRuntimePolicy: normalizeCodexRuntimePolicy(params.codexRuntimePolicy),
     voiceCaveman: params.scratchMode === "voice" && params.voiceCaveman === true
   };
 }
 
-function needsModelTransitionPreflight(model: string): boolean {
-  return modelProfile(model).id !== "default";
+function needsModelTransitionPreflight(_model: string): boolean {
+  return false;
 }
 
 async function effectiveSparkPreflight(threadId: string, settings?: EffectiveScratchSettings, runtimeContext?: RuntimeContextRestore) {
@@ -249,7 +285,59 @@ function featureConfig() {
     progressSpeech: process.env.MORTIC_PROGRESS_SPEECH === "1",
     progressSpeechTrace: process.env.MORTIC_PROGRESS_SPEECH_TRACE === "1" || process.env.MORTIC_PROGRESS_SPEECH === "1",
     appServerActivity: true,
-    appServerTrace: true
+    appServerTrace: true,
+    voiceOutputSchema: process.env.MORTIC_VOICE_OUTPUT_SCHEMA !== "0"
+  };
+}
+
+function appServerRuntimeFlags(): AppServerConfigMetadata["runtime"] {
+  const features = featureConfig();
+  return {
+    activityBuffer: features.appServerActivity,
+    trace: features.appServerTrace,
+    progressSpeech: features.progressSpeech,
+    outputSchema: features.voiceOutputSchema
+  };
+}
+
+function fallbackAppServerConfig(error?: string): AppServerConfigMetadata {
+  return {
+    source: "fallback",
+    error,
+    models: [
+      {
+        id: DEFAULT_CODEX_MODEL,
+        model: DEFAULT_CODEX_MODEL,
+        displayName: DEFAULT_CODEX_MODEL === "default" ? "Thread native model" : DEFAULT_CODEX_MODEL,
+        hidden: false,
+        isDefault: true,
+        inputModalities: ["text"],
+        supportedReasoningEfforts: reasoningEfforts.map((reasoningEffort) => ({ reasoningEffort })),
+        defaultReasoningEffort: DEFAULT_REASONING_EFFORT,
+        serviceTiers: [],
+        defaultServiceTier: null
+      }
+    ],
+    selectedModel: DEFAULT_CODEX_MODEL,
+    defaultModel: DEFAULT_CODEX_MODEL,
+    selectedReasoningEffort: DEFAULT_REASONING_EFFORT,
+    selectedServiceTier: null,
+    sandboxPolicy: {
+      type: "readOnly",
+      networkAccess: process.env.MORTIC_SCRATCH_FORK_NETWORK === "1",
+      displayName: "Read-only",
+      detail: "Fallback from Mortic defaults; app-server policy discovery failed.",
+      dangerous: false
+    },
+    approvalPolicy: {
+      value: "never",
+      displayName: "Never",
+      editable: false
+    },
+    tooling: {
+      mcpStatus: "not-surfaced"
+    },
+    runtime: appServerRuntimeFlags()
   };
 }
 
@@ -589,6 +677,7 @@ export async function createMorticServer(options: MorticServerOptions) {
   const turnStreams = new Map<string, Set<(event: unknown) => void>>();
   const turnReplay = new Map<string, { text: string; updatedAt: string }>();
   let runtimeContext = options.runtimeContext;
+  let appServerConfigCache: AppServerConfigMetadata | undefined;
 
   function currentRuntimeContext(session?: MorticSession): RuntimeContextRestore | undefined {
     return session?.runtimeContext ?? runtimeContext;
@@ -602,10 +691,23 @@ export async function createMorticServer(options: MorticServerOptions) {
       defaultCodexModel: DEFAULT_CODEX_MODEL,
       defaultScratchMode: defaultScratchSettings.scratchMode,
       features: featureConfig(),
+      appServerConfig: appServerConfigCache ?? fallbackAppServerConfig("App-server discovery has not completed yet."),
       tts: getTtsStatus(),
       stt: getSttStatus(),
       livekit: getLiveKitStatus()
     };
+  }
+
+  async function refreshAppServerConfig(): Promise<void> {
+    try {
+      appServerConfigCache = await getCodexAppServerConfig({
+        defaultModel: DEFAULT_CODEX_MODEL,
+        defaultReasoningEffort: DEFAULT_REASONING_EFFORT,
+        features: appServerRuntimeFlags()
+      });
+    } catch (error) {
+      appServerConfigCache = fallbackAppServerConfig(error instanceof Error ? error.message : String(error));
+    }
   }
 
   function emitTurnEvent(turnId: string, event: unknown): void {
@@ -700,6 +802,7 @@ export async function createMorticServer(options: MorticServerOptions) {
 
   app.get("/api/session", async () => {
     const session = await options.storage.read();
+    await refreshAppServerConfig();
     await syncProjectSession(session, "session.loaded");
     return sessionResponse(session);
   });
@@ -1232,6 +1335,8 @@ export async function createMorticServer(options: MorticServerOptions) {
       scratchMode: body.scratchMode,
       reasoningEffort: body.reasoningEffort,
       codexModel: body.codexModel,
+      serviceTier: body.serviceTier,
+      codexRuntimePolicy: body.codexRuntimePolicy,
       voiceCaveman: body.voiceCaveman
     });
     const sparkPreflight = needsModelTransitionPreflight(effective.codexModel)
@@ -1257,6 +1362,8 @@ export async function createMorticServer(options: MorticServerOptions) {
         scratchMode: effective.scratchMode,
         reasoningEffort: effective.reasoningEffort,
         codexModel: effective.codexModel,
+        serviceTier: effective.serviceTier,
+        codexRuntimePolicy: effective.codexRuntimePolicy,
         voiceCaveman: effective.voiceCaveman,
         onEvent: (label, detail) => {
           logs.push({
@@ -1283,6 +1390,7 @@ export async function createMorticServer(options: MorticServerOptions) {
       await syncProjectSession(sessionWithCheckpoint, "scratch.prewarmed", {
         scratchMode: effective.scratchMode,
         codexModel: effective.codexModel,
+        serviceTier: effective.serviceTier,
         reasoningEffort: effective.reasoningEffort,
         checkpoint
       });
@@ -1292,6 +1400,7 @@ export async function createMorticServer(options: MorticServerOptions) {
         scratchMode: effective.scratchMode,
         reasoningEffort: effective.reasoningEffort,
         codexModel: effective.codexModel,
+        serviceTier: effective.serviceTier,
         voiceCaveman: effective.voiceCaveman,
         prewarmConfirmation: effective.scratchMode === "voice" ? readyText : undefined,
         prewarmMs: Date.now() - startedAt,
@@ -1304,6 +1413,7 @@ export async function createMorticServer(options: MorticServerOptions) {
         scratchMode: effective.scratchMode,
         reasoningEffort: effective.reasoningEffort,
         codexModel: effective.codexModel,
+        serviceTier: effective.serviceTier,
         voiceCaveman: effective.voiceCaveman,
         prewarmMs: Date.now() - startedAt,
         logs
@@ -1328,6 +1438,8 @@ export async function createMorticServer(options: MorticServerOptions) {
       scratchMode: isScratchMode(body.scratchMode) ? body.scratchMode : DEFAULT_SCRATCH_MODE,
       reasoningEffort: body.reasoningEffort,
       codexModel: body.codexModel,
+      serviceTier: body.serviceTier,
+      codexRuntimePolicy: body.codexRuntimePolicy,
       voiceCaveman: body.voiceCaveman
     });
     const sparkPreflight = needsModelTransitionPreflight(effective.codexModel)
@@ -1346,6 +1458,8 @@ export async function createMorticServer(options: MorticServerOptions) {
     const effectiveScratchMode = effective.scratchMode;
     const effectiveReasoningEffort = effective.reasoningEffort;
     const effectiveCodexModel = effective.codexModel;
+    const effectiveServiceTier = effective.serviceTier;
+    const effectiveCodexRuntimePolicy = effective.codexRuntimePolicy;
 
     if (sessionBeforeTurn.activeTurn?.status === "running") {
       return reply.code(409).send({
@@ -1405,6 +1519,8 @@ export async function createMorticServer(options: MorticServerOptions) {
       userText: userEntry.text,
       reasoningEffort: effectiveReasoningEffort,
       codexModel: effectiveCodexModel,
+      serviceTier: effectiveServiceTier,
+      codexRuntimePolicy: effectiveCodexRuntimePolicy,
       scratchMode: effectiveScratchMode,
       voiceCaveman: effective.voiceCaveman,
       createdAt: new Date().toISOString(),
@@ -1658,6 +1774,8 @@ export async function createMorticServer(options: MorticServerOptions) {
             userText: promptText,
             reasoningEffort: effectiveReasoningEffort,
             codexModel: effectiveCodexModel,
+            serviceTier: effectiveServiceTier,
+            codexRuntimePolicy: effectiveCodexRuntimePolicy,
             scratchMode: effectiveScratchMode,
             voiceCaveman: effective.voiceCaveman,
             shouldContinue: isCurrentTurnRunning,
@@ -1919,6 +2037,8 @@ export async function createMorticServer(options: MorticServerOptions) {
   app.post<{ Body: HandoffRequest }>("/api/handoff", async (request) => {
     const body = request.body;
     const codexModel = normalizeCodexModel(body?.codexModel);
+    const serviceTier = normalizeServiceTier(body?.serviceTier);
+    const codexRuntimePolicy = normalizeCodexRuntimePolicy(body?.codexRuntimePolicy);
     const requestedReasoning = isReasoningEffort(body?.reasoningEffort) ? body.reasoningEffort : DEFAULT_REASONING_EFFORT;
     const reasoningEffort = effectiveReasoningForModel(codexModel, requestedReasoning);
     const session = await options.storage.read();
@@ -1946,6 +2066,8 @@ export async function createMorticServer(options: MorticServerOptions) {
           userText: "Generate Mortic handoff prompts from the scratch transcript.",
           reasoningEffort,
           codexModel,
+          serviceTier,
+          codexRuntimePolicy,
           scratchMode: "text",
           developerInstructions: HANDOFF_DEVELOPER_INSTRUCTIONS,
           requireAppServer: true

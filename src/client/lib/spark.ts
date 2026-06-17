@@ -2,8 +2,8 @@ import type { SparkContextPreflight } from "../../shared/types.js";
 import { modelProfile } from "../../shared/modelProfiles.js";
 
 import { formatCount, formatPercent } from "./format.js";
-export function needsModelTransitionPreflight(model: string): boolean {
-  return modelProfile(model).id !== "default";
+export function needsModelTransitionPreflight(_model: string): boolean {
+  return false;
 }
 
 export function sparkPreflightLabel(preflight: SparkContextPreflight | null, pending: boolean): string {

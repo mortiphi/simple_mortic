@@ -4,7 +4,16 @@ import { homedir } from "node:os";
 import path from "node:path";
 import net from "node:net";
 
-import type { AppServerActivity, ProviderThreadSummary, ReasoningEffort, ScratchMode } from "../shared/types.js";
+import type {
+  AppServerActivity,
+  AppServerConfigMetadata,
+  AppServerModelOption,
+  AppServerSandboxPolicySummary,
+  CodexRuntimePolicy,
+  ProviderThreadSummary,
+  ReasoningEffort,
+  ScratchMode
+} from "../shared/types.js";
 import {
   appServerItemId,
   appServerItemType,
@@ -32,6 +41,54 @@ type PendingCompaction = {
   reject: (reason: Error) => void;
   timeout: NodeJS.Timeout;
   onEvent?: (label: string, detail?: string) => void | Promise<void>;
+};
+
+type AppServerAskForApproval =
+  | "untrusted"
+  | "on-failure"
+  | "on-request"
+  | "never"
+  | {
+      granular: {
+        sandbox_approval: boolean;
+        rules: boolean;
+        skill_approval: boolean;
+        request_permissions: boolean;
+        mcp_elicitations: boolean;
+      };
+    };
+
+type AppServerSandboxPolicy =
+  | { type: "dangerFullAccess" }
+  | { type: "readOnly"; networkAccess: boolean }
+  | { type: "externalSandbox"; networkAccess: "restricted" | "enabled" }
+  | {
+      type: "workspaceWrite";
+      writableRoots: string[];
+      networkAccess: boolean;
+      excludeTmpdirEnvVar: boolean;
+      excludeSlashTmp: boolean;
+    };
+
+type AppServerModel = {
+  id: string;
+  model: string;
+  displayName: string;
+  description?: string | null;
+  hidden: boolean;
+  isDefault: boolean;
+  inputModalities?: string[] | null;
+  supportedReasoningEfforts?: Array<{
+    reasoningEffort: string;
+    description?: string | null;
+  }> | null;
+  defaultReasoningEffort?: string | null;
+  serviceTiers?: Array<{
+    id: string;
+    name: string;
+    description?: string | null;
+  }> | null;
+  defaultServiceTier?: string | null;
 };
 
 type PendingTurn = {
@@ -89,6 +146,7 @@ type ScratchState = {
   scratchThreadId: string;
   cwd: string;
   model: string;
+  serviceTier?: string | null;
   reasoningEffort: ReasoningEffort;
   scratchMode: ScratchMode;
   voiceCaveman: boolean;
@@ -228,6 +286,125 @@ function scratchForkAccessPolicy(): ScratchForkAccessPolicy {
     sandbox: "read-only",
     approvalPolicy: "never",
     ...(networkRaw === "1" || networkRaw === "true" || networkRaw === "enabled" ? { networkPolicy: "enabled" as const } : {})
+  };
+}
+
+function defaultRuntimePolicy(): CodexRuntimePolicy {
+  return {
+    filesystem: "readOnly",
+    networkAccess: scratchForkAccessPolicy().networkPolicy === "enabled",
+    approvalPolicy: "never"
+  };
+}
+
+function approvalPolicyFromRuntime(policy?: CodexRuntimePolicy): AppServerAskForApproval {
+  return policy?.approvalPolicy ?? defaultRuntimePolicy().approvalPolicy;
+}
+
+function scratchTurnSandboxPolicy(policy?: CodexRuntimePolicy, cwd?: string): AppServerSandboxPolicy {
+  const runtimePolicy = policy ?? defaultRuntimePolicy();
+  if (runtimePolicy.filesystem === "dangerFullAccess") {
+    return { type: "dangerFullAccess" };
+  }
+  if (runtimePolicy.filesystem === "workspaceWrite") {
+    return {
+      type: "workspaceWrite",
+      writableRoots: cwd ? [cwd] : [],
+      networkAccess: runtimePolicy.networkAccess,
+      excludeTmpdirEnvVar: false,
+      excludeSlashTmp: false
+    };
+  }
+  return {
+    type: "readOnly",
+    networkAccess: runtimePolicy.networkAccess
+  };
+}
+
+function sandboxPolicySummary(policy: AppServerSandboxPolicy | undefined): AppServerSandboxPolicySummary {
+  if (!policy) {
+    return {
+      type: "unknown",
+      displayName: "Unknown",
+      detail: "App-server policy was not surfaced.",
+      dangerous: false
+    };
+  }
+  if (policy.type === "readOnly") {
+    return {
+      type: "readOnly",
+      networkAccess: policy.networkAccess,
+      displayName: "Read-only",
+      detail: policy.networkAccess ? "Filesystem read-only, network enabled." : "Filesystem read-only, network restricted.",
+      dangerous: false
+    };
+  }
+  if (policy.type === "workspaceWrite") {
+    return {
+      type: "workspaceWrite",
+      networkAccess: policy.networkAccess,
+      writableRoots: policy.writableRoots,
+      displayName: "Workspace write",
+      detail: `${policy.writableRoots.length} writable root${policy.writableRoots.length === 1 ? "" : "s"}.`,
+      dangerous: false
+    };
+  }
+  if (policy.type === "externalSandbox") {
+    return {
+      type: "externalSandbox",
+      networkAccess: policy.networkAccess,
+      displayName: "External sandbox",
+      detail: `Network ${policy.networkAccess}.`,
+      dangerous: false
+    };
+  }
+  return {
+    type: "dangerFullAccess",
+    displayName: "Danger full access",
+    detail: "No app-server sandbox restrictions.",
+    dangerous: true
+  };
+}
+
+function approvalPolicyLabel(policy: AppServerAskForApproval): string {
+  if (typeof policy !== "string") return "Granular";
+  const labels: Record<string, string> = {
+    never: "Never",
+    "on-request": "On request",
+    "on-failure": "On failure",
+    untrusted: "Untrusted"
+  };
+  return labels[policy] ?? policy;
+}
+
+function isReasoningEffort(value: unknown): value is ReasoningEffort {
+  return typeof value === "string" && ["none", "minimal", "low", "medium", "high", "xhigh"].includes(value);
+}
+
+function modelOptionFromAppServer(model: AppServerModel): AppServerModelOption {
+  const defaultReasoningEffort = isReasoningEffort(model.defaultReasoningEffort) ? model.defaultReasoningEffort : "none";
+  return {
+    id: model.id,
+    model: model.model,
+    displayName: model.displayName || model.model || model.id,
+    description: model.description || undefined,
+    hidden: model.hidden,
+    isDefault: model.isDefault,
+    inputModalities: Array.isArray(model.inputModalities) ? model.inputModalities : ["text", "image"],
+    supportedReasoningEfforts: (model.supportedReasoningEfforts ?? []).flatMap((option) => {
+      if (!isReasoningEffort(option.reasoningEffort)) return [];
+      return [{
+        reasoningEffort: option.reasoningEffort,
+        description: option.description || undefined
+      }];
+    }),
+    defaultReasoningEffort,
+    serviceTiers: (model.serviceTiers ?? []).map((tier) => ({
+      id: tier.id,
+      name: tier.name || tier.id,
+      description: tier.description || undefined
+    })),
+    defaultServiceTier: model.defaultServiceTier
   };
 }
 
@@ -415,11 +592,91 @@ export class CodexAppServerBridge {
     });
   }
 
+  async appServerConfig(params: {
+    defaultModel: string;
+    defaultReasoningEffort: ReasoningEffort;
+    features: AppServerConfigMetadata["runtime"];
+    onEvent?: (label: string, detail?: string) => void | Promise<void>;
+  }): Promise<AppServerConfigMetadata> {
+    return await this.withOperationLock(async () => {
+      await this.ensureReady(params.defaultModel, params.defaultReasoningEffort, params.onEvent);
+      const [modelList, configRead, capabilities, mcpStatuses] = await Promise.allSettled([
+        this.request("model/list", { limit: 100, includeHidden: false }),
+        this.request("config/read", { includeLayers: false, cwd: null }),
+        this.request("modelProvider/capabilities/read", {}),
+        this.request("mcpServerStatus/list", { limit: 20, detail: "Minimal", threadId: null })
+      ]);
+
+      if (modelList.status === "rejected") {
+        throw modelList.reason;
+      }
+
+      const rawModels = Array.isArray(modelList.value?.data) ? modelList.value.data as AppServerModel[] : [];
+      const models = rawModels.map(modelOptionFromAppServer).filter((model) => !model.hidden);
+      if (models.length === 0) {
+        throw new Error("Codex app-server model/list returned no visible models");
+      }
+
+      const config = configRead.status === "fulfilled" ? configRead.value?.config : undefined;
+      const defaultModel =
+        models.find((model) => model.isDefault)?.model ??
+        (typeof config?.model === "string" && config.model.trim() ? config.model.trim() : undefined) ??
+        params.defaultModel;
+      const selectedModel = typeof config?.model === "string" && config.model.trim() ? config.model.trim() : defaultModel;
+      const selectedReasoningEffort = isReasoningEffort(config?.model_reasoning_effort)
+        ? config.model_reasoning_effort
+        : models.find((model) => model.model === selectedModel || model.id === selectedModel)?.defaultReasoningEffort ?? params.defaultReasoningEffort;
+      const selectedServiceTier =
+        typeof config?.service_tier === "string" && config.service_tier.trim() ? config.service_tier.trim() : null;
+      const approvalPolicy: AppServerAskForApproval =
+        typeof config?.approval_policy === "string" || (typeof config?.approval_policy === "object" && config.approval_policy !== null)
+          ? config.approval_policy
+          : scratchForkAccessPolicy().approvalPolicy;
+      const capabilitiesValue = capabilities.status === "fulfilled" ? capabilities.value : undefined;
+      const mcpData = mcpStatuses.status === "fulfilled" && Array.isArray(mcpStatuses.value?.data)
+        ? mcpStatuses.value.data
+        : null;
+
+      return {
+        source: "app-server",
+        models,
+        selectedModel,
+        defaultModel,
+        selectedReasoningEffort,
+        selectedServiceTier,
+        sandboxPolicy: sandboxPolicySummary(scratchTurnSandboxPolicy()),
+        approvalPolicy: {
+          value: typeof approvalPolicy === "string" ? approvalPolicy : "granular",
+          displayName: approvalPolicyLabel(approvalPolicy),
+          editable: false
+        },
+        tooling: {
+          namespaceTools: typeof capabilitiesValue?.namespaceTools === "boolean" ? capabilitiesValue.namespaceTools : undefined,
+          imageGeneration: typeof capabilitiesValue?.imageGeneration === "boolean" ? capabilitiesValue.imageGeneration : undefined,
+          webSearch: typeof capabilitiesValue?.webSearch === "boolean" ? capabilitiesValue.webSearch : undefined,
+          mcpStatus: mcpData ? "surfaced" : "not-surfaced",
+          mcpServers: mcpData
+            ? mcpData
+                .filter((server: any) => typeof server?.name === "string")
+                .slice(0, 8)
+                .map((server: any) => ({
+                  name: server.name,
+                  status: typeof server.status === "string" ? server.status : undefined
+                }))
+            : undefined
+        },
+        runtime: params.features
+      };
+    });
+  }
+
   async runTurn(params: {
     sourceThreadId: string;
     cwd: string;
     prompt: string;
     model: string;
+    serviceTier?: string | null;
+    codexRuntimePolicy?: CodexRuntimePolicy;
     reasoningEffort: ReasoningEffort;
     scratchMode: ScratchMode;
     voiceCaveman?: boolean;
@@ -438,6 +695,7 @@ export class CodexAppServerBridge {
             params.sourceThreadId,
             params.cwd,
             params.model,
+            params.serviceTier,
             params.reasoningEffort,
             params.scratchMode,
             Boolean(params.voiceCaveman)
@@ -447,6 +705,7 @@ export class CodexAppServerBridge {
         : await this.ensureScratchThread(
             params.sourceThreadId,
             params.model,
+            params.serviceTier,
             params.reasoningEffort,
             params.scratchMode,
             Boolean(params.voiceCaveman),
@@ -465,6 +724,9 @@ export class CodexAppServerBridge {
         scratchThreadId,
         prompt: params.prompt,
         model: params.model,
+        serviceTier: params.serviceTier,
+        codexRuntimePolicy: params.codexRuntimePolicy,
+        cwd: params.cwd,
         reasoningEffort: params.reasoningEffort,
         scratchMode: params.scratchMode,
         eventLabelPrefix: "App-server",
@@ -481,6 +743,8 @@ export class CodexAppServerBridge {
     sourceThreadId: string;
     cwd: string;
     model: string;
+    serviceTier?: string | null;
+    codexRuntimePolicy?: CodexRuntimePolicy;
     reasoningEffort: ReasoningEffort;
     scratchMode?: ScratchMode;
     voiceCaveman?: boolean;
@@ -495,6 +759,7 @@ export class CodexAppServerBridge {
         params.sourceThreadId,
         params.cwd,
         params.model,
+        params.serviceTier,
         params.reasoningEffort,
         scratchMode,
         voiceCaveman
@@ -504,6 +769,7 @@ export class CodexAppServerBridge {
         : await this.ensureScratchThread(
             params.sourceThreadId,
             params.model,
+            params.serviceTier,
             params.reasoningEffort,
             scratchMode,
             voiceCaveman,
@@ -521,6 +787,7 @@ export class CodexAppServerBridge {
         params.sourceThreadId,
         params.cwd,
         params.model,
+        params.serviceTier,
         params.reasoningEffort,
         scratchMode,
         voiceCaveman,
@@ -549,6 +816,9 @@ export class CodexAppServerBridge {
         scratchThreadId,
         prompt: params.confirmationPrompt,
         model: params.model,
+        serviceTier: params.serviceTier,
+        codexRuntimePolicy: params.codexRuntimePolicy,
+        cwd: params.cwd,
         reasoningEffort: params.reasoningEffort,
         scratchMode,
         eventLabelPrefix: "App-server prewarm confirmation",
@@ -582,6 +852,7 @@ export class CodexAppServerBridge {
       const scratchThreadId = await this.ensureScratchThread(
         params.sourceThreadId,
         "default",
+        null,
         params.reasoningEffort,
         params.scratchMode,
         Boolean(params.voiceCaveman),
@@ -654,6 +925,7 @@ export class CodexAppServerBridge {
       const compactedThreadId = await this.createCompactionBaseFork(
         params.sourceThreadId,
         params.compactionModel,
+        null,
         params.reasoningEffort,
         params.scratchMode,
         Boolean(params.voiceCaveman),
@@ -679,6 +951,7 @@ export class CodexAppServerBridge {
             params.sourceThreadId,
             params.cwd,
             params.targetModel,
+            null,
             params.reasoningEffort,
             params.scratchMode,
             Boolean(params.voiceCaveman)
@@ -725,6 +998,7 @@ export class CodexAppServerBridge {
       params.sourceThreadId,
       params.cwd,
       params.model,
+      null,
       params.reasoningEffort,
       params.scratchMode,
       Boolean(params.voiceCaveman)
@@ -971,41 +1245,45 @@ export class CodexAppServerBridge {
     sourceThreadId: string,
     cwd: string,
     model: string,
+    serviceTier: string | null | undefined,
     effort: ReasoningEffort,
     scratchMode: ScratchMode,
     voiceCaveman: boolean,
     developerInstructions?: string
   ): ScratchStateKey {
-    return `${sourceThreadId}|${cwd}|${model}|${effort}|${scratchMode}|${voiceCaveman ? "1" : "0"}|${scratchForkAccessKey()}|${developerInstructions ?? ""}`;
+    return `${sourceThreadId}|${cwd}|${model}|tier:${serviceTier ?? "default"}|${effort}|${scratchMode}|${voiceCaveman ? "1" : "0"}|${scratchForkAccessKey()}|${developerInstructions ?? ""}`;
   }
 
   private compactedSparkBaseKey(
     sourceThreadId: string,
     cwd: string,
     model: string,
+    serviceTier: string | null | undefined,
     effort: ReasoningEffort,
     scratchMode: ScratchMode,
     voiceCaveman: boolean
   ): string {
-    return this.scratchKey(sourceThreadId, cwd, model, effort, scratchMode, voiceCaveman);
+    return this.scratchKey(sourceThreadId, cwd, model, serviceTier, effort, scratchMode, voiceCaveman);
   }
 
   private getCompactedSparkBaseFor(
     sourceThreadId: string,
     cwd: string,
     model: string,
+    serviceTier: string | null | undefined,
     effort: ReasoningEffort,
     scratchMode: ScratchMode,
     voiceCaveman: boolean
   ): CompactedSparkBaseState | null {
     return this.compactedSparkBases.get(
-      this.compactedSparkBaseKey(sourceThreadId, cwd, model, effort, scratchMode, voiceCaveman)
+      this.compactedSparkBaseKey(sourceThreadId, cwd, model, serviceTier, effort, scratchMode, voiceCaveman)
     ) ?? null;
   }
 
   private async createCompactionBaseFork(
     sourceThreadId: string,
     model: string,
+    serviceTier: string | null | undefined,
     effort: ReasoningEffort,
     scratchMode: ScratchMode,
     voiceCaveman: boolean,
@@ -1019,7 +1297,7 @@ export class CodexAppServerBridge {
       path: null,
       model: model === "default" ? null : model,
       modelProvider: null,
-      serviceTier: null,
+      serviceTier: serviceTier ?? null,
       cwd,
       approvalPolicy: accessPolicy.approvalPolicy,
       approvalsReviewer: null,
@@ -1107,6 +1385,7 @@ export class CodexAppServerBridge {
   private async ensureScratchThread(
     sourceThreadId: string,
     model: string,
+    serviceTier: string | null | undefined,
     effort: ReasoningEffort,
     scratchMode: ScratchMode,
     voiceCaveman: boolean,
@@ -1114,7 +1393,7 @@ export class CodexAppServerBridge {
     developerInstructions?: string,
     onEvent?: (label: string, detail?: string) => void | Promise<void>
   ): Promise<string> {
-    const key = this.scratchKey(sourceThreadId, cwd, model, effort, scratchMode, voiceCaveman, developerInstructions);
+    const key = this.scratchKey(sourceThreadId, cwd, model, serviceTier, effort, scratchMode, voiceCaveman, developerInstructions);
     const existing = this.scratches.get(key);
     if (existing?.scratchThreadId) {
       return existing.scratchThreadId;
@@ -1127,7 +1406,7 @@ export class CodexAppServerBridge {
       path: null,
       model: model === "default" ? null : model,
       modelProvider: null,
-      serviceTier: null,
+      serviceTier: serviceTier ?? null,
       cwd,
       approvalPolicy: accessPolicy.approvalPolicy,
       approvalsReviewer: null,
@@ -1158,6 +1437,7 @@ export class CodexAppServerBridge {
       scratchThreadId,
       cwd,
       model,
+      serviceTier: serviceTier ?? null,
       reasoningEffort: effort,
       scratchMode,
       voiceCaveman,
@@ -1173,6 +1453,9 @@ export class CodexAppServerBridge {
     scratchThreadId: string;
     prompt: string;
     model: string;
+    serviceTier?: string | null;
+    codexRuntimePolicy?: CodexRuntimePolicy;
+    cwd?: string;
     reasoningEffort: ReasoningEffort;
     scratchMode: ScratchMode;
     eventLabelPrefix: string;
@@ -1193,6 +1476,9 @@ export class CodexAppServerBridge {
         }
       ],
       model: params.model === "default" ? null : params.model,
+      serviceTier: params.serviceTier ?? null,
+      sandboxPolicy: scratchTurnSandboxPolicy(params.codexRuntimePolicy, params.cwd),
+      approvalPolicy: approvalPolicyFromRuntime(params.codexRuntimePolicy),
       effort: params.reasoningEffort,
       summary: params.scratchMode === "voice" ? "concise" : null,
       outputSchema: params.scratchMode === "voice" && voiceOutputSchemaEnabled() ? morticVoiceOutputSchema() : null
@@ -1301,6 +1587,17 @@ export class CodexAppServerBridge {
       if (!pending || pending.sawDelta || !normalized.activity) return;
       await pending.onVoiceActivity?.(normalized.activity);
     };
+    const pendingTurnFor = (turnId: unknown, threadId?: unknown) => {
+      if (typeof turnId === "string") {
+        const pending = this.pendingTurns.get(turnId);
+        if (pending) return pending;
+      }
+      if (typeof threadId !== "string") return undefined;
+      for (const pending of this.pendingTurns.values()) {
+        if (pending.threadId === threadId) return pending;
+      }
+      return undefined;
+    };
 
     if (method === "thread/tokenUsage/updated") {
       this.rememberTokenUsage(message.params);
@@ -1340,8 +1637,8 @@ export class CodexAppServerBridge {
       const turnId = message.params?.turnId;
       const item = message.params?.item;
       if (item?.type === "contextCompaction" && typeof threadId === "string") {
-        await this.completeCompaction(threadId, String(turnId ?? item.id ?? ""), "App-server context compaction item completed");
-        return;
+        const completed = await this.completeCompaction(threadId, String(turnId ?? item.id ?? ""), "App-server context compaction item completed");
+        if (completed) return;
       }
       const pending = this.pendingTurns.get(turnId);
       await traceRaw(pending);
@@ -1427,7 +1724,12 @@ export class CodexAppServerBridge {
       const threadId = message.params?.threadId;
       const turnId = message.params?.turnId;
       if (typeof threadId !== "string") return;
-      await this.completeCompaction(threadId, String(turnId ?? ""), "App-server thread compacted");
+      const completed = await this.completeCompaction(threadId, String(turnId ?? ""), "App-server thread compacted");
+      if (completed) return;
+      const pending = pendingTurnFor(turnId, threadId);
+      await traceRaw(pending);
+      await emitVoiceActivity(pending);
+      await pending?.onEvent?.(`${pending.eventLabelPrefix} context compacted`, String(turnId ?? ""));
       return;
     }
 

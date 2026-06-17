@@ -4,8 +4,10 @@ import type { Dispatch, MutableRefObject, SetStateAction } from "react";
 import {
   type AudioHealthRequest,
   type CaptureState,
+  type CodexRuntimePolicy,
   type InputPolicy,
   type LiveKitStatus,
+  type MorticSession,
   type ReasoningEffort,
   type ScratchMode,
   type SparkContextPreflight,
@@ -50,11 +52,20 @@ import { progressKeyboardLoopUrl, sttProviderLabels, ttsProviderLabels } from ".
 import { needsModelTransitionPreflight } from "../lib/spark.js";
 import { HARD_STT_SEGMENT_MS, LIVE_MODE_RUNTIME_ENABLED, MAX_LOCAL_SEGMENT_BYTES, REMOTE_STT_SAMPLE_RATE, SOFT_STT_SEGMENT_MS, audioContextConstructor, bytesToBase64, chooseSpeakableEnd, downsampleFloat32, encodeWavPcm16, friendlySpeechError, isBufferedTtsProvider, isSpeakableText, mergeFloat32, rangeSummary } from "../lib/voice.js";
 
-const TTS_CHUNK_WATCHDOG_MS = 12000;
+const TTS_CHUNK_WATCHDOG_MS = 60000;
+const ASSISTANT_DRAFT_FINALIZING_MS = 1400;
 
 type BargeInSource = "push-to-talk" | "interrupt-button" | "live-vad";
 
 type BargeInPhase = "idle" | "barge_capture" | "transcribing" | "queued_next_turn";
+
+type AssistantDraftPhase = "streaming" | "finalizing" | "final-pending";
+
+type StreamingAssistantDraft = {
+  turnId: string | null;
+  text: string;
+  phase: AssistantDraftPhase;
+};
 
 type BargeInState = {
   id: number;
@@ -73,6 +84,8 @@ export interface VoiceEngineParams {
   setState: Dispatch<SetStateAction<ApiState>>;
   scratchMode: ScratchMode;
   effectiveCodexModel: string;
+  effectiveServiceTier?: string | null;
+  effectiveCodexRuntimePolicy: CodexRuntimePolicy;
   effectiveReasoningEffort: ReasoningEffort;
   effectiveVoiceCaveman: boolean;
   sparkApproved: boolean;
@@ -115,6 +128,8 @@ export function useVoiceEngine(params: VoiceEngineParams) {
     setState,
     scratchMode,
     effectiveCodexModel,
+    effectiveServiceTier,
+    effectiveCodexRuntimePolicy,
     effectiveReasoningEffort,
     effectiveVoiceCaveman,
     sparkApproved,
@@ -230,7 +245,9 @@ export function useVoiceEngine(params: VoiceEngineParams) {
   const audioHealthSyncInFlightRef = useRef(false);
   const audioHealthSyncQueuedRef = useRef(false);
   const prewarmAnnouncementGenerationRef = useRef(0);
+  const assistantDraftFinalizingTimerRef = useRef<number | null>(null);
   const [liveAssistantText, setLiveAssistantText] = useState("");
+  const [streamingAssistantDraft, setStreamingAssistantDraft] = useState<StreamingAssistantDraft | null>(null);
 
   const recognitionSupported = typeof window !== "undefined" && Boolean(window.SpeechRecognition || window.webkitSpeechRecognition);
   const remoteSttSupported =
@@ -257,9 +274,53 @@ export function useVoiceEngine(params: VoiceEngineParams) {
     recognizingRef.current = recognizing;
   }, [recognizing]);
 
+  useEffect(() => {
+    return () => clearAssistantDraftFinalizingTimer();
+  }, []);
+
   function elapsedSinceTurnStart(): number | undefined {
     if (audioTimingBaseRef.current === null) return undefined;
     return Math.max(0, Math.round(performance.now() - audioTimingBaseRef.current));
+  }
+
+  function resolveAssistantDraftTurnId(turnId?: string): string | null {
+    return turnId ?? currentTurnIdRef.current ?? state.session?.activeTurn?.id ?? null;
+  }
+
+  function clearAssistantDraftFinalizingTimer(): void {
+    if (assistantDraftFinalizingTimerRef.current !== null) {
+      window.clearTimeout(assistantDraftFinalizingTimerRef.current);
+      assistantDraftFinalizingTimerRef.current = null;
+    }
+  }
+
+  function scheduleAssistantDraftFinalizing(turnId?: string): void {
+    clearAssistantDraftFinalizingTimer();
+    const draftTurnId = resolveAssistantDraftTurnId(turnId);
+    assistantDraftFinalizingTimerRef.current = window.setTimeout(() => {
+      assistantDraftFinalizingTimerRef.current = null;
+      setStreamingAssistantDraft((current) => {
+        if (!current || current.phase !== "streaming") return current;
+        if (draftTurnId && current.turnId && current.turnId !== draftTurnId) return current;
+        return { ...current, phase: "finalizing" };
+      });
+    }, ASSISTANT_DRAFT_FINALIZING_MS);
+  }
+
+  function setAssistantDraft(text: string, phase: AssistantDraftPhase, turnId?: string): void {
+    if (!text.trim()) return;
+    const draftTurnId = resolveAssistantDraftTurnId(turnId);
+    setStreamingAssistantDraft({ turnId: draftTurnId, text, phase });
+    if (phase === "streaming") {
+      scheduleAssistantDraftFinalizing(draftTurnId ?? undefined);
+    } else {
+      clearAssistantDraftFinalizingTimer();
+    }
+  }
+
+  function clearAssistantDraft(): void {
+    clearAssistantDraftFinalizingTimer();
+    setStreamingAssistantDraft(null);
   }
 
   function firstTimingPatch<K extends keyof AudioHealthRequest>(key: K): Pick<AudioHealthRequest, K> | null {
@@ -728,6 +789,7 @@ export function useVoiceEngine(params: VoiceEngineParams) {
     setTurnPending(true);
     setSpeechError(null);
     setLiveAssistantText("");
+    clearAssistantDraft();
     liveAssistantTextRef.current = "";
     const startedAtMs = turnStartPerformanceMs(turn);
     if (turn.scratchMode === "voice") {
@@ -1047,6 +1109,7 @@ export function useVoiceEngine(params: VoiceEngineParams) {
     cancelAudioCapture();
     clearRecognitionBuffers(false);
     setLiveAssistantText("");
+    clearAssistantDraft();
     lastQueuedCharRef.current = 0;
     spokenCharsRef.current = 0;
     speechLedgerRef.current = [];
@@ -1297,6 +1360,7 @@ export function useVoiceEngine(params: VoiceEngineParams) {
     const speechText = projectedAssistantSpeechText(options.spokenText ?? displayText);
     if (!speechText.trim()) {
       setLiveAssistantText(displayText);
+      if (!options.final) setAssistantDraft(displayText, "streaming", options.turnId);
       return;
     }
     const previousSpeechText = liveAssistantTextRef.current;
@@ -1328,6 +1392,7 @@ export function useVoiceEngine(params: VoiceEngineParams) {
       const visiblePatch = displayText.trim() ? firstTimingPatch("firstVisibleTextMs") : null;
       assistantVisibleStartedRef.current = true;
       setLiveAssistantText(displayText);
+      if (!options.final) setAssistantDraft(displayText, "streaming", options.turnId);
       if (visiblePatch) updateAudioHealth(visiblePatch);
       syncAudioLedger();
       if (options.turnId) scheduleAudioHealthSync(options.turnId, options.final ? 60 : 250);
@@ -1345,6 +1410,7 @@ export function useVoiceEngine(params: VoiceEngineParams) {
         const visiblePatch = displayText.trim() ? firstTimingPatch("firstVisibleTextMs") : null;
         assistantVisibleStartedRef.current = true;
         setLiveAssistantText(displayText);
+        if (!options.final) setAssistantDraft(displayText, "streaming", options.turnId);
         if (visiblePatch) updateAudioHealth(visiblePatch);
       }
     }
@@ -1382,7 +1448,7 @@ export function useVoiceEngine(params: VoiceEngineParams) {
     handleAssistantText(entry.text, { force: true, final: true, turnId, spokenText: entry.spokenText });
   }
 
-  function handleDeltaText(rawText: string, mode: ScratchMode = currentTurnScratchModeRef.current ?? "voice") {
+  function handleDeltaText(rawText: string, mode: ScratchMode = currentTurnScratchModeRef.current ?? "voice", turnId?: string) {
     cancelProgressSpeech();
     if (mode === "text") {
       handleTextAssistantText(rawText);
@@ -1393,7 +1459,31 @@ export function useVoiceEngine(params: VoiceEngineParams) {
     if (clientDeltaPatch) updateAudioHealthAndSync(clientDeltaPatch);
     const spokenText = partialSpokenText(rawText);
     if (!spokenText.trim()) return;
-    handleAssistantText(spokenText, { spokenText });
+    handleAssistantText(spokenText, { spokenText, turnId });
+  }
+
+  function reconcileFinalAssistant(session: MorticSession, turn: TurnRun): boolean {
+    const finalEntry = turn.responseEntryId
+      ? session.transcript.find((entry) => entry.id === turn.responseEntryId)
+      : undefined;
+    if (finalEntry) {
+      clearAssistantDraft();
+      handleFinalAssistantText(finalEntry, turn.id, turn.scratchMode);
+      return true;
+    }
+
+    if (turn.scratchMode === "voice") {
+      const currentLiveText = liveAssistantTextRef.current.trim() ? liveAssistantTextRef.current : liveAssistantText;
+      const fallbackText = (turn.error ?? currentLiveText).trim();
+      if (fallbackText) {
+        setLiveAssistantText(fallbackText);
+        setAssistantDraft(fallbackText, "final-pending", turn.id);
+      }
+    } else {
+      const fallbackText = (turn.error ?? liveAssistantTextRef.current).trim();
+      if (fallbackText) handleTextAssistantText(fallbackText);
+    }
+    return false;
   }
 
   useEffect(() => {
@@ -1502,6 +1592,8 @@ export function useVoiceEngine(params: VoiceEngineParams) {
           text: clean,
           reasoningEffort: effectiveReasoningEffort,
           codexModel: effectiveCodexModel,
+          serviceTier: effectiveServiceTier,
+          codexRuntimePolicy: effectiveCodexRuntimePolicy,
           scratchMode: turnScratchMode,
           voiceCaveman: effectiveVoiceCaveman,
           allowModelContextRisk: sparkApproved,
@@ -1559,20 +1651,17 @@ export function useVoiceEngine(params: VoiceEngineParams) {
         if (turn?.status === "running") {
           setTurnPending(true);
           currentTurnScratchModeRef.current = turn.scratchMode;
-          if (payload.replayText) handleDeltaText(payload.replayText, turn.scratchMode);
+          if (payload.replayText) handleDeltaText(payload.replayText, turn.scratchMode, turn.id);
           return;
         }
         if (!turn) return;
         setTurnPending(false);
-        if (turn.responseEntryId) {
-          const assistant = payload.session.transcript.find((entry) => entry.id === turn.responseEntryId);
-          if (assistant) {
-            handleFinalAssistantText(assistant, turn.id, turn.scratchMode);
-          }
-        }
-        setLiveAssistantText("");
+        const finalFound = reconcileFinalAssistant(payload.session, turn);
         stream.close();
         streamRef.current = null;
+        if (!finalFound && turn.status === "completed") {
+          void pollTurn(turn.id, { finalTranscriptRetries: 6 });
+        }
         return;
       }
 
@@ -1598,7 +1687,8 @@ export function useVoiceEngine(params: VoiceEngineParams) {
 
       if (payload.type === "voiceActivity") {
         setState((current) => {
-          const turn = current.session?.activeTurn;
+          const session = current.session;
+          const turn = session?.activeTurn;
           if (!turn || turn.id !== payload.turnId) return current;
           const previousTrace = turn.appServerTrace ?? turn.progressTrace;
           const nextTrace = previousTrace
@@ -1613,7 +1703,7 @@ export function useVoiceEngine(params: VoiceEngineParams) {
           return {
             ...current,
             session: {
-              ...current.session,
+              ...session,
               activeTurn: {
                 ...turn,
                 appServerTrace: nextTrace,
@@ -1626,7 +1716,7 @@ export function useVoiceEngine(params: VoiceEngineParams) {
       }
 
       if (payload.type === "delta") {
-        handleDeltaText(payload.text, payload.scratchMode);
+        handleDeltaText(payload.text, payload.scratchMode, payload.turnId);
         return;
       }
 
@@ -1642,21 +1732,12 @@ export function useVoiceEngine(params: VoiceEngineParams) {
         streamRef.current = null;
         return;
       }
-      const finalEntry = payload.turn.responseEntryId
-        ? payload.session.transcript.find((entry) => entry.id === payload.turn.responseEntryId)
-        : undefined;
-      if (finalEntry) {
-        handleFinalAssistantText(finalEntry, payload.turn.id, payload.turn.scratchMode);
-      } else {
-        if (payload.turn.scratchMode === "voice") {
-          handleAssistantText(payload.turn.error ?? liveAssistantTextRef.current, { force: true, final: true, turnId: payload.turn.id });
-        } else {
-          handleTextAssistantText(payload.turn.error ?? liveAssistantTextRef.current);
-        }
-      }
-      setLiveAssistantText("");
+      const finalFound = reconcileFinalAssistant(payload.session, payload.turn);
       stream.close();
       streamRef.current = null;
+      if (!finalFound && payload.type === "completed") {
+        void pollTurn(payload.turn.id, { finalTranscriptRetries: 6 });
+      }
     };
 
     stream.onerror = () => {
@@ -1666,8 +1747,9 @@ export function useVoiceEngine(params: VoiceEngineParams) {
     };
   }
 
-  async function pollTurn(turnId: string) {
+  async function pollTurn(turnId: string, options: { finalTranscriptRetries?: number } = {}) {
     try {
+      let finalTranscriptRetries = options.finalTranscriptRetries ?? 0;
       while (true) {
         await new Promise((resolve) => window.setTimeout(resolve, 500));
         const response = await fetch(`${api}/api/turn/${turnId}`);
@@ -1682,7 +1764,7 @@ export function useVoiceEngine(params: VoiceEngineParams) {
         const turn = payload.turn as TurnRun | null;
 
         if (turn?.status === "running") {
-          if (payload.replayText) handleDeltaText(payload.replayText, turn.scratchMode);
+          if (payload.replayText) handleDeltaText(payload.replayText, turn.scratchMode, turn.id);
           continue;
         }
 
@@ -1695,13 +1777,11 @@ export function useVoiceEngine(params: VoiceEngineParams) {
           resetSpeechPlayback();
           return;
         }
-        if (turn.status === "completed" && turn.responseEntryId) {
-          const assistant = payload.session.transcript.find((entry: TranscriptEntry) => entry.id === turn.responseEntryId);
-          if (assistant) {
-            handleFinalAssistantText(assistant, turn.id, turn.scratchMode);
-          }
+        const finalFound = reconcileFinalAssistant(payload.session, turn);
+        if (!finalFound && turn.status === "completed" && finalTranscriptRetries > 0) {
+          finalTranscriptRetries -= 1;
+          continue;
         }
-        setLiveAssistantText("");
         return;
       }
     } finally {
@@ -2232,6 +2312,7 @@ export function useVoiceEngine(params: VoiceEngineParams) {
     progressVisible,
     queuedTurnPreview,
     liveAssistantText,
+    streamingAssistantDraft,
     announcePrewarmConfirmation,
     reattachActiveTurn,
     resetSpeechPlayback,

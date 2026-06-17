@@ -4,11 +4,12 @@ import rehypeSanitize from "rehype-sanitize";
 import remarkGfm from "remark-gfm";
 
 import {
-  reasoningEfforts,
   scratchModes,
   sttProviders,
   transportProviders,
   ttsProviders,
+  type CodexAccessPreset,
+  type CodexRuntimePolicy,
   type AgentState,
   type CanonicalDelta,
   type ConversationArtifact,
@@ -27,6 +28,8 @@ import {
   type ProviderForkContinuation,
   type ProviderReference,
   type AppServerActivity,
+  type AppServerConfigMetadata,
+  type AppServerModelOption,
   type AppServerTrace,
   type ProgressSpeechTrace,
   type ReasoningEffort,
@@ -45,7 +48,6 @@ import {
 } from "../shared/types.js";
 import { redactThreadId } from "../shared/threadUri.js";
 import { contextWorkReduction, estimateTextTokens, estimateTranscriptTokens, percentReduction } from "../shared/tokenEstimate.js";
-import { effectiveReasoningForModel, modelRequiresLowReasoning } from "../shared/modelPolicy.js";
 import { modelProfile } from "../shared/modelProfiles.js";
 import { ChartTranscriptPreview, MarkdownContent, TaskPlanDetails, dedupeExtractionItems, normalizeExtractionText } from "./components/Markdown.js";
 import { CanonicalStateModal, ChartModal } from "./components/ChartModal.js";
@@ -54,10 +56,10 @@ import { InsightsPanel } from "./components/ProjectPanels.js";
 import { ForkActionSheet } from "./components/ForkActionSheet.js";
 import { OnboardingScreen } from "./components/OnboardingScreen.js";
 import { ThreadPicker } from "./components/ThreadPicker.js";
-import { apiBase, readStoredEffort, readStoredModel, readStoredScratchMode, readStoredSttProvider, readStoredTransportProvider, readStoredTtsProvider, readStoredVoiceCaveman, writeStoredSetting } from "./lib/api.js";
+import { apiBase, readStoredCodexAccess, readStoredEffort, readStoredModel, readStoredScratchMode, readStoredServiceTier, readStoredSttProvider, readStoredTransportProvider, readStoredTtsProvider, readStoredVoiceCaveman, writeStoredSetting } from "./lib/api.js";
 import { ApiState, PrewarmState } from "./lib/clientTypes.js";
 import { formatCount, formatMs, formatSignedMs } from "./lib/format.js";
-import { SETTINGS_VERSION, artifactTitle, chartDateLabel, deltaLifecycleLabel, effortLabels, entryLabel, entryMainText, entryNotesLabel, entryParserLabel, extractionActionLabel, extractionEvidenceLabel, extractionReasons, extractionReviewSort, extractionStatusLabels, extractionTypeLabels, extractionTypeOrder, extractionTypeShortLabels, isExtractionReviewCandidate, modeLabels, modelLabels, modelOptions, providerActionText, providerRefTitle, sttProviderLabels, transportLabels, ttsProviderLabels } from "./lib/labels.js";
+import { SETTINGS_VERSION, artifactTitle, chartDateLabel, deltaLifecycleLabel, effortLabels, entryLabel, entryMainText, entryNotesLabel, entryParserLabel, extractionActionLabel, extractionEvidenceLabel, extractionReasons, extractionReviewSort, extractionStatusLabels, extractionTypeLabels, extractionTypeOrder, extractionTypeShortLabels, isExtractionReviewCandidate, modeLabels, providerActionText, providerRefTitle, sttProviderLabels, transportLabels, ttsProviderLabels } from "./lib/labels.js";
 import { clientUnknownSparkPreflight, needsModelTransitionPreflight, sparkPreflightLabel } from "./lib/spark.js";
 import { LIVE_MODE_RUNTIME_ENABLED } from "./lib/voice.js";
 import { useVoiceEngine } from "./voice/useVoiceEngine.js";
@@ -67,6 +69,69 @@ function workspaceTitle(workspacePath: string | undefined): string | null {
   const normalized = workspacePath.replace(/\\/g, "/").replace(/\/+$/, "");
   const title = normalized.split("/").filter(Boolean).at(-1);
   return title || null;
+}
+
+function providerAvailabilityHint(provider: SttProvider | TtsProvider | TransportProvider, status: {
+  availableProviders?: string[];
+  availableTransports?: string[];
+  deepgramConfigured?: boolean;
+  inworldConfigured?: boolean;
+  openAIConfigured?: boolean;
+  elevenLabsConfigured?: boolean;
+  configured?: boolean;
+}): string {
+  const available = status.availableProviders ?? status.availableTransports ?? [];
+  if (available.includes(provider)) return "Available";
+  switch (provider) {
+    case "deepgram":
+    case "deepgram-stt":
+      return status.deepgramConfigured === false ? "Missing Deepgram API key" : "Not available from server";
+    case "inworld-ws":
+    case "inworld-stt":
+      return status.inworldConfigured === false ? "Missing Inworld API key/config" : "Not available from server";
+    case "elevenlabs":
+    case "elevenlabs-ws":
+      return status.elevenLabsConfigured === false ? "Missing ElevenLabs API key or voice" : "Not available from server";
+    case "whisper":
+      return status.openAIConfigured === false ? "Missing OpenAI API key" : "Not available from server";
+    case "livekit-webrtc":
+      return status.configured === false ? "Missing LiveKit config" : "Not available from server";
+    default:
+      return "Not available from server";
+  }
+}
+
+function configModelLabel(model: AppServerModelOption | undefined, fallback: string): string {
+  return model?.displayName || fallback;
+}
+
+function defaultAccessPreset(config: AppServerConfigMetadata | null): CodexAccessPreset {
+  if (config?.sandboxPolicy.type === "dangerFullAccess") return "full";
+  const value = config?.approvalPolicy.value;
+  if (value === "on-request") return "ask";
+  return "approve";
+}
+
+const accessPresetLabels: Record<CodexAccessPreset, { label: string; detail: string; warning?: string }> = {
+  ask: {
+    label: "Ask for approval",
+    detail: "Always ask to edit files or use the internet."
+  },
+  approve: {
+    label: "Approve for me",
+    detail: "Only ask for actions detected as potentially unsafe."
+  },
+  full: {
+    label: "Full access",
+    detail: "Unrestricted access to the internet and files on this computer.",
+    warning: "Full access disables the sandbox for Codex turns."
+  }
+};
+
+function runtimePolicyForPreset(preset: CodexAccessPreset): CodexRuntimePolicy {
+  if (preset === "ask") return { filesystem: "workspaceWrite", networkAccess: true, approvalPolicy: "on-request" };
+  if (preset === "full") return { filesystem: "dangerFullAccess", networkAccess: true, approvalPolicy: "never" };
+  return { filesystem: "workspaceWrite", networkAccess: true, approvalPolicy: "on-failure" };
 }
 
 type LatentTraceLine = {
@@ -237,6 +302,9 @@ export function App() {
   const [voiceCaveman, setVoiceCaveman] = useState(false);
   const [reasoningEffort, setReasoningEffort] = useState<ReasoningEffort>("none");
   const [codexModel, setCodexModel] = useState("default");
+  const [serviceTier, setServiceTier] = useState<string | null>(null);
+  const [appServerConfig, setAppServerConfig] = useState<AppServerConfigMetadata | null>(null);
+  const [codexAccessPreset, setCodexAccessPreset] = useState<CodexAccessPreset>("approve");
   const [sparkApprovalKey, setSparkApprovalKey] = useState("");
   const [sparkPreflight, setSparkPreflight] = useState<SparkContextPreflight | null>(null);
   const [sparkPreflightPending, setSparkPreflightPending] = useState(false);
@@ -319,8 +387,31 @@ export function App() {
   const prewarmAnnouncementKeyRef = useRef("");
 
   const effectiveCodexModel = codexModel;
-  const voiceSafeReasoningEffort = scratchMode === "voice" && reasoningEffort === "minimal" ? "none" : reasoningEffort;
-  const effectiveReasoningEffort = effectiveReasoningForModel(effectiveCodexModel, voiceSafeReasoningEffort);
+  const selectedModelOption = useMemo(
+    () => appServerConfig?.models.find((model) => model.model === effectiveCodexModel || model.id === effectiveCodexModel),
+    [appServerConfig, effectiveCodexModel]
+  );
+  const discoveredReasoningOptions = useMemo(
+    () =>
+      selectedModelOption?.supportedReasoningEfforts.length
+        ? selectedModelOption.supportedReasoningEfforts
+        : [{ reasoningEffort: selectedModelOption?.defaultReasoningEffort ?? appServerConfig?.selectedReasoningEffort ?? reasoningEffort }],
+    [appServerConfig?.selectedReasoningEffort, reasoningEffort, selectedModelOption]
+  );
+  const discoveredReasoningValues = useMemo(
+    () => discoveredReasoningOptions.map((option) => option.reasoningEffort),
+    [discoveredReasoningOptions]
+  );
+  const effectiveReasoningEffort = discoveredReasoningValues.includes(reasoningEffort)
+    ? reasoningEffort
+    : selectedModelOption?.defaultReasoningEffort ?? appServerConfig?.selectedReasoningEffort ?? reasoningEffort;
+  const selectedServiceTierOption = selectedModelOption?.serviceTiers.find((tier) => tier.id === serviceTier);
+  const effectiveServiceTier =
+    serviceTier && selectedModelOption?.serviceTiers.some((tier) => tier.id === serviceTier) ? serviceTier : null;
+  const effectiveCodexRuntimePolicy: CodexRuntimePolicy = useMemo(
+    () => runtimePolicyForPreset(codexAccessPreset),
+    [codexAccessPreset]
+  );
   const effectiveVoiceCaveman = scratchMode === "voice" && voiceCaveman;
   const session = state.session;
   const transcript = session?.transcript ?? [];
@@ -394,6 +485,7 @@ export function App() {
     progressVisible,
     queuedTurnPreview,
     liveAssistantText,
+    streamingAssistantDraft,
     announcePrewarmConfirmation,
     reattachActiveTurn,
     resetSpeechPlayback,
@@ -408,6 +500,8 @@ export function App() {
     setState,
     scratchMode,
     effectiveCodexModel,
+    effectiveServiceTier,
+    effectiveCodexRuntimePolicy,
     effectiveReasoningEffort,
     effectiveVoiceCaveman,
     sparkApproved,
@@ -648,13 +742,29 @@ export function App() {
         const tts = payload.tts;
         const stt = payload.stt;
         const livekit = payload.livekit;
+        const config = payload.appServerConfig ?? null;
+        const configDefaultModel = config?.selectedModel ?? config?.defaultModel ?? defaultModel;
+        const storedModel = readStoredModel(configDefaultModel);
+        const storedModelAvailable = config?.models.some((model) => model.model === storedModel || model.id === storedModel) ?? true;
+        const configModel = storedModelAvailable ? storedModel : configDefaultModel;
+        const configModelOption = config?.models.find((model) => model.model === configModel || model.id === configModel);
+        const configDefaultEffort = configModelOption?.defaultReasoningEffort ?? config?.selectedReasoningEffort ?? defaultEffort;
+        const storedEffort = readStoredEffort(configDefaultEffort);
+        const effortAvailable = configModelOption?.supportedReasoningEfforts.some((option) => option.reasoningEffort === storedEffort) ?? true;
+        const configDefaultTier = configModelOption?.defaultServiceTier ?? config?.selectedServiceTier ?? null;
+        const storedTier = readStoredServiceTier(configDefaultTier);
+        const tierAvailable = storedTier ? configModelOption?.serviceTiers.some((tier) => tier.id === storedTier) ?? false : true;
+        const configAccess = defaultAccessPreset(config);
         setSpeechProjectionEnabled(payload.features?.speechProjection ?? true);
         setProgressSoundsEnabled(payload.features?.progressSounds ?? false);
         setProgressSpeechEnabled(payload.features?.progressSpeech ?? false);
+        setAppServerConfig(config);
         setScratchMode(readStoredScratchMode(defaultMode));
         setVoiceCaveman(readStoredVoiceCaveman());
-        setReasoningEffort(readStoredEffort(defaultEffort));
-        setCodexModel(readStoredModel(defaultModel));
+        setReasoningEffort(effortAvailable ? storedEffort : configDefaultEffort);
+        setCodexModel(configModel);
+        setServiceTier(tierAvailable ? storedTier : configDefaultTier);
+        setCodexAccessPreset(readStoredCodexAccess(configAccess));
         setTtsStatus(tts);
         setTtsProvider(readStoredTtsProvider(tts.defaultProvider, tts.availableProviders));
         setSttStatus(stt);
@@ -697,8 +807,8 @@ export function App() {
   useEffect(() => {
     if (!settingsHydrated) return;
     writeStoredSetting("mortic.settingsVersion", SETTINGS_VERSION);
-    writeStoredSetting("mortic.reasoningEffort", voiceSafeReasoningEffort);
-  }, [settingsHydrated, voiceSafeReasoningEffort]);
+    writeStoredSetting("mortic.reasoningEffort", effectiveReasoningEffort);
+  }, [settingsHydrated, effectiveReasoningEffort]);
 
   useEffect(() => {
     if (!chartOpen || !chartState || !selectedChartDeltaId) {
@@ -714,10 +824,24 @@ export function App() {
   }, [chartOpen, chartState, selectedChartDeltaId]);
 
   useEffect(() => {
-    if (scratchMode === "voice" && reasoningEffort === "minimal") {
-      setReasoningEffort("none");
+    if (!settingsHydrated || pending) return;
+    if (!discoveredReasoningValues.includes(reasoningEffort)) {
+      setReasoningEffort(selectedModelOption?.defaultReasoningEffort ?? appServerConfig?.selectedReasoningEffort ?? effectiveReasoningEffort);
     }
-  }, [reasoningEffort, scratchMode]);
+    const tiers = selectedModelOption?.serviceTiers ?? [];
+    if (serviceTier && !tiers.some((tier) => tier.id === serviceTier)) {
+      setServiceTier(selectedModelOption?.defaultServiceTier ?? null);
+    }
+  }, [
+    appServerConfig?.selectedReasoningEffort,
+    discoveredReasoningValues,
+    effectiveReasoningEffort,
+    pending,
+    reasoningEffort,
+    selectedModelOption,
+    serviceTier,
+    settingsHydrated
+  ]);
 
   useEffect(() => {
     if (!state.session) return;
@@ -729,6 +853,18 @@ export function App() {
     writeStoredSetting("mortic.settingsVersion", SETTINGS_VERSION);
     writeStoredSetting("mortic.codexModel", codexModel);
   }, [settingsHydrated, codexModel]);
+
+  useEffect(() => {
+    if (!settingsHydrated) return;
+    writeStoredSetting("mortic.settingsVersion", SETTINGS_VERSION);
+    writeStoredSetting("mortic.serviceTier", serviceTier ?? "");
+  }, [settingsHydrated, serviceTier]);
+
+  useEffect(() => {
+    if (!settingsHydrated) return;
+    writeStoredSetting("mortic.settingsVersion", SETTINGS_VERSION);
+    writeStoredSetting("mortic.codexAccess", codexAccessPreset);
+  }, [codexAccessPreset, settingsHydrated]);
 
   useEffect(() => {
     if (!settingsHydrated) return;
@@ -819,7 +955,7 @@ export function App() {
       cancelled = true;
       controller.abort();
     };
-  }, [api, effectiveCodexModel, effectiveReasoningEffort, effectiveVoiceCaveman, scratchMode, state.session?.threadId]);
+  }, [api, effectiveCodexModel, effectiveReasoningEffort, effectiveServiceTier, effectiveVoiceCaveman, scratchMode, state.session?.threadId]);
 
   useEffect(() => {
     const session = state.session;
@@ -835,7 +971,8 @@ export function App() {
       return;
     }
 
-    const key = `${session.threadId}|${scratchMode}|${effectiveCodexModel}|${effectiveReasoningEffort}|caveman:${effectiveVoiceCaveman ? "on" : "off"}`;
+    const runtimeKey = `access:${codexAccessPreset}`;
+    const key = `${session.threadId}|${scratchMode}|${effectiveCodexModel}|tier:${effectiveServiceTier ?? "default"}|${effectiveReasoningEffort}|${runtimeKey}|caveman:${effectiveVoiceCaveman ? "on" : "off"}`;
     if (prewarmKeyRef.current === key) return;
 
     const controller = new AbortController();
@@ -845,7 +982,9 @@ export function App() {
       setPrewarm({
         status: "warming",
         key,
-        detail: `${modeLabels[scratchMode]} · ${effectiveCodexModel} · ${effortLabels[effectiveReasoningEffort]}${
+        detail: `${modeLabels[scratchMode]} · ${configModelLabel(selectedModelOption, effectiveCodexModel)} · ${effortLabels[effectiveReasoningEffort]}${
+          effectiveServiceTier ? ` · ${selectedServiceTierOption?.name ?? effectiveServiceTier}` : ""
+        }${
           scratchMode === "voice" ? ` · Caveman ${effectiveVoiceCaveman ? "on" : "off"}` : ""
         }`
       });
@@ -860,6 +999,8 @@ export function App() {
             scratchMode,
             reasoningEffort: effectiveReasoningEffort,
             codexModel: effectiveCodexModel,
+            serviceTier: effectiveServiceTier,
+            codexRuntimePolicy: effectiveCodexRuntimePolicy,
             voiceCaveman: effectiveVoiceCaveman,
             allowModelContextRisk: sparkApproved,
             allowSparkContextRisk: sparkApproved
@@ -889,7 +1030,9 @@ export function App() {
         setPrewarm({
           status: "ready",
           key,
-          detail: `${modeLabels[payload.scratchMode]} · ${payload.codexModel} · ${effortLabels[payload.reasoningEffort]}${
+          detail: `${modeLabels[payload.scratchMode]} · ${configModelLabel(selectedModelOption, payload.codexModel)} · ${effortLabels[payload.reasoningEffort]}${
+            payload.serviceTier ? ` · ${selectedServiceTierOption?.name ?? payload.serviceTier}` : ""
+          }${
             payload.scratchMode === "voice" ? ` · Caveman ${payload.voiceCaveman ? "on" : "off"}` : ""
           }${payload.prewarmConfirmation ? ` · ${payload.prewarmConfirmation}` : ""}`,
           confirmation: payload.prewarmConfirmation,
@@ -920,6 +1063,7 @@ export function App() {
     state.loading,
     scratchMode,
     effectiveCodexModel,
+    effectiveCodexRuntimePolicy,
     effectiveReasoningEffort,
     effectiveVoiceCaveman,
     sparkApproved,
@@ -1032,7 +1176,12 @@ export function App() {
         headers: {
           "Content-Type": "application/json"
         },
-        body: JSON.stringify({ reasoningEffort: effectiveReasoningEffort, codexModel: effectiveCodexModel })
+        body: JSON.stringify({
+          reasoningEffort: effectiveReasoningEffort,
+          codexModel: effectiveCodexModel,
+          serviceTier: effectiveServiceTier,
+          codexRuntimePolicy: effectiveCodexRuntimePolicy
+        })
       });
       const payload = await response.json();
       setHandoff(payload.handoff);
@@ -1538,8 +1687,40 @@ export function App() {
   const compactTranscript = transcript.slice(-4);
   const latestUserEntry = [...transcript].reverse().find((entry) => entry.role === "user") ?? null;
   const latestAssistantEntry = [...transcript].reverse().find((entry) => entry.role === "assistant") ?? null;
-  const compactAssistantEntry = pending ? null : latestAssistantEntry;
+  const latestAssistantAfterUser =
+    latestAssistantEntry && (!latestUserEntry || Date.parse(latestAssistantEntry.createdAt) >= Date.parse(latestUserEntry.createdAt))
+      ? latestAssistantEntry
+      : null;
+  const compactAssistantEntry = pending ? null : latestAssistantAfterUser;
+  const assistantDraftText = streamingAssistantDraft?.text ?? liveAssistantText;
+  const assistantDraftVisible = Boolean(assistantDraftText.trim()) && !compactAssistantEntry && (pending || Boolean(streamingAssistantDraft));
+  const assistantDraftLabel =
+    streamingAssistantDraft?.phase === "final-pending"
+      ? "Final transcript pending"
+      : streamingAssistantDraft?.phase === "finalizing"
+        ? "Mortic finalizing"
+        : "Mortic streaming";
   const runtimeErrors = [speechError, state.error, projectError].filter(Boolean);
+  const configModels = appServerConfig?.models ?? [];
+  const configModelSummary = configModelLabel(selectedModelOption, effectiveCodexModel);
+  const configSummary = [
+    configModelSummary,
+    effortLabels[effectiveReasoningEffort],
+    accessPresetLabels[codexAccessPreset].label,
+    `${transportLabels[transportProvider]} / ${sttProviderLabels[sttProvider]} / ${ttsProviderLabels[ttsProvider]}`
+  ].join(" · ");
+  const configSourceText =
+    appServerConfig?.source === "app-server"
+      ? "Discovered from Codex app-server"
+      : `Fallback config${appServerConfig?.error ? `: ${appServerConfig.error}` : ""}`;
+  const setModelFromConfig = (modelValue: string) => {
+    const next = configModels.find((model) => model.model === modelValue || model.id === modelValue);
+    setCodexModel(next?.model ?? modelValue);
+    setReasoningEffort(next?.defaultReasoningEffort ?? appServerConfig?.selectedReasoningEffort ?? effectiveReasoningEffort);
+    setServiceTier(next?.defaultServiceTier ?? null);
+    prewarmKeyRef.current = "";
+    prewarmAnnouncementKeyRef.current = "";
+  };
 
   return (
     <main className="app-shell command-shell">
@@ -1573,76 +1754,115 @@ export function App() {
           <details className="studio-settings">
             <summary>
               <span>Config</span>
-              <strong>{transportLabels[transportProvider]} · {sttProviderLabels[sttProvider]} · {ttsProviderLabels[ttsProvider]} · {modelLabels[effectiveCodexModel] ?? effectiveCodexModel}</strong>
+              <strong>{configSummary}</strong>
             </summary>
-            <section className="control-strip compact-controls" aria-label="Session controls">
-              <div className="segmented mode-segmented" aria-label="Scratch mode">
-                {scratchModes.map((mode) => (
-                  <button key={mode} type="button" className={mode === scratchMode ? "selected" : ""} onClick={() => setScratchMode(mode)} disabled={pending}>
-                    {modeLabels[mode]}
-                  </button>
-                ))}
+            <section className="control-strip compact-controls config-panel" aria-label="Session controls">
+              <div className="config-section config-section-codex">
+                <div className="config-section-head">
+                  <span>Codex app-server</span>
+                  <em>{configSourceText}</em>
+                </div>
+                <label className="model-control">
+                  <span>Model</span>
+                  <select value={effectiveCodexModel} onChange={(event) => setModelFromConfig(event.target.value)} disabled={pending}>
+                    {!configModels.some((model) => model.model === effectiveCodexModel) && <option value={effectiveCodexModel}>{effectiveCodexModel}</option>}
+                    {configModels.map((model) => (
+                      <option key={model.id} value={model.model}>
+                        {model.displayName}{model.isDefault ? " · default" : ""}{model.inputModalities.length ? ` · ${model.inputModalities.join("+")}` : ""}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <label className="control-select">
+                  <span>Reasoning</span>
+                  <select value={effectiveReasoningEffort} onChange={(event) => setReasoningEffort(event.target.value as ReasoningEffort)} disabled={pending}>
+                    {discoveredReasoningOptions.map((option) => (
+                      <option key={option.reasoningEffort} value={option.reasoningEffort}>
+                        {effortLabels[option.reasoningEffort] ?? option.reasoningEffort}{option.description ? ` · ${option.description}` : ""}
+                      </option>
+                    ))}
+                  </select>
+                </label>
               </div>
-              <label className="toggle-control" title="Apply Caveman-lite compression to spoken voice answers only">
-                <input type="checkbox" checked={voiceCaveman} onChange={(event) => setVoiceCaveman(event.target.checked)} disabled={scratchMode !== "voice" || pending} />
-                Caveman speech
-              </label>
-              <label className="control-select">
-                <span>Transport</span>
-                <select value={transportProvider} onChange={(event) => setTransportProvider(event.target.value as TransportProvider)} disabled={pending}>
-                  {transportProviders.map((provider) => (
-                    <option key={provider} value={provider} disabled={!liveKitStatus.availableTransports.includes(provider)}>
-                      {transportLabels[provider]}
-                    </option>
-                  ))}
-                </select>
-              </label>
-              <label className="control-select">
-                <span>Speech to text</span>
-                <select value={sttProvider} onChange={(event) => setSttProvider(event.target.value as SttProvider)} disabled={pending}>
-                  {sttProviders.map((provider) => (
-                    <option key={provider} value={provider} disabled={!sttStatus.availableProviders.includes(provider)}>
-                      {sttProviderLabels[provider]}
-                    </option>
-                  ))}
-                </select>
-              </label>
-              <label className="control-select">
-                <span>Text to speech</span>
-                <select value={ttsProvider} onChange={(event) => setTtsProvider(event.target.value as TtsProvider)} disabled={pending}>
-                  {ttsProviders.map((provider) => (
-                    <option key={provider} value={provider} disabled={!ttsStatus.availableProviders.includes(provider)}>
-                      {ttsProviderLabels[provider]}
-                    </option>
-                  ))}
-                </select>
-              </label>
-              <label className="model-control">
-                <span>Model</span>
-                <select value={effectiveCodexModel} onChange={(event) => setCodexModel(event.target.value)} disabled={pending}>
-                  {!modelOptions.includes(effectiveCodexModel) && <option value={effectiveCodexModel}>{effectiveCodexModel}</option>}
-                  {modelOptions.map((model) => (
-                    <option key={model} value={model}>{modelLabels[model] ?? model}</option>
-                  ))}
-                </select>
-              </label>
-              <label className="control-select">
-                <span>Reasoning</span>
-                <select value={effectiveReasoningEffort} onChange={(event) => setReasoningEffort(event.target.value as ReasoningEffort)} disabled={pending}>
-                  {reasoningEfforts.map((effort) => (
-                    <option
-                      key={effort}
-                      value={effort}
-                      disabled={
-                        (scratchMode === "voice" && effort === "minimal") ||
-                        (modelRequiresLowReasoning(effectiveCodexModel) && (effort === "none" || effort === "minimal"))
-                      }
+              <div className="config-section config-section-policy">
+                <div className="config-section-head">
+                  <span>Access</span>
+                  <em>How should Codex actions be approved?</em>
+                </div>
+                <div className="access-preset-list" role="radiogroup" aria-label="Codex access">
+                  {(["ask", "approve", "full"] as const).map((preset) => (
+                    <button
+                      key={preset}
+                      type="button"
+                      role="radio"
+                      aria-checked={codexAccessPreset === preset}
+                      className={`access-preset ${codexAccessPreset === preset ? "selected" : ""} ${preset === "full" ? "danger" : ""}`}
+                      onClick={() => {
+                        setCodexAccessPreset(preset);
+                        prewarmKeyRef.current = "";
+                      }}
+                      disabled={pending}
                     >
-                      {effortLabels[effort]}
-                    </option>
+                      <span className="access-icon" aria-hidden="true">{preset === "ask" ? "!" : preset === "approve" ? "✓" : "⚠"}</span>
+                      <span>
+                        <strong>{accessPresetLabels[preset].label}</strong>
+                        <em>{accessPresetLabels[preset].detail}</em>
+                      </span>
+                      {codexAccessPreset === preset && <b aria-hidden="true">✓</b>}
+                    </button>
                   ))}
-                </select>
-              </label>
+                </div>
+                {accessPresetLabels[codexAccessPreset].warning && (
+                  <p className="config-warning">{accessPresetLabels[codexAccessPreset].warning}</p>
+                )}
+              </div>
+              <div className="config-section config-section-voice">
+                <div className="config-section-head">
+                  <span>Voice pipeline</span>
+                  <em>Separate from Codex app-server config</em>
+                </div>
+                <div className="segmented mode-segmented" aria-label="Scratch mode">
+                  {scratchModes.map((mode) => (
+                    <button key={mode} type="button" className={mode === scratchMode ? "selected" : ""} onClick={() => setScratchMode(mode)} disabled={pending}>
+                      {modeLabels[mode]}
+                    </button>
+                  ))}
+                </div>
+                <label className="toggle-control" title="Apply Caveman-lite compression to spoken voice answers only">
+                  <input type="checkbox" checked={voiceCaveman} onChange={(event) => setVoiceCaveman(event.target.checked)} disabled={scratchMode !== "voice" || pending} />
+                  Caveman speech
+                </label>
+                <label className="control-select">
+                  <span>Transport</span>
+                  <select value={transportProvider} onChange={(event) => setTransportProvider(event.target.value as TransportProvider)} disabled={pending}>
+                    {transportProviders.map((provider) => (
+                      <option key={provider} value={provider} disabled={!liveKitStatus.availableTransports.includes(provider)}>
+                        {transportLabels[provider]} · {providerAvailabilityHint(provider, liveKitStatus)}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <label className="control-select">
+                  <span>Speech to text</span>
+                  <select value={sttProvider} onChange={(event) => setSttProvider(event.target.value as SttProvider)} disabled={pending}>
+                    {sttProviders.map((provider) => (
+                      <option key={provider} value={provider} disabled={!sttStatus.availableProviders.includes(provider)}>
+                        {sttProviderLabels[provider]} · {providerAvailabilityHint(provider, sttStatus)}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <label className="control-select">
+                  <span>Text to speech</span>
+                  <select value={ttsProvider} onChange={(event) => setTtsProvider(event.target.value as TtsProvider)} disabled={pending}>
+                    {ttsProviders.map((provider) => (
+                      <option key={provider} value={provider} disabled={!ttsStatus.availableProviders.includes(provider)}>
+                        {ttsProviderLabels[provider]} · {providerAvailabilityHint(provider, ttsStatus)}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+              </div>
             {needsModelTransitionPreflight(effectiveCodexModel) && (
               <div className={`spark-context spark-context-${sparkContext.status}`} title={currentSparkPreflight?.detail}>
                 <span>{sparkContext.label}</span>
@@ -1696,10 +1916,10 @@ export function App() {
                   <p>{entryMainText(latestUserEntry)}</p>
                 </section>
               )}
-              {pending && liveAssistantText ? (
+              {assistantDraftVisible ? (
                 <section className="compact-turn compact-assistant">
-                  <span>Mortic streaming</span>
-                  <p>{liveAssistantText}</p>
+                  <span>{assistantDraftLabel}</span>
+                  <p>{assistantDraftText}</p>
                 </section>
               ) : pending ? (
                 <section className="compact-turn compact-assistant compact-thinking">
@@ -1725,7 +1945,7 @@ export function App() {
                 </section>
               )}
             </article>
-            <CodexWorkingBuffer trace={activeAppServerTrace} pending={pending} hasAssistantText={Boolean(liveAssistantText.trim())} />
+            <CodexWorkingBuffer trace={activeAppServerTrace} pending={pending} hasAssistantText={Boolean(assistantDraftText.trim())} />
             <CodexLatentTraceBubble trace={activeAppServerTrace} pending={pending} />
             <nav className="bottom-voice-dock" aria-label="Voice controls">
               <button

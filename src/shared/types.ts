@@ -9,6 +9,87 @@ export const reasoningEfforts = [
 
 export type ReasoningEffort = (typeof reasoningEfforts)[number];
 
+export type AppServerModelOption = {
+  id: string;
+  model: string;
+  displayName: string;
+  description?: string;
+  hidden: boolean;
+  isDefault: boolean;
+  inputModalities: string[];
+  supportedReasoningEfforts: Array<{
+    reasoningEffort: ReasoningEffort;
+    description?: string;
+  }>;
+  defaultReasoningEffort: ReasoningEffort;
+  serviceTiers: Array<{
+    id: string;
+    name: string;
+    description?: string;
+  }>;
+  defaultServiceTier?: string | null;
+};
+
+export type AppServerSandboxPolicySummary = {
+  type: "readOnly" | "workspaceWrite" | "externalSandbox" | "dangerFullAccess" | "unknown";
+  networkAccess?: boolean | "enabled" | "restricted";
+  writableRoots?: string[];
+  displayName: string;
+  detail?: string;
+  dangerous: boolean;
+};
+
+export type AppServerApprovalPolicySummary = {
+  value: string;
+  displayName: string;
+  editable: boolean;
+};
+
+export type AppServerToolingSummary = {
+  namespaceTools?: boolean;
+  imageGeneration?: boolean;
+  webSearch?: boolean;
+  mcpStatus?: "surfaced" | "not-surfaced";
+  mcpServers?: Array<{
+    name: string;
+    status?: string;
+  }>;
+};
+
+export type AppServerConfigMetadata = {
+  source: "app-server" | "fallback";
+  error?: string;
+  models: AppServerModelOption[];
+  selectedModel: string;
+  defaultModel: string;
+  selectedReasoningEffort: ReasoningEffort;
+  selectedServiceTier?: string | null;
+  sandboxPolicy: AppServerSandboxPolicySummary;
+  approvalPolicy: AppServerApprovalPolicySummary;
+  tooling: AppServerToolingSummary;
+  runtime: {
+    activityBuffer: boolean;
+    trace: boolean;
+    progressSpeech: boolean;
+    outputSchema: boolean;
+  };
+};
+
+export const codexFilesystemModes = ["readOnly", "workspaceWrite", "dangerFullAccess"] as const;
+export type CodexFilesystemMode = (typeof codexFilesystemModes)[number];
+
+export const codexApprovalPolicies = ["never", "on-request", "on-failure"] as const;
+export type CodexApprovalPolicy = (typeof codexApprovalPolicies)[number];
+
+export const codexAccessPresets = ["ask", "approve", "full"] as const;
+export type CodexAccessPreset = (typeof codexAccessPresets)[number];
+
+export type CodexRuntimePolicy = {
+  filesystem: CodexFilesystemMode;
+  networkAccess: boolean;
+  approvalPolicy: CodexApprovalPolicy;
+};
+
 export const scratchModes = ["voice", "text"] as const;
 
 export type ScratchMode = (typeof scratchModes)[number];
@@ -137,6 +218,8 @@ export type TurnRun = {
   userText: string;
   reasoningEffort: ReasoningEffort;
   codexModel: string;
+  serviceTier?: string | null;
+  codexRuntimePolicy?: CodexRuntimePolicy;
   scratchMode: ScratchMode;
   voiceCaveman?: boolean;
   createdAt: string;
@@ -301,7 +384,9 @@ export type SessionResponse = {
     progressSpeechTrace: boolean;
     appServerActivity: boolean;
     appServerTrace: boolean;
+    voiceOutputSchema: boolean;
   };
+  appServerConfig?: AppServerConfigMetadata;
   tts: TtsStatus;
   stt: SttStatus;
   livekit: LiveKitStatus;
@@ -453,6 +538,8 @@ export type TurnRequest = {
   text: string;
   reasoningEffort: ReasoningEffort;
   codexModel?: string;
+  serviceTier?: string | null;
+  codexRuntimePolicy?: CodexRuntimePolicy;
   scratchMode?: ScratchMode;
   voiceCaveman?: boolean;
   allowModelContextRisk?: boolean;
@@ -475,6 +562,8 @@ export type TurnRequest = {
 export type PrewarmRequest = {
   reasoningEffort: ReasoningEffort;
   codexModel?: string;
+  serviceTier?: string | null;
+  codexRuntimePolicy?: CodexRuntimePolicy;
   scratchMode: ScratchMode;
   voiceCaveman?: boolean;
   allowModelContextRisk?: boolean;
@@ -486,6 +575,7 @@ export type PrewarmResponse = {
   scratchMode: ScratchMode;
   reasoningEffort: ReasoningEffort;
   codexModel: string;
+  serviceTier?: string | null;
   voiceCaveman?: boolean;
   prewarmConfirmation?: string;
   prewarmMs: number;
@@ -645,6 +735,8 @@ export type TurnStatusResponse = {
 export type HandoffRequest = {
   reasoningEffort: ReasoningEffort;
   codexModel?: string;
+  serviceTier?: string | null;
+  codexRuntimePolicy?: CodexRuntimePolicy;
 };
 
 export type HandoffResponse = {

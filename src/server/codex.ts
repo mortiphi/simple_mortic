@@ -2,7 +2,16 @@ import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
-import type { CodexStatus, ForkCheckpoint, ProviderThreadSummary, ReasoningEffort, RuntimeContextRestore, ScratchMode } from "../shared/types.js";
+import type {
+  AppServerConfigMetadata,
+  CodexRuntimePolicy,
+  CodexStatus,
+  ForkCheckpoint,
+  ProviderThreadSummary,
+  ReasoningEffort,
+  RuntimeContextRestore,
+  ScratchMode
+} from "../shared/types.js";
 import { codexAppServerBridge } from "./appServerBridge.js";
 import type { CodexProgressTraceEvent, CodexTurnProgress, CodexVoiceActivity } from "./appServerBridge.js";
 import { codexCliPtyBridge } from "./cliPtyBridge.js";
@@ -43,6 +52,15 @@ export async function listCodexRecentThreads(options?: { limit?: number }): Prom
   } catch {
     return await codexProviderAdapter.listRecentThreads(options);
   }
+}
+
+export async function getCodexAppServerConfig(params: {
+  defaultModel: string;
+  defaultReasoningEffort: ReasoningEffort;
+  features: AppServerConfigMetadata["runtime"];
+  onEvent?: (label: string, detail?: string) => void | Promise<void>;
+}): Promise<AppServerConfigMetadata> {
+  return await codexAppServerBridge.appServerConfig(params);
 }
 
 function reasoningConfigArg(reasoningEffort: ReasoningEffort): string {
@@ -221,6 +239,8 @@ export async function runCodexTurn(params: {
   userText?: string;
   reasoningEffort: ReasoningEffort;
   codexModel?: string;
+  serviceTier?: string | null;
+  codexRuntimePolicy?: CodexRuntimePolicy;
   scratchMode?: ScratchMode;
   voiceCaveman?: boolean;
   developerInstructions?: string;
@@ -251,6 +271,8 @@ export async function runCodexTurn(params: {
       prompt,
       reasoningEffort: params.reasoningEffort,
       model,
+      serviceTier: params.serviceTier,
+      codexRuntimePolicy: params.codexRuntimePolicy,
       scratchMode,
       voiceCaveman: params.voiceCaveman,
       developerInstructions: params.developerInstructions,
@@ -332,6 +354,8 @@ export async function prewarmCodexScratch(params: {
   runtimeContext?: RuntimeContextRestore;
   reasoningEffort: ReasoningEffort;
   codexModel?: string;
+  serviceTier?: string | null;
+  codexRuntimePolicy?: CodexRuntimePolicy;
   scratchMode?: ScratchMode;
   voiceCaveman?: boolean;
   confirmationPrompt?: string;
@@ -341,6 +365,8 @@ export async function prewarmCodexScratch(params: {
     sourceThreadId: params.threadId,
     cwd: params.runtimeContext?.effectiveCwd ?? process.cwd(),
     model: params.codexModel || DEFAULT_CODEX_MODEL,
+    serviceTier: params.serviceTier,
+    codexRuntimePolicy: params.codexRuntimePolicy,
     reasoningEffort: params.reasoningEffort,
     scratchMode: params.scratchMode ?? "text",
     voiceCaveman: params.voiceCaveman,

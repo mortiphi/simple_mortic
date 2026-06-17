@@ -53,6 +53,7 @@ function itemStartedActivity(method: string, itemType: string | undefined, itemI
     dynamicToolCall: { kind: "tool", label: "Checking tool" },
     webSearch: { kind: "search", label: "Searching" },
     fileChange: { kind: "file", label: "Preparing changes" },
+    contextCompaction: { kind: "system", label: "Compacting context" },
     reasoning: { kind: "reasoning", label: "Thinking through the request" },
     plan: { kind: "plan", label: "Planning" }
   };
@@ -76,6 +77,9 @@ function itemCompletedActivity(method: string, itemType: string | undefined, ite
   }
   if (itemType === "webSearch") {
     return { kind: "search", label: "Search finished", itemType, itemId, method, display: true };
+  }
+  if (itemType === "contextCompaction") {
+    return { kind: "system", label: "Context compacted", itemType, itemId, method, display: true };
   }
   return undefined;
 }
@@ -102,6 +106,8 @@ function safeDetail(method: string, params: any): string | undefined {
       return "summary part added";
     case "item/reasoning/textDelta":
       return byteDelta(params?.delta, "reasoning text delta");
+    case "thread/compacted":
+      return "thread compacted";
     case "turn/plan/updated": {
       const explanation = textCandidate(params?.explanation);
       const planCount = Array.isArray(params?.plan) ? params.plan.length : undefined;
@@ -161,6 +167,8 @@ export function normalizeAppServerNotification(message: { method: string; params
     activity = { kind: "plan", label: "Planning", detail: raw.detail, method, display: true };
   } else if (method === "turn/diff/updated") {
     activity = { kind: "diff", label: "Preparing changes", detail: raw.detail, method, display: true };
+  } else if (method === "thread/compacted") {
+    activity = { kind: "system", label: "Context compacted", detail: raw.detail, method, display: true };
   }
 
   return { raw, activity };
