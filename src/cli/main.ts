@@ -1,27 +1,16 @@
 #!/usr/bin/env node
 import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync } from "node:fs";
-import net from "node:net";
 import { homedir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-import open from "open";
-import type { ViteDevServer } from "vite";
-
-import { createMorticServer } from "../server/app.js";
-import { getCodexStatus, prewarmCodexScratch, shutdownCodexBridges } from "../server/codex.js";
 import { getLiveKitStatus } from "../server/livekit.js";
-import { createProjectStore } from "../server/projectStorage.js";
 import { codexProviderAdapter } from "../server/providerAdapters.js";
-import { resolveRuntimeContext } from "../server/runtimeContext.js";
 import { syncVendoredSkills } from "../server/skillSync.js";
-import { createSessionStorage } from "../server/storage.js";
 import { getSttStatus } from "../server/stt.js";
 import { getTtsStatus } from "../server/tts.js";
-import { parseThreadUri } from "../shared/threadUri.js";
-import { prewarmConfirmationPrompt, prewarmThreadName } from "../shared/prewarmConfirmation.js";
-import { defaultScratchSettings } from "../shared/scratchDefaults.js";
+import { startMorticRuntime } from "./runtime.js";
 
 type CliOptions = {
   threadRef?: string;
@@ -29,8 +18,6 @@ type CliOptions = {
   apiPort?: number;
   uiPort?: number;
 };
-
-const HOST = "127.0.0.1";
 
 function printHelp(): void {
   console.log(`Mortic
@@ -87,27 +74,6 @@ function parseArgs(argv: string[]): CliOptions {
   }
 
   return options;
-}
-
-function isPortAvailable(port: number): Promise<boolean> {
-  return new Promise((resolve) => {
-    const server = net.createServer();
-    server.once("error", () => resolve(false));
-    server.once("listening", () => {
-      server.close(() => resolve(true));
-    });
-    server.listen(port, HOST);
-  });
-}
-
-async function findFreePort(preferred: number): Promise<number> {
-  for (let port = preferred; port < preferred + 100; port += 1) {
-    if (await isPortAvailable(port)) {
-      return port;
-    }
-  }
-
-  throw new Error(`Could not find an available port starting at ${preferred}`);
 }
 
 function findProjectRoot(): string {
@@ -284,173 +250,14 @@ async function main(): Promise<void> {
   }
 
   const options = parseArgs(process.argv.slice(2));
-  const parsed = parseThreadUri(options.threadRef);
-  const root = findProjectRoot();
-  const launchCwd = process.cwd();
-  const runtimeContext = await resolveRuntimeContext({
-    threadId: parsed.threadId,
-    launchCwd,
-    morticRoot: root,
-    requested: {
-      filesystem: "read-only",
-      workspaceRoots: [],
-      network: "unknown",
-      approval: "never"
-    }
+  await startMorticRuntime({
+    threadRef: options.threadRef,
+    noOpen: options.noOpen,
+    apiPort: options.apiPort,
+    uiPort: options.uiPort,
+    launchCwd: process.cwd(),
+    installSignalHandlers: true
   });
-  const loadedEnvFiles = loadDotEnv(root);
-  // Vendored skills must reach ~/.codex/skills before the first compile or
-  // voice turn; a fresh install has nothing there yet.
-  const skillSyncResults = await syncVendoredSkills().catch((error) => {
-    console.warn(`Skill sync failed: ${error instanceof Error ? error.message : String(error)}`);
-    return [];
-  });
-  const staticDir = path.join(root, "dist", "client");
-  const hasStaticBuild = existsSync(path.join(staticDir, "index.html"));
-  const apiPort = options.apiPort ?? (await findFreePort(5152));
-  const uiPort = options.uiPort ?? (hasStaticBuild ? apiPort : await findFreePort(5173));
-
-  const codex = await getCodexStatus();
-  const storage = await createSessionStorage({
-    sourceUri: parsed.sourceUri,
-    threadId: parsed.threadId,
-    codex,
-    runtimeContext
-  });
-  const initialSession = await storage.read();
-  const projectStore = await createProjectStore({
-    workspacePath: runtimeContext.effectiveCwd,
-    sourceUri: parsed.sourceUri,
-    threadId: parsed.threadId,
-    projectTitle: titleFromProjectRoot(root)
-  });
-  await projectStore.syncSession(initialSession, { type: "cli.started" });
-
-  const app = await createMorticServer({
-    storage,
-    projectStore,
-    staticDir: hasStaticBuild ? staticDir : undefined,
-    runtimeContext,
-    projectTitle: titleFromProjectRoot(root),
-    resolveRuntimeContext: async ({ threadId }) => await resolveRuntimeContext({
-      threadId,
-      launchCwd,
-      morticRoot: root,
-      requested: {
-        filesystem: "read-only",
-        workspaceRoots: [],
-        network: "unknown",
-        approval: "never"
-      }
-    })
-  });
-
-  await app.listen({ host: HOST, port: apiPort });
-
-  let vite: ViteDevServer | undefined;
-  let url: string;
-
-  if (hasStaticBuild) {
-    url = `http://${HOST}:${apiPort}/?api=${encodeURIComponent(`http://${HOST}:${apiPort}`)}`;
-  } else {
-    // Packed installs always ship dist/client, so this branch only runs from a
-    // source checkout. If vite is missing (it is a devDependency and absent in
-    // packaged installs), fail with one clear message instead of a stack trace.
-    let createViteServer: (typeof import("vite"))["createServer"];
-    try {
-      ({ createServer: createViteServer } = await import("vite"));
-    } catch {
-      console.error(
-        "No dist/client build was found and vite is not installed: dev UI unavailable in packaged install; rebuild from source (`npm install && npm run build`) or reinstall the package."
-      );
-      process.exit(1);
-    }
-    vite = await createViteServer({
-      root,
-      clearScreen: false,
-      logLevel: "info",
-      server: {
-        host: HOST,
-        port: uiPort,
-        strictPort: true
-      }
-    });
-    await vite.listen();
-    url = `http://${HOST}:${uiPort}/?api=${encodeURIComponent(`http://${HOST}:${apiPort}`)}`;
-  }
-
-  console.log(`\nMortic is running`);
-  console.log(`Source: ${parsed.sourceUri}`);
-  console.log(`API:    http://${HOST}:${apiPort}`);
-  console.log(`UI:     ${url}`);
-  console.log(`Data:   ${storage.sessionDir}`);
-  console.log(`Project:${projectStore.projectDir}`);
-  console.log(`Runtime:${runtimeContext.status} cwd ${runtimeContext.effectiveCwd}`);
-  if (runtimeContext.recordedCwd && runtimeContext.recordedCwd !== runtimeContext.effectiveCwd) {
-    console.log(`Intended:${runtimeContext.recordedCwd}`);
-  }
-  if (runtimeContext.prompt) {
-    console.log(`Prompt: ${runtimeContext.prompt}`);
-  }
-  console.log(`Env:    ${loadedEnvFiles.length > 0 ? loadedEnvFiles.join(", ") : "no .env files (browser voice only unless keys are exported)"}`);
-  for (const result of skillSyncResults) {
-    if (result.action === "current") continue;
-    const note = result.detail ? ` (${result.detail})` : "";
-    console.log(`Skill:  ${result.skill} ${result.action}${note}`);
-  }
-  console.log(`Codex:  ${codex.available ? `${codex.version ?? "available"} at ${codex.path}` : codex.error}`);
-  console.log("\nPress Ctrl+C to stop.\n");
-
-  // Boot warm must mirror the exact settings the browser's first prewarm will
-  // request (model/effort/mode/caveman are all part of the scratch cache key),
-  // or the boot fork is wasted and the first user turn queues behind a second
-  // fork. The confirmation turn below holds the bridge operation lock for a few
-  // seconds right at launch, before the browser has even opened; without it the
-  // first user turn pays the provider context-priming cost itself and starts
-  // with no in-context example of the voice NDJSON contract, which is exactly
-  // the "first message is very late, then gets repaired" failure.
-  if (codex.available) {
-    const startupThreadName = (await codexProviderAdapter.threadName(parsed.threadId)) ?? prewarmThreadName(parsed.threadId);
-    const startupConfirmation = prewarmConfirmationPrompt({
-      threadName: startupThreadName,
-      scratchMode: defaultScratchSettings.scratchMode
-    });
-    void prewarmCodexScratch({
-      threadId: parsed.threadId,
-      runtimeContext,
-      codexModel: "default",
-      reasoningEffort: defaultScratchSettings.reasoningEffort,
-      scratchMode: defaultScratchSettings.scratchMode,
-      voiceCaveman: defaultScratchSettings.voiceCaveman,
-      confirmationPrompt: startupConfirmation.prompt,
-      onEvent: async (label, detail) => {
-        if (label === "App-server scratch fork validated") {
-          console.log(`Voice scratch prewarmed: ${detail}`);
-        }
-        if (label === "App-server prewarm confirmation turn completed") {
-          console.log("Voice scratch primed: confirmation turn completed");
-        }
-      }
-    }).catch((error) => {
-      console.warn(`Voice scratch prewarm failed: ${error instanceof Error ? error.message : String(error)}`);
-    });
-  } else {
-    console.warn("Skipping voice scratch prewarm: codex is not available. The app serves the onboarding screen until it is.");
-  }
-
-  if (!options.noOpen) {
-    await open(url);
-  }
-
-  const shutdown = async () => {
-    await shutdownCodexBridges("Mortic shutdown");
-    await vite?.close();
-    await app.close();
-    process.exit(0);
-  };
-
-  process.on("SIGINT", shutdown);
-  process.on("SIGTERM", shutdown);
 }
 
 main().catch((error) => {

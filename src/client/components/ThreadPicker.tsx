@@ -17,7 +17,7 @@ function workspaceLabel(cwd: string | undefined): string {
 }
 
 function threadTitle(thread: ProviderThreadSummary): string {
-  return thread.threadName?.trim() || workspaceLabel(thread.cwd);
+  return thread.threadName?.trim() || `Thread ${thread.threadId.slice(0, 8)}`;
 }
 
 // Recent-conversation picker over GET /api/provider/threads so switching
@@ -67,9 +67,15 @@ export function ThreadPicker({ api, currentThreadId, disabled, onSelect }: Threa
                 onSelect(thread.sourceUri);
               }}
             >
-              <strong>{threadTitle(thread)}</strong>
-              <span>{workspaceLabel(thread.cwd)} · {chartDateLabel(thread.updatedAt)}</span>
-              {thread.cwd && <small>{thread.cwd}</small>}
+              <span className="thread-picker-cell">
+                <small>Project</small>
+                <strong>{workspaceLabel(thread.cwd)}</strong>
+              </span>
+              <span className="thread-picker-cell thread-picker-thread-cell">
+                <small>Thread</small>
+                <strong>{threadTitle(thread)}</strong>
+              </span>
+              <span className="thread-picker-date">{chartDateLabel(thread.updatedAt)}</span>
             </button>
           ))}
         </div>

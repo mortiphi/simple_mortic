@@ -3620,13 +3620,16 @@ textarea {
 }
 
 .thread-picker-list > button {
-  display: flex;
-  flex-direction: column;
-  align-items: flex-start;
-  gap: 1px;
+  display: grid;
+  grid-template-columns: minmax(118px, 0.72fr) minmax(190px, 1.28fr) max-content;
+  align-items: center;
+  gap: 18px;
   width: 100%;
-  padding: 8px 10px;
+  min-height: 64px;
+  padding: 10px 14px;
   text-align: left;
+  text-transform: none;
+  letter-spacing: 0;
   border-radius: 8px;
   border: 1px solid transparent;
   background: transparent;
@@ -3640,18 +3643,50 @@ textarea {
   border-color: var(--accent, #8b7bff);
 }
 
+.thread-picker-list > button .thread-picker-cell {
+  display: grid;
+  min-width: 0;
+  gap: 4px;
+  color: inherit;
+  letter-spacing: 0;
+  text-transform: none;
+}
+
+.thread-picker-list > button .thread-picker-thread-cell strong {
+  color: #f2f6ff;
+}
+
+.thread-picker-list > button .thread-picker-date {
+  justify-self: end;
+  color: #8f9ab1;
+  font-size: 11px;
+  letter-spacing: 0;
+  text-transform: none;
+  white-space: nowrap;
+}
+
 .thread-picker-list > button strong {
   font-size: 13px;
+  letter-spacing: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  text-transform: none;
+  white-space: nowrap;
   color: #e9ecf5;
 }
 
 .thread-picker-list > button span {
   font-size: 11px;
+  letter-spacing: 0;
+  text-transform: none;
   color: #aab3c7;
 }
 
 .thread-picker-list > button small {
   font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 0;
+  text-transform: none;
   color: #6b7385;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -3897,4 +3932,724 @@ button.fork-list-item:hover {
 .fork-sheet-cancel {
   margin-top: 12px;
   width: 100%;
+}
+
+html:has(.desktop-overlay-shell),
+body:has(.desktop-overlay-shell) {
+  min-width: 0;
+  min-height: 0;
+  overflow: hidden;
+  background: transparent;
+}
+
+.desktop-overlay-shell {
+  width: 100vw;
+  height: 100vh;
+  --desktop-scale: var(--desktop-overlay-scale, 1);
+  color: var(--ink);
+  background: transparent;
+}
+
+.desktop-overlay-drag {
+  -webkit-app-region: drag;
+}
+
+.desktop-overlay-nodrag,
+.desktop-overlay-shell button,
+.desktop-overlay-shell textarea,
+.desktop-overlay-shell select,
+.desktop-overlay-shell input,
+.desktop-overlay-shell details,
+.desktop-overlay-shell summary {
+  -webkit-app-region: no-drag;
+}
+
+.desktop-icon {
+  width: 16px;
+  height: 16px;
+  fill: none;
+  stroke: currentColor;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-width: 2;
+}
+
+.desktop-icon-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+}
+
+.desktop-hud {
+  display: grid;
+  grid-template-columns: minmax(220px, 1fr) auto auto;
+  align-items: center;
+  gap: 10px;
+  width: calc(100vw - 14px);
+  min-height: calc(100vh - 14px);
+  margin: 7px;
+  padding: 6px 8px;
+  border: 0;
+  border-radius: 20px;
+  background: rgba(7, 10, 10, 0.86);
+  box-shadow: 0 18px 70px rgba(0, 0, 0, 0.58), 0 0 60px rgba(0, 240, 255, 0.09);
+  backdrop-filter: blur(28px);
+}
+
+.desktop-hud-identity {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 2px 10px;
+  min-height: 42px;
+  padding: 4px 10px;
+  text-align: left;
+  border-color: transparent;
+  background: transparent;
+}
+
+.desktop-hud-identity span,
+.desktop-panel-title > span {
+  grid-row: span 2;
+  align-self: center;
+  color: var(--ink-strong);
+  font-family: var(--display);
+  font-size: 21px;
+  font-weight: 800;
+  letter-spacing: 0;
+}
+
+.desktop-hud-identity span::after,
+.desktop-panel-title > span::after {
+  content: "";
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  margin-left: 8px;
+  border-radius: 999px;
+  vertical-align: middle;
+  background: var(--cyan);
+  box-shadow: 0 0 18px rgba(0, 240, 255, 0.75);
+}
+
+.desktop-hud-identity strong,
+.desktop-hud-identity em {
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  font-style: normal;
+}
+
+.desktop-hud-identity strong {
+  font-size: 14px;
+}
+
+.desktop-hud-identity em {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.desktop-hud-state {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 78px;
+  color: var(--muted);
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.desktop-hud-state-icon-only {
+  justify-content: center;
+  min-width: 20px;
+}
+
+.desktop-hud-actions,
+.desktop-panel-actions,
+.desktop-overlay-controls,
+.desktop-handoff-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.desktop-hud-actions button,
+.desktop-panel-actions button,
+.desktop-overlay-controls button,
+.desktop-handoff-actions button {
+  border-radius: 12px;
+}
+
+.desktop-overlay-mic {
+  display: grid;
+  min-width: 92px;
+  min-height: 40px;
+  place-items: center;
+  border-color: rgba(0, 240, 255, 0.62);
+  color: #001619;
+  background: linear-gradient(180deg, #32e7f3, #12b6c4);
+  box-shadow: 0 0 28px rgba(0, 240, 255, 0.22);
+}
+
+.desktop-overlay-mic span,
+.desktop-overlay-mic strong {
+  line-height: 1.05;
+}
+
+.desktop-overlay-mic strong {
+  font-size: 11px;
+}
+
+.desktop-overlay-mic.recording {
+  color: #120607;
+  border-color: rgba(255, 180, 171, 0.7);
+  background: linear-gradient(180deg, #ffb4ab, #ff7f73);
+  box-shadow: 0 0 30px rgba(255, 180, 171, 0.24);
+}
+
+.desktop-thread-required .desktop-overlay-mic {
+  color: rgba(229, 226, 225, 0.58);
+  border-color: rgba(132, 148, 149, 0.24);
+  background: rgba(255, 255, 255, 0.035);
+  box-shadow: none;
+}
+
+.desktop-thread-required .desktop-overlay-composer textarea:disabled {
+  color: rgba(229, 226, 225, 0.54);
+  -webkit-text-fill-color: rgba(229, 226, 225, 0.54);
+  background: rgba(255, 255, 255, 0.026);
+}
+
+.desktop-thread-required .desktop-overlay-composer button:disabled,
+.desktop-thread-required .desktop-overlay-transcript button:disabled {
+  color: rgba(229, 226, 225, 0.54);
+  -webkit-text-fill-color: rgba(229, 226, 225, 0.54);
+  border-color: rgba(132, 148, 149, 0.24);
+  background: rgba(255, 255, 255, 0.035);
+  box-shadow: none;
+}
+
+.desktop-thread-required .desktop-overlay-transcript {
+  overflow: hidden;
+}
+
+.desktop-thread-required .desktop-overlay-transcript .live-card-header button {
+  display: none;
+}
+
+.desktop-command-panel {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr) auto auto auto auto;
+  gap: 10px;
+  width: calc(100vw - 12px);
+  height: calc(100vh - 12px);
+  margin: 6px;
+  padding: 12px;
+  border: 0;
+  border-radius: 22px;
+  background: rgba(6, 9, 9, 0.9);
+  box-shadow: 0 24px 100px rgba(0, 0, 0, 0.68), 0 0 90px rgba(0, 240, 255, 0.08);
+  backdrop-filter: blur(30px);
+}
+
+.desktop-panel-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 14px;
+  min-height: 52px;
+}
+
+.desktop-panel-title {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 2px 12px;
+  min-width: 0;
+}
+
+.desktop-panel-header span,
+.desktop-handoff-card span,
+.desktop-overlay-config span {
+  color: var(--cyan);
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+.desktop-panel-title > span {
+  grid-row: span 2;
+  align-self: center;
+  color: var(--ink-strong);
+  font-family: var(--display);
+  font-size: 21px;
+  font-weight: 800;
+  letter-spacing: 0;
+  text-transform: none;
+}
+
+.desktop-panel-title > strong,
+.desktop-panel-title > em {
+  grid-column: 2;
+}
+
+.desktop-panel-header strong,
+.desktop-panel-header em {
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.desktop-panel-header strong {
+  font-size: 18px;
+}
+
+.desktop-panel-header em {
+  color: var(--muted);
+  font-style: normal;
+}
+
+.desktop-panel-actions {
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.desktop-panel-actions .thread-picker {
+  position: relative;
+}
+
+.desktop-panel-actions .thread-picker-list {
+  top: calc(100% + 8px);
+  right: 0;
+  left: auto;
+  width: min(560px, calc(100vw - 48px));
+  max-height: 430px;
+}
+
+.desktop-overlay-card {
+  min-width: 0;
+  border: 1px solid rgba(132, 148, 149, 0.24);
+  border-radius: 18px;
+  background: rgba(17, 22, 22, 0.72);
+}
+
+.desktop-overlay-transcript {
+  min-height: 0;
+  overflow: auto;
+  padding: 16px;
+}
+
+.desktop-overlay-transcript .compact-turn p {
+  max-height: 168px;
+  overflow: auto;
+}
+
+.desktop-overlay-shell .codex-working-buffer {
+  margin: 0;
+}
+
+.desktop-overlay-controls {
+  display: grid;
+  grid-template-columns: 1fr 1.2fr 1fr;
+  padding: 8px;
+  border: 1px solid rgba(132, 148, 149, 0.2);
+  border-radius: 18px;
+  background: rgba(255, 255, 255, 0.035);
+}
+
+.desktop-overlay-controls button {
+  min-height: 50px;
+}
+
+.desktop-overlay-controls button span,
+.desktop-overlay-controls button strong {
+  display: block;
+}
+
+.desktop-overlay-controls button span {
+  color: var(--muted-2);
+  font-size: 10px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+.desktop-overlay-composer {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 112px;
+  gap: 10px;
+  min-height: 82px;
+}
+
+.desktop-overlay-composer textarea {
+  width: 100%;
+  min-height: 82px;
+  resize: none;
+  padding: 14px 16px;
+  color: var(--ink);
+  border: 1px solid rgba(132, 148, 149, 0.24);
+  border-radius: 18px;
+  outline: none;
+  background: rgba(0, 0, 0, 0.28);
+}
+
+.desktop-overlay-composer button {
+  min-height: 82px;
+  color: #001619;
+  border-color: rgba(0, 240, 255, 0.62);
+  background: linear-gradient(180deg, #32e7f3, #12b6c4);
+}
+
+.desktop-handoff-card {
+  display: grid;
+  grid-template-columns: 180px minmax(0, 1fr) auto;
+  gap: 12px;
+  align-items: center;
+  padding: 12px 14px;
+}
+
+.desktop-handoff-card > div:first-child {
+  display: grid;
+}
+
+.desktop-handoff-card p {
+  margin: 0;
+  max-height: 56px;
+  overflow: auto;
+  color: var(--muted);
+}
+
+.desktop-handoff-actions {
+  justify-content: flex-end;
+  flex-wrap: wrap;
+}
+
+.desktop-overlay-config {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-height: 42px;
+  padding: 0 14px;
+  border: 1px solid rgba(132, 148, 149, 0.2);
+  border-radius: 18px;
+  background: rgba(255, 255, 255, 0.028);
+}
+
+.desktop-overlay-config-summary {
+  display: grid;
+  min-width: 0;
+  gap: 2px;
+}
+
+.desktop-overlay-config strong {
+  overflow: hidden;
+  color: var(--muted);
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.compact-thread-required {
+  display: grid;
+  align-content: center;
+  min-height: 0;
+  padding: 12px 0 0;
+}
+
+.compact-thread-required p {
+  color: var(--ink-strong);
+  font-size: 18px;
+}
+
+.desktop-density-compact .compact-thread-required p {
+  font-size: 16px;
+}
+
+.desktop-density-compact .desktop-hud {
+  grid-template-columns: minmax(150px, 1fr) auto auto;
+  gap: 6px;
+  width: calc(100vw - 10px);
+  min-height: calc(100vh - 10px);
+  margin: 5px;
+  padding: 4px 6px;
+  border-radius: 16px;
+}
+
+.desktop-density-compact .desktop-hud-identity {
+  min-height: 34px;
+  padding: 2px 8px;
+}
+
+.desktop-density-compact .desktop-hud-identity span,
+.desktop-density-compact .desktop-panel-title > span {
+  font-size: 17px;
+}
+
+.desktop-density-compact .desktop-hud-identity strong,
+.desktop-density-compact .desktop-panel-header strong {
+  font-size: 12px;
+}
+
+.desktop-density-compact .desktop-hud-identity em,
+.desktop-density-compact .desktop-hud-state {
+  font-size: 10px;
+}
+
+.desktop-density-compact .desktop-hud-actions {
+  gap: 5px;
+}
+
+.desktop-density-compact .desktop-overlay-mic {
+  min-width: 72px;
+  min-height: 32px;
+}
+
+.desktop-density-compact .desktop-hud-actions button:not(.desktop-overlay-mic) {
+  min-width: 34px;
+  padding: 0 9px;
+  font-size: 10px;
+}
+
+.desktop-density-compact .desktop-command-panel {
+  gap: 7px;
+  width: calc(100vw - 10px);
+  height: calc(100vh - 10px);
+  margin: 5px;
+  padding: 9px;
+  border-radius: 18px;
+}
+
+.desktop-density-compact .desktop-panel-header {
+  min-height: 42px;
+}
+
+.desktop-density-compact .desktop-panel-actions {
+  gap: 5px;
+}
+
+.desktop-density-compact .desktop-panel-actions > button {
+  min-width: 34px;
+  padding: 0 9px;
+}
+
+.desktop-density-compact .desktop-panel-actions > button span {
+  display: none;
+}
+
+.desktop-density-compact .desktop-panel-actions .thread-picker-list {
+  width: min(500px, calc(100vw - 28px));
+}
+
+.desktop-density-compact .thread-picker-list > button {
+  grid-template-columns: minmax(0, 0.85fr) minmax(0, 1.15fr);
+  min-height: 54px;
+}
+
+.desktop-density-compact .thread-picker-list > button .thread-picker-date {
+  display: none;
+}
+
+.desktop-density-compact .desktop-overlay-transcript {
+  padding: 12px;
+}
+
+.desktop-density-compact .desktop-overlay-controls button {
+  min-height: 42px;
+}
+
+.desktop-density-compact .desktop-overlay-composer {
+  grid-template-columns: minmax(0, 1fr) 84px;
+  min-height: 62px;
+}
+
+.desktop-density-compact .desktop-overlay-composer textarea,
+.desktop-density-compact .desktop-overlay-composer button {
+  min-height: 62px;
+}
+
+.desktop-density-micro .desktop-hud {
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 4px;
+  width: calc(100vw - 6px);
+  min-height: calc(100vh - 6px);
+  margin: 3px;
+  padding: 2px 4px;
+  border-radius: 12px;
+}
+
+.desktop-density-micro .desktop-hud-identity {
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 0 6px;
+  min-height: 22px;
+  padding: 0 4px;
+}
+
+.desktop-density-micro .desktop-hud-identity span,
+.desktop-density-micro .desktop-panel-title > span {
+  font-size: 15px;
+}
+
+.desktop-density-micro .desktop-hud-identity span::after,
+.desktop-density-micro .desktop-panel-title > span::after {
+  width: 4px;
+  height: 4px;
+  margin-left: 5px;
+}
+
+.desktop-density-micro .desktop-hud-identity strong {
+  align-self: end;
+  font-size: 9px;
+}
+
+.desktop-density-micro .desktop-hud-identity em {
+  align-self: start;
+  font-size: 8px;
+}
+
+.desktop-density-micro .desktop-hud-state,
+.desktop-density-micro .desktop-hud-actions button:not(.desktop-overlay-mic) {
+  display: none;
+}
+
+.desktop-density-micro .desktop-hud-actions {
+  gap: 0;
+}
+
+.desktop-density-micro .desktop-overlay-mic {
+  min-width: 62px;
+  min-height: 24px;
+  border-radius: 9px;
+}
+
+.desktop-density-micro .desktop-overlay-mic strong {
+  font-size: 9px;
+}
+
+.desktop-density-micro .desktop-command-panel {
+  grid-template-rows: auto minmax(0, 1fr) auto auto;
+  gap: 5px;
+  width: calc(100vw - 6px);
+  height: calc(100vh - 6px);
+  margin: 3px;
+  padding: 6px;
+  border-radius: 14px;
+}
+
+.desktop-density-micro .desktop-panel-header {
+  gap: 6px;
+  min-height: 32px;
+}
+
+.desktop-density-micro .desktop-panel-title {
+  gap: 0 7px;
+}
+
+.desktop-density-micro .desktop-panel-title > span {
+  font-size: 14px;
+}
+
+.desktop-density-micro .desktop-panel-title > strong {
+  font-size: 10px;
+}
+
+.desktop-density-micro .desktop-panel-title > em {
+  display: none;
+}
+
+.desktop-density-micro .desktop-panel-actions {
+  gap: 4px;
+}
+
+.desktop-density-micro .desktop-panel-actions > button {
+  min-width: 28px;
+  min-height: 28px;
+  padding: 0 6px;
+}
+
+.desktop-density-micro .desktop-panel-actions > button span {
+  display: none;
+}
+
+.desktop-density-micro .desktop-panel-actions .thread-picker > button {
+  min-width: 58px;
+  min-height: 28px;
+  padding: 0 8px;
+}
+
+.desktop-density-micro .desktop-panel-actions .thread-picker-list {
+  position: fixed;
+  top: 38px;
+  right: 6px;
+  left: 6px;
+  width: auto;
+  max-height: min(210px, calc(100vh - 52px));
+}
+
+.desktop-density-micro .thread-picker-list > button {
+  grid-template-columns: minmax(0, 1fr);
+  gap: 3px;
+  min-height: 54px;
+  padding: 8px 10px;
+}
+
+.desktop-density-micro .thread-picker-list > button .thread-picker-date,
+.desktop-density-micro .thread-picker-list > button .thread-picker-cell small {
+  display: none;
+}
+
+.desktop-density-micro .thread-picker-list > button .thread-picker-cell {
+  gap: 0;
+}
+
+.desktop-density-micro .thread-picker-list > button .thread-picker-cell:first-child strong {
+  color: #8f9ab1;
+  font-size: 10px;
+}
+
+.desktop-density-micro .thread-picker-list > button .thread-picker-thread-cell strong {
+  font-size: 13px;
+}
+
+.desktop-density-micro .desktop-overlay-transcript {
+  padding: 8px;
+}
+
+.desktop-density-micro .desktop-overlay-transcript .live-card-header button {
+  display: none;
+}
+
+.desktop-density-micro .codex-working-buffer,
+.desktop-density-micro .desktop-handoff-card,
+.desktop-density-micro .desktop-overlay-config {
+  display: none;
+}
+
+.desktop-density-micro .desktop-overlay-controls {
+  grid-template-columns: 1fr 1.1fr 1fr;
+  padding: 4px;
+  border-radius: 12px;
+}
+
+.desktop-density-micro .desktop-overlay-controls button {
+  min-height: 32px;
+}
+
+.desktop-density-micro .desktop-overlay-controls button span {
+  display: none;
+}
+
+.desktop-density-micro .desktop-overlay-composer {
+  grid-template-columns: minmax(0, 1fr) 58px;
+  gap: 5px;
+  min-height: 42px;
+}
+
+.desktop-density-micro .desktop-overlay-composer textarea {
+  min-height: 42px;
+  padding: 8px 10px;
+  border-radius: 12px;
+}
+
+.desktop-density-micro .desktop-overlay-composer button {
+  min-height: 42px;
+  border-radius: 12px;
 }

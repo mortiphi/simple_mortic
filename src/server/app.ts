@@ -1099,8 +1099,7 @@ export async function createMorticServer(options: MorticServerOptions) {
           nextProjectStore = await createProjectStore({
             workspacePath: nextRuntimeContext.effectiveCwd,
             sourceUri: parsed.sourceUri,
-            threadId: parsed.threadId,
-            projectTitle: options.projectTitle
+            threadId: parsed.threadId
           });
         } catch (error) {
           return reply.code(500).send({

@@ -48,7 +48,25 @@ export async function getCodexStatus(): Promise<CodexStatus> {
 
 export async function listCodexRecentThreads(options?: { limit?: number }): Promise<ProviderThreadSummary[]> {
   try {
-    return await codexAppServerBridge.listRecentThreads({ limit: options?.limit });
+    const appServerThreads = await codexAppServerBridge.listRecentThreads({ limit: options?.limit });
+    const indexedThreads = await codexProviderAdapter.listRecentThreads({ limit: 100 }).catch(() => []);
+    const indexedByThreadId = new Map(indexedThreads.map((thread) => [thread.threadId, thread]));
+    const merged = appServerThreads.map((thread) => {
+      const indexed = indexedByThreadId.get(thread.threadId);
+      return {
+        ...thread,
+        threadName: indexed?.threadName ?? thread.threadName,
+        cwd: thread.cwd ?? indexed?.cwd,
+        source: thread.source ?? indexed?.source,
+        updatedAt: thread.updatedAt ?? indexed?.updatedAt
+      };
+    });
+    const appServerThreadIds = new Set(appServerThreads.map((thread) => thread.threadId));
+    const limit = Math.max(1, Math.min(options?.limit ?? 20, 100));
+    return [
+      ...merged,
+      ...indexedThreads.filter((thread) => !appServerThreadIds.has(thread.threadId))
+    ].slice(0, limit);
   } catch {
     return await codexProviderAdapter.listRecentThreads(options);
   }

@@ -229,6 +229,7 @@ export async function createProjectStore(params: ProjectStoreParams): Promise<Pr
   const now = nowIso();
   const enqueue = serializeOperations();
   const workspaceProjectTitle = params.projectTitle ?? (path.basename(workspacePath) || "Mortic Project");
+  const projectTitleIsManaged = !params.projectTitle;
 
   await mkdir(path.join(projectDir, "source_threads"), { recursive: true });
   await mkdir(path.join(projectDir, "source_checkpoints"), { recursive: true });
@@ -1099,7 +1100,9 @@ export async function createProjectStore(params: ProjectStoreParams): Promise<Pr
     const project = await readProject();
     const currentProjectTitle = project.title;
     const nextProjectTitle =
-      !currentProjectTitle || currentProjectTitle === indexedThreadName || currentProjectTitle === path.basename(workspacePath)
+      projectTitleIsManaged
+        ? workspaceProjectTitle
+        : !currentProjectTitle || currentProjectTitle === indexedThreadName || currentProjectTitle === path.basename(workspacePath)
         ? workspaceProjectTitle
         : currentProjectTitle;
     await writeProject({

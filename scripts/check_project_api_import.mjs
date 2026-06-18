@@ -9,6 +9,7 @@ process.env.HOME = tempHome;
 process.env.CODEX_HOME = realCodexHome;
 
 const { createMorticServer } = await import("../dist/node/server/app.js");
+const { shutdownCodexBridges } = await import("../dist/node/server/codex.js");
 const { createProjectStore } = await import("../dist/node/server/projectStorage.js");
 const { projectDirForWorkspace, projectIdForWorkspace } = await import("../dist/node/server/projectStorage/ids.js");
 
@@ -281,7 +282,9 @@ try {
   );
 } finally {
   await app.close();
+  await shutdownCodexBridges("Project API import harness complete");
   await rm(tempHome, { recursive: true, force: true });
 }
 
 console.log("Project API import checks passed");
+process.exit(0);

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import ReactMarkdown from "react-markdown";
 import rehypeSanitize from "rehype-sanitize";
 import remarkGfm from "remark-gfm";
@@ -58,17 +58,58 @@ import { OnboardingScreen } from "./components/OnboardingScreen.js";
 import { ThreadPicker } from "./components/ThreadPicker.js";
 import { apiBase, readStoredCodexAccess, readStoredEffort, readStoredModel, readStoredScratchMode, readStoredServiceTier, readStoredSttProvider, readStoredTransportProvider, readStoredTtsProvider, readStoredVoiceCaveman, writeStoredSetting } from "./lib/api.js";
 import { ApiState, PrewarmState } from "./lib/clientTypes.js";
+import { desktopBridge, type MorticDesktopState } from "./desktopBridge.js";
 import { formatCount, formatMs, formatSignedMs } from "./lib/format.js";
 import { SETTINGS_VERSION, artifactTitle, chartDateLabel, deltaLifecycleLabel, effortLabels, entryLabel, entryMainText, entryNotesLabel, entryParserLabel, extractionActionLabel, extractionEvidenceLabel, extractionReasons, extractionReviewSort, extractionStatusLabels, extractionTypeLabels, extractionTypeOrder, extractionTypeShortLabels, isExtractionReviewCandidate, modeLabels, providerActionText, providerRefTitle, sttProviderLabels, transportLabels, ttsProviderLabels } from "./lib/labels.js";
 import { clientUnknownSparkPreflight, needsModelTransitionPreflight, sparkPreflightLabel } from "./lib/spark.js";
 import { LIVE_MODE_RUNTIME_ENABLED } from "./lib/voice.js";
 import { useVoiceEngine } from "./voice/useVoiceEngine.js";
 
+const PLACEHOLDER_THREAD_ID = "00000000-0000-0000-0000-000000000000";
+
 function workspaceTitle(workspacePath: string | undefined): string | null {
   if (!workspacePath) return null;
   const normalized = workspacePath.replace(/\\/g, "/").replace(/\/+$/, "");
   const title = normalized.split("/").filter(Boolean).at(-1);
   return title || null;
+}
+
+function isPlaceholderSession(session: MorticSession | null | undefined): boolean {
+  return session?.threadId === PLACEHOLDER_THREAD_ID;
+}
+
+function DesktopIcon({ name }: { name: "app" | "collapse" | "hide" }) {
+  const common = {
+    "aria-hidden": true,
+    focusable: false,
+    viewBox: "0 0 24 24"
+  } as const;
+  if (name === "app") {
+    return (
+      <svg className="desktop-icon" {...common}>
+        <path d="M8 4h12v12" />
+        <path d="M20 4 9 15" />
+        <path d="M5 8v11h11" />
+      </svg>
+    );
+  }
+  if (name === "collapse") {
+    return (
+      <svg className="desktop-icon" {...common}>
+        <path d="M7 4v6H1" />
+        <path d="m1 10 6-6" />
+        <path d="M17 20v-6h6" />
+        <path d="m23 14-6 6" />
+      </svg>
+    );
+  }
+  return (
+    <svg className="desktop-icon" {...common}>
+      <path d="M5 12h14" />
+      <path d="M8 6h8" />
+      <path d="M8 18h8" />
+    </svg>
+  );
 }
 
 function providerAvailabilityHint(provider: SttProvider | TtsProvider | TransportProvider, status: {
@@ -295,6 +336,9 @@ function CodexLatentTraceBubble({ trace, pending }: { trace: AppServerTrace | Pr
 
 export function App() {
   const api = useMemo(apiBase, []);
+  const surface = useMemo(() => new URLSearchParams(window.location.search).get("surface"), []);
+  const isDesktopOverlay = surface === "overlay";
+  const [desktopState, setDesktopState] = useState<MorticDesktopState | null>(null);
   const [state, setState] = useState<ApiState>({ session: null, loading: true, error: null });
   const [onboarding, setOnboarding] = useState<OnboardingStatusResponse | null>(null);
   const [onboardingBusy, setOnboardingBusy] = useState(false);
@@ -385,6 +429,26 @@ export function App() {
   const [liveModeActive, setLiveModeActive] = useState(false);
   const prewarmKeyRef = useRef("");
   const prewarmAnnouncementKeyRef = useRef("");
+
+  useEffect(() => {
+    if (!isDesktopOverlay) return;
+    const bridge = desktopBridge();
+    if (!bridge) return;
+    let cancelled = false;
+    void bridge.getDesktopState().then((next) => {
+      if (!cancelled) setDesktopState(next);
+    });
+    const unsubscribe = bridge.onDesktopState?.((next) => setDesktopState(next));
+    return () => {
+      cancelled = true;
+      unsubscribe?.();
+    };
+  }, [isDesktopOverlay]);
+
+  function setDesktopOverlayExpanded(expanded: boolean): void {
+    setDesktopState((current) => current ? { ...current, expanded } : current);
+    void desktopBridge()?.setOverlayExpanded(expanded).then(setDesktopState);
+  }
 
   const effectiveCodexModel = codexModel;
   const selectedModelOption = useMemo(
@@ -1372,9 +1436,9 @@ export function App() {
     setTurnPending(false);
   }
 
-  async function updateSourceThread(overrideUri?: string) {
+  async function updateSourceThread(overrideUri?: string): Promise<string | null> {
     const clean = (overrideUri ?? sourceDraft).trim();
-    if (!clean || sourcePending) return;
+    if (!clean || sourcePending) return null;
 
     projectSourceSwitchPendingRef.current = true;
     const projectViewSeq = invalidateProjectViews();
@@ -1406,6 +1470,7 @@ export function App() {
       setTurnPending(false);
       projectSourceSwitchPendingRef.current = false;
       void refreshProject({ projectViewSeq });
+      return payload.session.sourceUri;
     } catch (error) {
       setState((current) => ({
         ...current,
@@ -1414,6 +1479,7 @@ export function App() {
       }));
       projectSourceSwitchPendingRef.current = false;
       void refreshProject({ projectViewSeq });
+      return null;
     } finally {
       projectSourceSwitchPendingRef.current = false;
       setSourcePending(false);
@@ -1639,10 +1705,7 @@ export function App() {
       : null;
   const workspaceProjectTitle = workspaceTitle(projectState?.project.workspacePath ?? activeProjectSource?.workspacePath);
   const storedProjectTitle = projectState?.project.title?.trim();
-  const projectDisplayTitle =
-    storedProjectTitle && storedProjectTitle !== activeProjectSource?.title
-      ? storedProjectTitle
-      : workspaceProjectTitle ?? storedProjectTitle ?? "Mortic project";
+  const projectDisplayTitle = workspaceProjectTitle ?? storedProjectTitle ?? "Mortic project";
   const activeForkTitle = activeProjectSource?.title ?? activeProjectSession?.title ?? sourceThreadLabel;
   const activeForkStatus = activeProjectSession?.status ?? (activeProjectSource ? "source" : "unlinked");
   const activeForkAccess = activeProviderReference?.accessPreset ?? activeProjectSession?.mode ?? scratchMode;
@@ -1722,6 +1785,285 @@ export function App() {
     prewarmAnnouncementKeyRef.current = "";
   };
 
+  const desktopOverlayExpanded = desktopState?.expanded ?? false;
+  const desktopShortcutLabel = desktopState?.shortcutLabel ?? "Cmd+Shift+M";
+  const desktopOverlayScale = desktopState?.overlayScale ?? 1;
+  const desktopDensity = desktopOverlayScale < 0.62 ? "micro" : desktopOverlayScale < 0.75 ? "compact" : "normal";
+  const desktopOverlayStyle = { "--desktop-overlay-scale": String(desktopOverlayScale) } as CSSProperties;
+  const desktopThreadBlocked = isDesktopOverlay && isPlaceholderSession(session);
+  const desktopProjectLabel = desktopThreadBlocked ? "Select thread" : projectDisplayTitle;
+  const desktopThreadLabel = desktopThreadBlocked ? "Codex" : activeForkTitle;
+  const desktopHudStatus = recognizing
+    ? "Listening"
+    : desktopThreadBlocked
+      ? "Select thread"
+      : pending
+        ? "Thinking"
+        : speechPhase === "speaking" || speechPhase === "buffering"
+          ? "Speaking"
+          : session?.codex.available
+            ? "Ready"
+            : "Offline";
+  const handoffPreviewText = shortHandoff || fullHandoff || handoff || handoffPreview;
+  const handoffCopyText = fullHandoff || handoff || shortHandoff;
+  const overlayStatusLine = [
+    configModelSummary,
+    effortLabels[effectiveReasoningEffort],
+    accessPresetLabels[codexAccessPreset].label,
+    `${sttProviderLabels[sttProvider]} / ${ttsProviderLabels[ttsProvider]}`
+  ].join(" · ");
+  const overlayMicButton = (
+    <button
+      type="button"
+      className={`desktop-overlay-mic ${recognizing ? "recording" : ""}`}
+      onPointerDown={(event) => {
+        event.preventDefault();
+        event.currentTarget.setPointerCapture?.(event.pointerId);
+        startPushToTalkCapture();
+      }}
+      onPointerUp={(event) => {
+        event.preventDefault();
+        event.currentTarget.releasePointerCapture?.(event.pointerId);
+        event.currentTarget.blur();
+        stopPushToTalkCapture();
+      }}
+      onPointerCancel={(event) => {
+        event.preventDefault();
+        event.currentTarget.releasePointerCapture?.(event.pointerId);
+        event.currentTarget.blur();
+        stopPushToTalkCapture();
+      }}
+      onPointerLeave={() => {
+        if (recognizingRef.current) stopPushToTalkCapture();
+      }}
+      onClick={(event) => event.preventDefault()}
+      title={desktopThreadBlocked ? "Select a Codex thread first." : "Hold M when this window is focused, or hold this button."}
+      disabled={desktopThreadBlocked || pushToTalkDisabled}
+    >
+      <strong>{dockTalkLabel}</strong>
+    </button>
+  );
+
+  if (isDesktopOverlay) {
+    return (
+      <main
+        className={[
+          "desktop-overlay-shell",
+          desktopOverlayExpanded ? "desktop-overlay-expanded" : "desktop-overlay-collapsed",
+          `desktop-density-${desktopDensity}`,
+          desktopThreadBlocked ? "desktop-thread-required" : ""
+        ].join(" ")}
+        style={desktopOverlayStyle}
+        onKeyDown={(event) => {
+          if (event.key === "Escape") {
+            event.preventDefault();
+            if (desktopOverlayExpanded) setDesktopOverlayExpanded(false);
+            else void desktopBridge()?.hideOverlay();
+          }
+          if (!desktopOverlayExpanded && event.key === "Enter") {
+            event.preventDefault();
+            setDesktopOverlayExpanded(true);
+          }
+        }}
+      >
+        {!desktopOverlayExpanded ? (
+          <section className="desktop-hud desktop-overlay-drag" aria-label="Mortic desktop HUD">
+            <button type="button" className="desktop-hud-identity desktop-overlay-nodrag" onClick={() => setDesktopOverlayExpanded(true)}>
+              <span>Mortic</span>
+              <strong>{desktopProjectLabel}</strong>
+              <em>{desktopThreadLabel}</em>
+            </button>
+            <div
+              className={`desktop-hud-state ${desktopThreadBlocked ? "desktop-hud-state-icon-only" : ""}`}
+              title={desktopThreadBlocked ? "Codex ready" : desktopHudStatus}
+              aria-label={desktopThreadBlocked ? "Codex ready" : desktopHudStatus}
+            >
+              <span className={`status-dot ${session?.codex.available ? "ok" : "bad"}`} />
+              {!desktopThreadBlocked && <span>{desktopHudStatus}</span>}
+            </div>
+            <div className="desktop-hud-actions desktop-overlay-nodrag">
+              {overlayMicButton}
+              <button type="button" onClick={() => void interruptTurn()} disabled={!pending && speechPhase === "idle"}>
+                Interrupt
+              </button>
+              <button
+                type="button"
+                className="desktop-icon-button desktop-hud-app-button"
+                onClick={() => void desktopBridge()?.openFullApp()}
+                aria-label="Open full app"
+                title="Open full app"
+              >
+                <DesktopIcon name="app" />
+                <span>App</span>
+              </button>
+            </div>
+          </section>
+        ) : (
+          <section className="desktop-command-panel" aria-label="Mortic desktop command pane">
+            <header className="desktop-panel-header desktop-overlay-drag">
+              <div className="desktop-panel-title">
+                <span>Mortic</span>
+                <strong>{desktopProjectLabel}</strong>
+                <em>{desktopThreadLabel}</em>
+              </div>
+              <div className="desktop-panel-actions desktop-overlay-nodrag">
+                <ThreadPicker
+                  api={api}
+                  currentThreadId={session?.threadId}
+                  disabled={sourcePending}
+                  onSelect={(uri) => {
+                    setSourceDraft(uri);
+                    void updateSourceThread(uri).then((sourceUri) => {
+                      if (sourceUri) void desktopBridge()?.rememberSource(sourceUri);
+                    });
+                  }}
+                />
+                <button
+                  type="button"
+                  className="desktop-icon-button"
+                  onClick={() => void desktopBridge()?.openFullApp()}
+                  aria-label="Open full app"
+                  title="Open full app"
+                >
+                  <DesktopIcon name="app" />
+                  <span>Open app</span>
+                </button>
+                <button
+                  type="button"
+                  className="desktop-icon-button"
+                  onClick={() => setDesktopOverlayExpanded(false)}
+                  aria-label="Collapse"
+                  title="Collapse"
+                >
+                  <DesktopIcon name="collapse" />
+                  <span>Collapse</span>
+                </button>
+                <button
+                  type="button"
+                  className="desktop-icon-button"
+                  onClick={() => void desktopBridge()?.hideOverlay()}
+                  aria-label={`Hide overlay (${desktopShortcutLabel})`}
+                  title={desktopShortcutLabel}
+                >
+                  <DesktopIcon name="hide" />
+                  <span>Hide</span>
+                </button>
+              </div>
+            </header>
+
+            <article className="desktop-overlay-card desktop-overlay-transcript">
+              <div className="live-card-header">
+                <span>Scratch</span>
+                <button type="button" onClick={() => void desktopBridge()?.openFullApp()} disabled={desktopThreadBlocked}>Open transcript</button>
+              </div>
+              {desktopThreadBlocked ? (
+                <section className="compact-turn compact-thread-required">
+                  <span>Thread required</span>
+                  <p>Select a Codex thread to start.</p>
+                </section>
+              ) : state.loading ? (
+                <p>Loading session.</p>
+              ) : transcript.length === 0 ? (
+                <p>Say or type a scratch turn.</p>
+              ) : latestUserEntry && (
+                <section className="compact-turn compact-user">
+                  <span>You</span>
+                  <p>{entryMainText(latestUserEntry)}</p>
+                </section>
+              )}
+              {!desktopThreadBlocked && (assistantDraftVisible ? (
+                <section className="compact-turn compact-assistant">
+                  <span>{assistantDraftLabel}</span>
+                  <p>{assistantDraftText}</p>
+                </section>
+              ) : pending ? (
+                <section className="compact-turn compact-assistant compact-thinking">
+                  <span>Mortic</span>
+                  <p>Waiting for the first answer chunk.</p>
+                </section>
+              ) : compactAssistantEntry && (
+                <section className="compact-turn compact-assistant">
+                  <span>Mortic</span>
+                  <p>{entryMainText(compactAssistantEntry)}</p>
+                  {compactAssistantEntry.notesText && (
+                    <details className="compact-notes">
+                      <summary>{entryNotesLabel(compactAssistantEntry)}</summary>
+                      <MarkdownContent markdown={compactAssistantEntry.notesText} />
+                    </details>
+                  )}
+                </section>
+              ))}
+              {!desktopThreadBlocked && queuedTurnPreview && (
+                <section className="compact-turn compact-queued">
+                  <span>Queued</span>
+                  <p>{queuedTurnPreview}</p>
+                </section>
+              )}
+            </article>
+
+            {!desktopThreadBlocked && <CodexWorkingBuffer trace={activeAppServerTrace} pending={pending} hasAssistantText={Boolean(assistantDraftText.trim())} />}
+
+            <nav className="desktop-overlay-controls" aria-label="Voice controls">
+              <button
+                type="button"
+                onClick={() => setLiveActive(!liveModeActiveRef.current)}
+                className={liveModeActive ? "dock-active" : ""}
+                disabled={desktopThreadBlocked || !LIVE_MODE_RUNTIME_ENABLED}
+              >
+                <span>Live</span>
+                <strong>{liveModeActive ? "On" : "Off"}</strong>
+              </button>
+              {overlayMicButton}
+              <button type="button" onClick={() => void interruptTurn()} disabled={desktopThreadBlocked || (!pending && speechPhase === "idle")}>
+                <span>Interrupt</span>
+                <strong>{speechPhase === "speaking" ? "Speaking" : "Stop"}</strong>
+              </button>
+            </nav>
+
+            <form
+              className="desktop-overlay-composer"
+              onSubmit={(event) => {
+                event.preventDefault();
+                void sendTurn(draft);
+              }}
+            >
+              <textarea
+                value={draft}
+                onChange={(event) => setDraft(event.target.value)}
+                placeholder={desktopThreadBlocked ? "Select a Codex thread first" : "Type a scratch turn"}
+                rows={2}
+                disabled={desktopThreadBlocked}
+              />
+              <button type="submit" disabled={desktopThreadBlocked || !draft.trim() || sparkBlocked}>{pending ? "Queue" : "Send"}</button>
+            </form>
+
+            <section className="desktop-overlay-card desktop-handoff-card">
+              <div>
+                <span>Handoff</span>
+                <strong>{handoffStateLabel}</strong>
+              </div>
+              <p>{desktopThreadBlocked ? "Select a Codex thread before generating handoff." : handoffPreviewText}</p>
+              <div className="desktop-handoff-actions">
+                <button type="button" onClick={() => void generateHandoff()} disabled={desktopThreadBlocked || handoffPending || transcript.length === 0}>
+                  {handoffPending ? "Generating" : "Generate"}
+                </button>
+                <button type="button" onClick={() => void copyHandoffText(shortHandoff)} disabled={desktopThreadBlocked || !shortHandoff}>Copy short</button>
+                <button type="button" onClick={() => void copyHandoffText(handoffCopyText)} disabled={desktopThreadBlocked || !handoffCopyText}>Copy full</button>
+              </div>
+            </section>
+
+            <footer className="desktop-overlay-config">
+              <div className="desktop-overlay-config-summary">
+                <span>Config</span>
+                <strong>{overlayStatusLine}</strong>
+              </div>
+            </footer>
+          </section>
+        )}
+      </main>
+    );
+  }
+
   return (
     <main className="app-shell command-shell">
       <div className="ambient-void" aria-hidden="true" />
@@ -1739,7 +2081,9 @@ export function App() {
             disabled={sourcePending}
             onSelect={(uri) => {
               setSourceDraft(uri);
-              void updateSourceThread(uri);
+              void updateSourceThread(uri).then((sourceUri) => {
+                if (sourceUri) void desktopBridge()?.rememberSource(sourceUri);
+              });
             }}
           />
         </div>
@@ -1984,7 +2328,6 @@ export function App() {
                 }}
                 onClick={(event) => event.preventDefault()}
               >
-                <span>{recognizing ? "Listening" : "M"}</span>
                 <strong>{dockTalkLabel}</strong>
               </button>
               <button type="button" onClick={() => void interruptTurn()} disabled={!pending && speechPhase === "idle"}>
