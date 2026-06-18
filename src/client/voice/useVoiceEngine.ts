@@ -1128,6 +1128,14 @@ export function useVoiceEngine(params: VoiceEngineParams) {
     streamRef.current = null;
   }
 
+  function resetQueuedTurn() {
+    queuedTurnRef.current = null;
+    setQueuedTurnPreview(null);
+    bargeInCaptureRef.current = false;
+    bargeInStateRef.current = null;
+    clearBargeInNoSpeechTimer();
+  }
+
   function clearRecognitionBuffers(clearDraft = false) {
     speechBufferRef.current = "";
     interimBufferRef.current = "";
@@ -2316,6 +2324,7 @@ export function useVoiceEngine(params: VoiceEngineParams) {
     announcePrewarmConfirmation,
     reattachActiveTurn,
     resetSpeechPlayback,
+    resetQueuedTurn,
     sendTurn,
     interruptTurn,
     setLiveActive,

@@ -32,6 +32,7 @@
     "eval:models:telemetry": "node evals/model-runtime-telemetry/run.mjs",
     "eval:canonical:generate": "node evals/canonical-extraction/run.mjs generate",
     "eval:canonical:score": "node evals/canonical-extraction/run.mjs score",
+    "eval:desktop:ux": "node scripts/eval_desktop_ux.mjs",
     "check:spark-context": "node scripts/check_spark_context.mjs",
     "probe:tts": "node scripts/tts_ws_probe.mjs"
   },

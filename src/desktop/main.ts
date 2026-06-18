@@ -154,6 +154,7 @@ function fullAppOwnsScreen(): boolean {
 }
 
 function hideOverlay(): void {
+  overlayWindow?.webContents.send("mortic-desktop:audio-cancel");
   overlayWindow?.hide();
   overlayWindow?.webContents.send("mortic-desktop:state", desktopState());
 }
@@ -261,6 +262,9 @@ function createFullWindow(): BrowserWindow {
   win.on("restore", hideOverlay);
   win.on("closed", () => {
     fullWindow = null;
+    if (runtime) {
+      setTimeout(() => revealOverlay(), 0);
+    }
   });
   return win;
 }

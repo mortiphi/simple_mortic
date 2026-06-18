@@ -10,5 +10,10 @@ contextBridge.exposeInMainWorld("morticDesktop", {
     const wrapped = (_event, state) => listener(state);
     ipcRenderer.on("mortic-desktop:state", wrapped);
     return () => ipcRenderer.off("mortic-desktop:state", wrapped);
+  },
+  onAudioCancel: (listener) => {
+    const wrapped = () => listener();
+    ipcRenderer.on("mortic-desktop:audio-cancel", wrapped);
+    return () => ipcRenderer.off("mortic-desktop:audio-cancel", wrapped);
   }
 });

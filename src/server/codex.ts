@@ -46,16 +46,42 @@ export async function getCodexStatus(): Promise<CodexStatus> {
   };
 }
 
-export async function listCodexRecentThreads(options?: { limit?: number }): Promise<ProviderThreadSummary[]> {
+export async function listCodexRecentThreads(options?: {
+  limit?: number;
+  cwd?: string | string[];
+  searchTerm?: string;
+}): Promise<ProviderThreadSummary[]> {
+  const normalizedSearch = options?.searchTerm?.trim().toLowerCase();
+  const cwdFilters = Array.isArray(options?.cwd)
+    ? options.cwd.filter(Boolean)
+    : options?.cwd
+      ? [options.cwd]
+      : [];
+  const matchesFilters = (thread: ProviderThreadSummary): boolean => {
+    if (cwdFilters.length > 0 && !cwdFilters.some((cwd) => thread.cwd === cwd)) return false;
+    if (!normalizedSearch) return true;
+    return [
+      thread.threadName,
+      thread.threadId,
+      thread.cwd,
+      thread.source,
+      thread.sourceUri
+    ].filter(Boolean).join(" ").toLowerCase().includes(normalizedSearch);
+  };
+
   try {
-    const appServerThreads = await codexAppServerBridge.listRecentThreads({ limit: options?.limit });
+    const appServerThreads = await codexAppServerBridge.listRecentThreads({
+      limit: options?.limit,
+      cwd: options?.cwd,
+      searchTerm: options?.searchTerm
+    });
     const indexedThreads = await codexProviderAdapter.listRecentThreads({ limit: 100 }).catch(() => []);
     const indexedByThreadId = new Map(indexedThreads.map((thread) => [thread.threadId, thread]));
     const merged = appServerThreads.map((thread) => {
       const indexed = indexedByThreadId.get(thread.threadId);
       return {
         ...thread,
-        threadName: indexed?.threadName ?? thread.threadName,
+        threadName: thread.threadName ?? indexed?.threadName,
         cwd: thread.cwd ?? indexed?.cwd,
         source: thread.source ?? indexed?.source,
         updatedAt: thread.updatedAt ?? indexed?.updatedAt
@@ -66,9 +92,11 @@ export async function listCodexRecentThreads(options?: { limit?: number }): Prom
     return [
       ...merged,
       ...indexedThreads.filter((thread) => !appServerThreadIds.has(thread.threadId))
-    ].slice(0, limit);
+    ].filter(matchesFilters).slice(0, limit);
   } catch {
-    return await codexProviderAdapter.listRecentThreads(options);
+    return (await codexProviderAdapter.listRecentThreads({ limit: 100 }))
+      .filter(matchesFilters)
+      .slice(0, Math.max(1, Math.min(options?.limit ?? 20, 100)));
   }
 }
 

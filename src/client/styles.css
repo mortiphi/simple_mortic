@@ -1459,6 +1459,11 @@ textarea {
   padding: 14px 16px;
 }
 
+.agent-canvas .live-transcript-card {
+  border: 0;
+  box-shadow: 0 24px 90px rgba(0, 0, 0, 0.5), 0 0 62px rgba(0, 240, 255, 0.08);
+}
+
 .live-card-header {
   display: flex;
   justify-content: space-between;
@@ -3608,7 +3613,7 @@ textarea {
   display: flex;
   flex-direction: column;
   gap: 2px;
-  width: min(420px, calc(100vw - 24px));
+  width: min(620px, calc(100vw - 24px));
   max-height: 60vh;
   overflow-y: auto;
   padding: 6px;
@@ -3619,13 +3624,81 @@ textarea {
   box-shadow: 0 12px 32px rgba(0, 0, 0, 0.55);
 }
 
+.thread-picker-search {
+  display: grid;
+  gap: 6px;
+  padding: 6px 8px 8px;
+}
+
+.thread-picker-search span,
+.thread-picker-scope span {
+  margin: 0;
+  color: #8f9ab1;
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.thread-picker-search input {
+  width: 100%;
+  min-height: 36px;
+  padding: 0 10px;
+  color: #f2f6ff;
+  border: 1px solid rgba(132, 148, 149, 0.24);
+  border-radius: 8px;
+  outline: none;
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.thread-picker-search input:focus {
+  border-color: rgba(0, 240, 255, 0.52);
+  box-shadow: 0 0 0 2px rgba(0, 240, 255, 0.08);
+}
+
+.thread-picker-scope {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 0 8px 6px;
+}
+
+.thread-picker-scope span {
+  color: var(--cyan);
+}
+
+.thread-picker-scope button,
+.thread-picker-empty button {
+  min-height: 28px;
+  padding: 0 9px;
+  color: var(--ink);
+  border-color: rgba(132, 148, 149, 0.28);
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.thread-picker-empty {
+  display: grid;
+  gap: 8px;
+  padding: 10px;
+  color: var(--muted);
+}
+
+.thread-picker-empty p {
+  margin: 0;
+}
+
+.thread-picker-empty button {
+  justify-self: start;
+}
+
 .thread-picker-list > button {
   display: grid;
-  grid-template-columns: minmax(118px, 0.72fr) minmax(190px, 1.28fr) max-content;
-  align-items: center;
-  gap: 18px;
+  grid-template-columns: minmax(130px, 0.8fr) minmax(220px, 1.2fr) max-content;
+  align-items: start;
+  gap: 14px;
   width: 100%;
-  min-height: 64px;
+  min-height: 70px;
   padding: 10px 14px;
   text-align: left;
   text-transform: none;
@@ -3643,6 +3716,11 @@ textarea {
   border-color: var(--accent, #8b7bff);
 }
 
+.thread-picker-list > button.preview-thread {
+  border-color: rgba(0, 240, 255, 0.44);
+  background: rgba(0, 240, 255, 0.055);
+}
+
 .thread-picker-list > button .thread-picker-cell {
   display: grid;
   min-width: 0;
@@ -3657,6 +3735,7 @@ textarea {
 }
 
 .thread-picker-list > button .thread-picker-date {
+  padding-top: 19px;
   justify-self: end;
   color: #8f9ab1;
   font-size: 11px;
@@ -3666,8 +3745,9 @@ textarea {
 }
 
 .thread-picker-list > button strong {
-  font-size: 13px;
+  font-size: 14px;
   letter-spacing: 0;
+  line-height: 1.16;
   overflow: hidden;
   text-overflow: ellipsis;
   text-transform: none;
@@ -3686,12 +3766,62 @@ textarea {
   font-size: 10px;
   font-weight: 800;
   letter-spacing: 0;
+  line-height: 1;
   text-transform: none;
   color: #6b7385;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
   max-width: 100%;
+}
+
+.thread-picker-preview {
+  position: sticky;
+  bottom: 0;
+  z-index: 2;
+  display: grid;
+  gap: 6px;
+  margin: 6px 2px 2px;
+  padding: 12px;
+  border: 1px solid rgba(0, 240, 255, 0.24);
+  border-radius: 10px;
+  background: rgba(8, 13, 14, 0.96);
+  box-shadow: 0 -12px 34px rgba(0, 0, 0, 0.38);
+}
+
+.thread-picker-preview small {
+  color: var(--cyan);
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+
+.thread-picker-preview strong {
+  overflow: hidden;
+  color: var(--ink-strong);
+  font-size: 15px;
+  line-height: 1.2;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.thread-picker-preview span,
+.thread-picker-preview code {
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.thread-picker-preview code {
+  color: #8f9ab1;
+}
+
+.thread-picker-preview button {
+  justify-self: start;
+  min-height: 34px;
 }
 
 .thread-picker-list .empty-inline {
@@ -3986,8 +4116,10 @@ body:has(.desktop-overlay-shell) {
   grid-template-columns: minmax(220px, 1fr) auto auto;
   align-items: center;
   gap: 10px;
+  box-sizing: border-box;
   width: calc(100vw - 14px);
-  min-height: calc(100vh - 14px);
+  height: calc(100vh - 14px);
+  min-height: 0;
   margin: 7px;
   padding: 6px 8px;
   border: 0;
@@ -4214,16 +4346,31 @@ body:has(.desktop-overlay-shell) {
   justify-content: flex-end;
 }
 
+.desktop-panel-window-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px;
+  border: 1px solid rgba(132, 148, 149, 0.16);
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.026);
+}
+
+.desktop-panel-window-actions button {
+  min-width: 34px;
+}
+
 .desktop-panel-actions .thread-picker {
   position: relative;
 }
 
 .desktop-panel-actions .thread-picker-list {
-  top: calc(100% + 8px);
-  right: 0;
-  left: auto;
-  width: min(560px, calc(100vw - 48px));
-  max-height: 430px;
+  position: fixed;
+  top: 72px;
+  right: 18px;
+  left: 18px;
+  width: auto;
+  max-height: min(520px, calc(100vh - 96px));
 }
 
 .desktop-overlay-card {
@@ -4368,7 +4515,8 @@ body:has(.desktop-overlay-shell) {
   grid-template-columns: minmax(150px, 1fr) auto auto;
   gap: 6px;
   width: calc(100vw - 10px);
-  min-height: calc(100vh - 10px);
+  height: calc(100vh - 10px);
+  min-height: 0;
   margin: 5px;
   padding: 4px 6px;
   border-radius: 16px;
@@ -4426,17 +4574,21 @@ body:has(.desktop-overlay-shell) {
   gap: 5px;
 }
 
-.desktop-density-compact .desktop-panel-actions > button {
+.desktop-density-compact .desktop-panel-window-actions > button {
   min-width: 34px;
   padding: 0 9px;
 }
 
-.desktop-density-compact .desktop-panel-actions > button span {
+.desktop-density-compact .desktop-panel-window-actions > button span {
   display: none;
 }
 
 .desktop-density-compact .desktop-panel-actions .thread-picker-list {
-  width: min(500px, calc(100vw - 28px));
+  top: 58px;
+  right: 12px;
+  left: 12px;
+  width: auto;
+  max-height: min(430px, calc(100vh - 76px));
 }
 
 .desktop-density-compact .thread-picker-list > button {
@@ -4470,7 +4622,8 @@ body:has(.desktop-overlay-shell) {
   grid-template-columns: minmax(0, 1fr) auto;
   gap: 4px;
   width: calc(100vw - 6px);
-  min-height: calc(100vh - 6px);
+  height: calc(100vh - 6px);
+  min-height: 0;
   margin: 3px;
   padding: 2px 4px;
   border-radius: 12px;
@@ -4506,7 +4659,7 @@ body:has(.desktop-overlay-shell) {
 }
 
 .desktop-density-micro .desktop-hud-state,
-.desktop-density-micro .desktop-hud-actions button:not(.desktop-overlay-mic) {
+.desktop-density-micro .desktop-hud-interrupt-button {
   display: none;
 }
 
@@ -4518,6 +4671,18 @@ body:has(.desktop-overlay-shell) {
   min-width: 62px;
   min-height: 24px;
   border-radius: 9px;
+}
+
+.desktop-density-micro .desktop-hud-app-button {
+  min-width: 25px;
+  width: 25px;
+  min-height: 24px;
+  padding: 0;
+  border-radius: 9px;
+}
+
+.desktop-density-micro .desktop-hud-app-button span {
+  display: none;
 }
 
 .desktop-density-micro .desktop-overlay-mic strong {
@@ -4559,13 +4724,13 @@ body:has(.desktop-overlay-shell) {
   gap: 4px;
 }
 
-.desktop-density-micro .desktop-panel-actions > button {
+.desktop-density-micro .desktop-panel-window-actions > button {
   min-width: 28px;
   min-height: 28px;
   padding: 0 6px;
 }
 
-.desktop-density-micro .desktop-panel-actions > button span {
+.desktop-density-micro .desktop-panel-window-actions > button span {
   display: none;
 }
 
@@ -4607,6 +4772,14 @@ body:has(.desktop-overlay-shell) {
 
 .desktop-density-micro .thread-picker-list > button .thread-picker-thread-cell strong {
   font-size: 13px;
+}
+
+.desktop-density-micro .thread-picker-preview {
+  padding: 8px;
+}
+
+.desktop-density-micro .thread-picker-preview code {
+  display: none;
 }
 
 .desktop-density-micro .desktop-overlay-transcript {

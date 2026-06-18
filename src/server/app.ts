@@ -1206,10 +1206,12 @@ export async function createMorticServer(options: MorticServerOptions) {
     return options.projectStore.updateExtractedItem(request.params.itemId, patch);
   });
 
-  app.get<{ Querystring: { limit?: string } }>("/api/provider/threads", async (request) => {
+  app.get<{ Querystring: { limit?: string; cwd?: string; searchTerm?: string } }>("/api/provider/threads", async (request) => {
     const limit = Number(request.query.limit);
     const threads = await listCodexRecentThreads({
-      limit: Number.isFinite(limit) && limit > 0 ? Math.floor(limit) : undefined
+      limit: Number.isFinite(limit) && limit > 0 ? Math.floor(limit) : undefined,
+      cwd: request.query.cwd,
+      searchTerm: request.query.searchTerm
     });
     return {
       provider: "codex",

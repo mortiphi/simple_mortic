@@ -13,6 +13,7 @@ export type MorticDesktopBridge = {
   openFullApp: () => Promise<MorticDesktopState>;
   rememberSource: (sourceUri: string) => Promise<MorticDesktopState>;
   onDesktopState?: (listener: (state: MorticDesktopState) => void) => () => void;
+  onAudioCancel?: (listener: () => void) => () => void;
 };
 
 declare global {

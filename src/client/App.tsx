@@ -478,6 +478,8 @@ export function App() {
   );
   const effectiveVoiceCaveman = scratchMode === "voice" && voiceCaveman;
   const session = state.session;
+  const sessionRef = useRef<MorticSession | null>(null);
+  const threadRequired = isPlaceholderSession(session);
   const transcript = session?.transcript ?? [];
   const activeTurn = session?.activeTurn;
   const activeAppServerTrace = activeTurn?.appServerTrace ?? activeTurn?.progressTrace;
@@ -553,6 +555,7 @@ export function App() {
     announcePrewarmConfirmation,
     reattachActiveTurn,
     resetSpeechPlayback,
+    resetQueuedTurn,
     sendTurn,
     interruptTurn,
     setLiveActive,
@@ -596,6 +599,19 @@ export function App() {
     liveModeActive,
     setLiveModeActive
   });
+
+  useEffect(() => {
+    sessionRef.current = session;
+  }, [session]);
+
+  useEffect(() => {
+    const bridge = desktopBridge();
+    if (!bridge?.onAudioCancel) return;
+    return bridge.onAudioCancel(() => {
+      resetSpeechPlayback();
+      resetQueuedTurn();
+    });
+  }, [resetQueuedTurn, resetSpeechPlayback]);
 
   async function refreshOnboarding(): Promise<void> {
     setOnboardingBusy(true);
@@ -869,6 +885,62 @@ export function App() {
   }, [api]);
 
   useEffect(() => {
+    if (!settingsHydrated || !desktopBridge()) return;
+    let cancelled = false;
+
+    async function refreshDesktopSession() {
+      if (cancelled || pendingRef.current || sourcePending || handoffPending || handoffReviewOpen || extractionReviewOpen) return;
+      try {
+        const response = await fetch(`${api}/api/session`);
+        if (!response.ok) return;
+        const payload = (await response.json()) as SessionResponse;
+        if (cancelled) return;
+        const previous = sessionRef.current;
+        const switchedThread = Boolean(previous && previous.threadId !== payload.session.threadId);
+        const externallyCleared = Boolean(previous && previous.transcript.length > 0 && payload.session.transcript.length === 0);
+        if (switchedThread || externallyCleared) {
+          resetSpeechPlayback();
+          resetQueuedTurn();
+          setDraft("");
+          prewarmKeyRef.current = "";
+          prewarmAnnouncementKeyRef.current = "";
+          setPrewarm({ status: "idle" });
+        }
+        setState((current) => {
+          const currentSession = current.session;
+          const nextSession = payload.session;
+          const unchanged =
+            currentSession?.id === nextSession.id &&
+            currentSession?.updatedAt === nextSession.updatedAt &&
+            currentSession?.threadId === nextSession.threadId &&
+            currentSession?.transcript.length === nextSession.transcript.length &&
+            currentSession?.activeTurn?.status === nextSession.activeTurn?.status;
+          if (unchanged) return current;
+          return { session: nextSession, loading: false, error: null };
+        });
+        if (payload.session.activeTurn?.status === "running" && !pendingRef.current) {
+          reattachActiveTurn(payload.session.activeTurn);
+        }
+        setSourceDraft(payload.session.sourceUri);
+        setHandoff(payload.session.handoff ?? "");
+        setShortHandoff(payload.session.handoffShort ?? "");
+        setFullHandoff(payload.session.handoffFull ?? "");
+      } catch {
+        // Desktop surfaces should not flash an error just because a background
+        // sync tick races server shutdown or reload.
+      }
+    }
+
+    const timer = window.setInterval(refreshDesktopSession, 1200);
+    window.addEventListener("focus", refreshDesktopSession);
+    return () => {
+      cancelled = true;
+      window.clearInterval(timer);
+      window.removeEventListener("focus", refreshDesktopSession);
+    };
+  }, [api, extractionReviewOpen, handoffPending, handoffReviewOpen, reattachActiveTurn, resetQueuedTurn, resetSpeechPlayback, settingsHydrated, sourcePending]);
+
+  useEffect(() => {
     if (!settingsHydrated) return;
     writeStoredSetting("mortic.settingsVersion", SETTINGS_VERSION);
     writeStoredSetting("mortic.reasoningEffort", effectiveReasoningEffort);
@@ -968,7 +1040,7 @@ export function App() {
 
   useEffect(() => {
     const threadId = state.session?.threadId;
-    if (!threadId || !needsModelTransitionPreflight(effectiveCodexModel)) {
+    if (!threadId || threadRequired || !needsModelTransitionPreflight(effectiveCodexModel)) {
       setSparkPreflight(null);
       setSparkPreflightPending(false);
       setSparkApprovalKey("");
@@ -1019,11 +1091,11 @@ export function App() {
       cancelled = true;
       controller.abort();
     };
-  }, [api, effectiveCodexModel, effectiveReasoningEffort, effectiveServiceTier, effectiveVoiceCaveman, scratchMode, state.session?.threadId]);
+  }, [api, effectiveCodexModel, effectiveReasoningEffort, effectiveServiceTier, effectiveVoiceCaveman, scratchMode, state.session?.threadId, threadRequired]);
 
   useEffect(() => {
     const session = state.session;
-    if (!session || state.loading || pending || handoffPending || sourcePending) return;
+    if (!session || threadRequired || state.loading || pending || handoffPending || sourcePending) return;
     if (session.activeTurn?.status === "running") return;
     if (!effectiveCodexModel.trim()) return;
     if (needsModelTransitionPreflight(effectiveCodexModel) && (sparkCompactionPending || !sparkApproved)) {
@@ -1135,7 +1207,8 @@ export function App() {
     sparkContext.label,
     pending,
     handoffPending,
-    sourcePending
+    sourcePending,
+    threadRequired
   ]);
 
   useEffect(() => {
@@ -1419,6 +1492,7 @@ export function App() {
 
   async function clearScratch() {
     resetSpeechPlayback();
+    resetQueuedTurn();
     prewarmKeyRef.current = "";
     prewarmAnnouncementKeyRef.current = "";
     setPrewarm({ status: "idle" });
@@ -1443,6 +1517,7 @@ export function App() {
     projectSourceSwitchPendingRef.current = true;
     const projectViewSeq = invalidateProjectViews();
     resetSpeechPlayback();
+    resetQueuedTurn();
     prewarmKeyRef.current = "";
     prewarmAnnouncementKeyRef.current = "";
     setPrewarm({ status: "idle" });
@@ -1562,8 +1637,8 @@ export function App() {
       ? "Transcribing"
       : recognizing
         ? pending ? "Listening for next turn" : liveModeActive ? "Live listening" : "Listening"
-        : pending || speechPhase === "speaking" || speechPhase === "buffering"
-          ? liveModeActive ? "Speak to interrupt" : "M to mute and talk"
+      : pending || speechPhase === "speaking" || speechPhase === "buffering"
+          ? liveModeActive ? "Speak to interrupt" : "Hold M to queue"
         : activeSttSupported
           ? liveModeActive ? "Live on" : "Hold M to talk"
           : "Unavailable";
@@ -1603,25 +1678,26 @@ export function App() {
       ? "Transcribing"
       : recognizing
         ? pending ? "Queueing" : "Listening"
-        : liveModeActive
+      : liveModeActive
           ? "Live"
           : pending || speechPhase === "speaking" || speechPhase === "buffering"
-            ? "Mute ready"
+            ? "Queue ready"
             : activeSttSupported
-              ? "M ready"
+              ? "Ready"
               : "Unavailable";
   const dockTalkLabel =
     sttPhase === "transcribing"
       ? "Transcribing"
       : liveModeActive
         ? "Live on"
-        : recognizing
-          ? pending ? "Click M to send" : "Release to send"
-          : pending || speechPhase === "speaking" || speechPhase === "buffering"
-            ? "Mute + talk"
+      : recognizing
+          ? pending ? "Release to queue" : "Release to send"
+      : pending || speechPhase === "speaking" || speechPhase === "buffering"
+            ? "Hold M to queue"
             : "Hold M";
   const canPushToTalkInterrupt = pending || speechPhase === "speaking" || speechPhase === "buffering";
   const pushToTalkDisabled =
+    threadRequired ||
     liveModeActive ||
     sttPhase === "transcribing" ||
     (!canPushToTalkInterrupt && (sparkBlocked || !activeSttSupported));
@@ -1790,9 +1866,9 @@ export function App() {
   const desktopOverlayScale = desktopState?.overlayScale ?? 1;
   const desktopDensity = desktopOverlayScale < 0.62 ? "micro" : desktopOverlayScale < 0.75 ? "compact" : "normal";
   const desktopOverlayStyle = { "--desktop-overlay-scale": String(desktopOverlayScale) } as CSSProperties;
-  const desktopThreadBlocked = isDesktopOverlay && isPlaceholderSession(session);
+  const desktopThreadBlocked = isDesktopOverlay && threadRequired;
   const desktopProjectLabel = desktopThreadBlocked ? "Select thread" : projectDisplayTitle;
-  const desktopThreadLabel = desktopThreadBlocked ? "Codex" : activeForkTitle;
+  const desktopThreadLabel = desktopThreadBlocked ? "No thread selected" : activeForkTitle;
   const desktopHudStatus = recognizing
     ? "Listening"
     : desktopThreadBlocked
@@ -1883,7 +1959,12 @@ export function App() {
             </div>
             <div className="desktop-hud-actions desktop-overlay-nodrag">
               {overlayMicButton}
-              <button type="button" onClick={() => void interruptTurn()} disabled={!pending && speechPhase === "idle"}>
+              <button
+                type="button"
+                className="desktop-hud-interrupt-button"
+                onClick={() => void interruptTurn()}
+                disabled={!pending && speechPhase === "idle"}
+              >
                 Interrupt
               </button>
               <button
@@ -1911,6 +1992,7 @@ export function App() {
                   api={api}
                   currentThreadId={session?.threadId}
                   disabled={sourcePending}
+                  workspacePath={projectState?.project.workspacePath}
                   onSelect={(uri) => {
                     setSourceDraft(uri);
                     void updateSourceThread(uri).then((sourceUri) => {
@@ -1918,43 +2000,45 @@ export function App() {
                     });
                   }}
                 />
-                <button
-                  type="button"
-                  className="desktop-icon-button"
-                  onClick={() => void desktopBridge()?.openFullApp()}
-                  aria-label="Open full app"
-                  title="Open full app"
-                >
-                  <DesktopIcon name="app" />
-                  <span>Open app</span>
-                </button>
-                <button
-                  type="button"
-                  className="desktop-icon-button"
-                  onClick={() => setDesktopOverlayExpanded(false)}
-                  aria-label="Collapse"
-                  title="Collapse"
-                >
-                  <DesktopIcon name="collapse" />
-                  <span>Collapse</span>
-                </button>
-                <button
-                  type="button"
-                  className="desktop-icon-button"
-                  onClick={() => void desktopBridge()?.hideOverlay()}
-                  aria-label={`Hide overlay (${desktopShortcutLabel})`}
-                  title={desktopShortcutLabel}
-                >
-                  <DesktopIcon name="hide" />
-                  <span>Hide</span>
-                </button>
+                <div className="desktop-panel-window-actions" aria-label="Window controls">
+                  <button
+                    type="button"
+                    className="desktop-icon-button"
+                    onClick={() => void desktopBridge()?.openFullApp()}
+                    aria-label="Open full app"
+                    title="Open full app"
+                  >
+                    <DesktopIcon name="app" />
+                    <span>Open app</span>
+                  </button>
+                  <button
+                    type="button"
+                    className="desktop-icon-button"
+                    onClick={() => setDesktopOverlayExpanded(false)}
+                    aria-label="Collapse"
+                    title="Collapse"
+                  >
+                    <DesktopIcon name="collapse" />
+                    <span>Collapse</span>
+                  </button>
+                  <button
+                    type="button"
+                    className="desktop-icon-button"
+                    onClick={() => void desktopBridge()?.hideOverlay()}
+                    aria-label={`Hide overlay (${desktopShortcutLabel})`}
+                    title={desktopShortcutLabel}
+                  >
+                    <DesktopIcon name="hide" />
+                    <span>Hide</span>
+                  </button>
+                </div>
               </div>
             </header>
 
             <article className="desktop-overlay-card desktop-overlay-transcript">
               <div className="live-card-header">
                 <span>Scratch</span>
-                <button type="button" onClick={() => void desktopBridge()?.openFullApp()} disabled={desktopThreadBlocked}>Open transcript</button>
+                <button type="button" onClick={() => void desktopBridge()?.openFullApp()} disabled={desktopThreadBlocked}>Open app</button>
               </div>
               {desktopThreadBlocked ? (
                 <section className="compact-turn compact-thread-required">
@@ -2014,7 +2098,12 @@ export function App() {
                 <strong>{liveModeActive ? "On" : "Off"}</strong>
               </button>
               {overlayMicButton}
-              <button type="button" onClick={() => void interruptTurn()} disabled={desktopThreadBlocked || (!pending && speechPhase === "idle")}>
+              <button
+                type="button"
+                className="desktop-overlay-interrupt"
+                onClick={() => void interruptTurn()}
+                disabled={desktopThreadBlocked || (!pending && speechPhase === "idle")}
+              >
                 <span>Interrupt</span>
                 <strong>{speechPhase === "speaking" ? "Speaking" : "Stop"}</strong>
               </button>
@@ -2024,6 +2113,7 @@ export function App() {
               className="desktop-overlay-composer"
               onSubmit={(event) => {
                 event.preventDefault();
+                if (desktopThreadBlocked) return;
                 void sendTurn(draft);
               }}
             >
@@ -2073,12 +2163,13 @@ export function App() {
         </div>
         <div className="source-form command-source-form">
           <span className="source-current" title={session?.sourceUri}>
-            {activeProjectSource?.title ?? projectState?.project.title ?? "Pick Codex thread"}
+            {threadRequired ? "Select Codex thread" : activeProjectSource?.title ?? projectState?.project.title ?? "Pick Codex thread"}
           </span>
           <ThreadPicker
             api={api}
             currentThreadId={session?.threadId}
             disabled={sourcePending}
+            workspacePath={projectState?.project.workspacePath}
             onSelect={(uri) => {
               setSourceDraft(uri);
               void updateSourceThread(uri).then((sourceUri) => {
@@ -2250,17 +2341,18 @@ export function App() {
             <article className="live-transcript-card">
               <div className="live-card-header">
                 <span>Scratch</span>
-                <button type="button" onClick={() => setTranscriptDrawerOpen(true)}>Open transcript</button>
+                <button type="button" onClick={() => setTranscriptDrawerOpen(true)} disabled={threadRequired}>Open transcript</button>
               </div>
               {state.loading && <p>Loading session.</p>}
-              {!state.loading && transcript.length === 0 && <p>Say or type a scratch turn.</p>}
-              {latestUserEntry && (
+              {!state.loading && threadRequired && <p>Select a Codex thread to start.</p>}
+              {!state.loading && !threadRequired && transcript.length === 0 && <p>Say or type a scratch turn.</p>}
+              {!threadRequired && latestUserEntry && (
                 <section className="compact-turn compact-user">
                   <span>You</span>
                   <p>{entryMainText(latestUserEntry)}</p>
                 </section>
               )}
-              {assistantDraftVisible ? (
+              {!threadRequired && (assistantDraftVisible ? (
                 <section className="compact-turn compact-assistant">
                   <span>{assistantDraftLabel}</span>
                   <p>{assistantDraftText}</p>
@@ -2281,8 +2373,8 @@ export function App() {
                     </details>
                   )}
                 </section>
-              )}
-              {queuedTurnPreview && (
+              ))}
+              {!threadRequired && queuedTurnPreview && (
                 <section className="compact-turn compact-queued">
                   <span>Queued</span>
                   <p>{queuedTurnPreview}</p>
@@ -2296,7 +2388,7 @@ export function App() {
                 type="button"
                 onClick={() => setLiveActive(!liveModeActiveRef.current)}
                 className={liveModeActive ? "dock-active" : ""}
-                disabled={!LIVE_MODE_RUNTIME_ENABLED}
+                disabled={threadRequired || !LIVE_MODE_RUNTIME_ENABLED}
                 title="Live mode is paused until echo-safe turn detection is ready."
               >
                 <span>Live</span>
@@ -2330,11 +2422,11 @@ export function App() {
               >
                 <strong>{dockTalkLabel}</strong>
               </button>
-              <button type="button" onClick={() => void interruptTurn()} disabled={!pending && speechPhase === "idle"}>
+              <button type="button" onClick={() => void interruptTurn()} disabled={threadRequired || (!pending && speechPhase === "idle")}>
                 <span>Interrupt</span>
                 <strong>{speechPhase === "speaking" ? "Speaking" : "Stop"}</strong>
               </button>
-              <button type="button" onClick={clearScratch} disabled={pending || transcript.length === 0}>
+              <button type="button" onClick={clearScratch} disabled={threadRequired || pending || transcript.length === 0}>
                 <span>Clear</span>
                 <strong>{prewarm.status === "ready" ? `Ready ${formatMs(prewarm.elapsedMs)}` : prewarm.status === "warming" ? "Warming" : "Reset"}</strong>
               </button>
@@ -2343,11 +2435,18 @@ export function App() {
               className="composer command-composer"
               onSubmit={(event) => {
                 event.preventDefault();
+                if (threadRequired) return;
                 void sendTurn(draft);
               }}
             >
-              <textarea value={draft} onChange={(event) => setDraft(event.target.value)} placeholder="Type a scratch turn" rows={3} />
-              <button type="submit" disabled={!draft.trim() || sparkBlocked}>{pending ? "Queue" : "Send"}</button>
+              <textarea
+                value={draft}
+                onChange={(event) => setDraft(event.target.value)}
+                placeholder={threadRequired ? "Select a Codex thread first" : "Type a scratch turn"}
+                rows={3}
+                disabled={threadRequired}
+              />
+              <button type="submit" disabled={threadRequired || !draft.trim() || sparkBlocked}>{pending ? "Queue" : "Send"}</button>
             </form>
           </section>
         </section>
