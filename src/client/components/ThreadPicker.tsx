@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import type { ProviderThreadSummary } from "../../shared/types.js";
 import { chartDateLabel } from "../lib/labels.js";
@@ -9,6 +9,7 @@ export type ThreadPickerProps = {
   disabled: boolean;
   workspacePath?: string;
   onSelect: (sourceUri: string) => void;
+  openRequest?: number;
 };
 
 function workspaceLabel(cwd: string | undefined): string {
@@ -23,21 +24,39 @@ function threadTitle(thread: ProviderThreadSummary): string {
 
 // Recent-conversation picker over GET /api/provider/threads so switching
 // projects does not require pasting a codex://threads/... URI by hand.
-export function ThreadPicker({ api, currentThreadId, disabled, workspacePath, onSelect }: ThreadPickerProps) {
+export function ThreadPicker({ api, currentThreadId, disabled, workspacePath, onSelect, openRequest = 0 }: ThreadPickerProps) {
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState("");
   const [scopeAllProjects, setScopeAllProjects] = useState(false);
   const [threads, setThreads] = useState<ProviderThreadSummary[] | null>(null);
   const [previewThreadId, setPreviewThreadId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const triggerRef = useRef<HTMLButtonElement | null>(null);
+  const searchRef = useRef<HTMLInputElement | null>(null);
+  const [activeIndex, setActiveIndex] = useState(-1);
   const previewThread = threads?.find((thread) => thread.threadId === previewThreadId) ?? null;
   const scopedToWorkspace = Boolean(workspacePath && !scopeAllProjects);
 
   function commitThread(thread: ProviderThreadSummary) {
-    setOpen(false);
-    setPreviewThreadId(null);
+    closePicker();
     onSelect(thread.sourceUri);
   }
+
+  function closePicker(): void {
+    setOpen(false);
+    setPreviewThreadId(null);
+    window.setTimeout(() => triggerRef.current?.focus(), 0);
+  }
+
+  useEffect(() => {
+    if (openRequest > 0) setOpen(true);
+  }, [openRequest]);
+
+  useEffect(() => {
+    if (!open) return;
+    setActiveIndex(-1);
+    window.setTimeout(() => searchRef.current?.focus(), 0);
+  }, [open]);
 
   useEffect(() => {
     if (!open) return;
@@ -67,14 +86,39 @@ export function ThreadPicker({ api, currentThreadId, disabled, workspacePath, on
 
   return (
     <div className="thread-picker">
-      <button type="button" disabled={disabled} onClick={() => setOpen((current) => !current)} title="Pick a recent Codex conversation">
+      <button ref={triggerRef} type="button" disabled={disabled} onClick={() => open ? closePicker() : setOpen(true)} title="Pick a recent Codex conversation" aria-expanded={open} aria-haspopup="listbox">
         {open ? "Close" : "Finder"}
       </button>
       {open && (
-        <div className="thread-picker-list" role="listbox" aria-label="Recent Codex conversations">
+        <div
+          className="thread-picker-list"
+          role="listbox"
+          aria-label="Recent Codex conversations"
+          onKeyDown={(event) => {
+            if (event.key === "Escape") {
+              event.preventDefault();
+              closePicker();
+              return;
+            }
+            if (!threads?.length) return;
+            if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+              event.preventDefault();
+              const delta = event.key === "ArrowDown" ? 1 : -1;
+              const next = activeIndex < 0 ? (delta > 0 ? 0 : threads.length - 1) : (activeIndex + delta + threads.length) % threads.length;
+              setActiveIndex(next);
+              setPreviewThreadId(threads[next].threadId);
+              document.getElementById(`thread-option-${threads[next].threadId}`)?.focus();
+            }
+            if (event.key === "Enter" && previewThread) {
+              event.preventDefault();
+              commitThread(previewThread);
+            }
+          }}
+        >
           <label className="thread-picker-search">
             <span>Find thread</span>
             <input
+              ref={searchRef}
               value={query}
               onChange={(event) => setQuery(event.target.value)}
               placeholder="Search by thread or project"
@@ -101,8 +145,9 @@ export function ThreadPicker({ api, currentThreadId, disabled, workspacePath, on
               )}
             </section>
           )}
-          {threads?.map((thread) => (
+          {threads?.map((thread, index) => (
             <button
+              id={`thread-option-${thread.threadId}`}
               key={thread.threadId}
               type="button"
               className={[
@@ -111,6 +156,10 @@ export function ThreadPicker({ api, currentThreadId, disabled, workspacePath, on
               ].filter(Boolean).join(" ")}
               title={`${workspaceLabel(thread.cwd)} · ${threadTitle(thread)} · ${thread.sourceUri}`}
               onClick={() => setPreviewThreadId(thread.threadId)}
+              onFocus={() => {
+                setActiveIndex(index);
+                setPreviewThreadId(thread.threadId);
+              }}
               onDoubleClick={() => commitThread(thread)}
             >
               <span className="thread-picker-cell">

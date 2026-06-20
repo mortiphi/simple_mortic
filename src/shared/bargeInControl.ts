@@ -6,7 +6,6 @@ export type BargeInActivityInput = {
   speaking: boolean;
   speechQueueLength: number;
   progressSpeechActive: boolean;
-  liveAssistantText?: string;
 };
 
 export function hasAssistantOutputForBargeIn(input: BargeInActivityInput): boolean {
@@ -15,7 +14,6 @@ export function hasAssistantOutputForBargeIn(input: BargeInActivityInput): boole
     input.speechPhase !== "idle" ||
     input.speaking ||
     input.speechQueueLength > 0 ||
-    input.progressSpeechActive ||
-    Boolean(input.liveAssistantText?.trim())
+    input.progressSpeechActive
   );
 }

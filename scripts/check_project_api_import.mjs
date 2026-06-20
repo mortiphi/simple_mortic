@@ -33,11 +33,11 @@ const storage = {
     session = next;
   },
   resetSource: async (next) => {
-    session = { ...session, ...next, transcript: [], updatedAt: new Date().toISOString() };
+    session = { ...session, ...next, transcript: [], activeTurn: undefined, queuedTurn: undefined, updatedAt: new Date().toISOString() };
     return session;
   },
   clear: async () => {
-    session = { ...session, transcript: [], updatedAt: new Date().toISOString() };
+    session = { ...session, transcript: [], activeTurn: undefined, queuedTurn: undefined, updatedAt: new Date().toISOString() };
     return session;
   },
   setActiveTurn: async (turn) => {
@@ -46,6 +46,14 @@ const storage = {
   },
   updateActiveTurn: async (updater) => {
     session = { ...session, activeTurn: updater(session.activeTurn, session), updatedAt: new Date().toISOString() };
+    return session;
+  },
+  setQueuedTurn: async (turn) => {
+    session = { ...session, queuedTurn: turn, updatedAt: new Date().toISOString() };
+    return session;
+  },
+  updateQueuedTurn: async (updater) => {
+    session = { ...session, queuedTurn: updater(session.queuedTurn, session), updatedAt: new Date().toISOString() };
     return session;
   },
   append: async (entry) => {
@@ -81,6 +89,7 @@ const runtimeContextFor = (cwd) => ({
 const app = await createMorticServer({
   storage,
   projectStore,
+  canonicalMemoryEnabled: true,
   runtimeContext: runtimeContextFor(workspacePath),
   // The thread reserved for workspace B resolves there; everything else stays in workspace A.
   resolveRuntimeContext: async ({ threadId }) => runtimeContextFor(threadId === threadIdB ? workspacePathB : workspacePath)

@@ -6,6 +6,7 @@ contextBridge.exposeInMainWorld("morticDesktop", {
   hideOverlay: () => ipcRenderer.invoke("mortic-desktop:hide-overlay"),
   openFullApp: () => ipcRenderer.invoke("mortic-desktop:open-full-app"),
   rememberSource: (sourceUri) => ipcRenderer.invoke("mortic-desktop:remember-source", String(sourceUri ?? "")),
+  openExternal: (url) => ipcRenderer.invoke("mortic-desktop:open-external", String(url ?? "")),
   onDesktopState: (listener) => {
     const wrapped = (_event, state) => listener(state);
     ipcRenderer.on("mortic-desktop:state", wrapped);

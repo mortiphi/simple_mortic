@@ -9,7 +9,7 @@ import { WebSocket } from "ws";
 const execFileAsync = promisify(execFile);
 
 const DEFAULT_API = "http://127.0.0.1:5152";
-const FIRST_CHUNK_CHARS = 40;
+const FIRST_CHUNK_CHARS = 16;
 const MIN_CHUNK_CHARS = 90;
 const MAX_CHUNK_CHARS = 220;
 const AUDIO_LEAD_MS = 80;
@@ -50,6 +50,16 @@ function findSentenceEnd(text, minChars) {
   return null;
 }
 
+function findClauseEnd(text, minChars) {
+  const clausePattern = /[,;:](?=\s|$)|[.!?](?=\s|$)|\n+/g;
+  let match;
+  while ((match = clausePattern.exec(text)) !== null) {
+    const end = match.index + match[0].length;
+    if (end >= minChars && isSpeakableText(text.slice(0, end))) return end;
+  }
+  return null;
+}
+
 function lastWhitespaceBefore(text, maxChars) {
   const safeMax = Math.min(maxChars, text.length);
   const index = text.slice(0, safeMax).search(/\s+\S*$/);
@@ -73,7 +83,7 @@ function chooseSpeakableEnd(text, start, force) {
     return start + (whitespaceEnd ?? MAX_CHUNK_CHARS);
   }
 
-  const sentenceEnd = findSentenceEnd(remaining, minChars);
+  const sentenceEnd = start === 0 ? findClauseEnd(remaining, minChars) : findSentenceEnd(remaining, minChars);
   if (sentenceEnd !== null && sentenceEnd <= MAX_CHUNK_CHARS) return start + sentenceEnd;
   if (remaining.length < MAX_CHUNK_CHARS) return null;
   const whitespaceEnd = lastWhitespaceBefore(remaining, MAX_CHUNK_CHARS);

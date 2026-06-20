@@ -8,34 +8,28 @@ import {
   sttProviders,
   transportProviders,
   ttsProviders,
+  type AudioLeaseState,
+  type ClientSurface,
   type CodexAccessPreset,
   type CodexRuntimePolicy,
   type AgentState,
-  type CanonicalDelta,
-  type ConversationArtifact,
-  type ExtractedItem,
-  type ExtractionStatus,
   type InputPolicy,
   type LiveKitStatus,
   type MorticSession,
+  type MorticPreferences,
+  type MorticPreferencesPatch,
   type OnboardingStatusResponse,
   type PrewarmResponse,
-  type ProjectArtifactPreviewResponse,
-  type ProjectCanonicalStateResponse,
-  type ProjectChartResponse,
-  type ProjectStateResponse,
-  type ProviderForkAccessResponse,
-  type ProviderForkContinuation,
-  type ProviderReference,
   type AppServerActivity,
   type AppServerConfigMetadata,
   type AppServerModelOption,
   type AppServerTrace,
   type ProgressSpeechTrace,
   type ReasoningEffort,
-  type ScratchSessionNode,
   type ScratchMode,
-  type SessionResponse,
+  type SessionSourceIdentity,
+  type SessionSnapshot,
+  type SessionStreamEvent,
   type SparkContextCompactResponse,
   type SparkContextPreflight,
   type SparkContextPreflightResponse,
@@ -43,26 +37,20 @@ import {
   type SttStatus,
   type TransportProvider,
   type TtsProvider,
-  type TtsStatus,
-  type UpdateExtractedItemRequest
+  type TtsStatus
 } from "../shared/types.js";
 import { redactThreadId } from "../shared/threadUri.js";
-import { contextWorkReduction, estimateTextTokens, estimateTranscriptTokens, percentReduction } from "../shared/tokenEstimate.js";
 import { modelProfile } from "../shared/modelProfiles.js";
-import { ChartTranscriptPreview, MarkdownContent, TaskPlanDetails, dedupeExtractionItems, normalizeExtractionText } from "./components/Markdown.js";
-import { CanonicalStateModal, ChartModal } from "./components/ChartModal.js";
-import { ExtractionReviewModal, HandoffReviewModal, TranscriptDrawer } from "./components/SessionModals.js";
-import { InsightsPanel } from "./components/ProjectPanels.js";
-import { ForkActionSheet } from "./components/ForkActionSheet.js";
-import { OnboardingScreen } from "./components/OnboardingScreen.js";
+import { MarkdownContent } from "./components/Markdown.js";
+import { ClipboardFallbackDialog, ConfirmDialog, HandoffReviewModal, TranscriptDrawer } from "./components/SessionModals.js";
+import { HandoffPanel } from "./components/HandoffPanel.js";
 import { ThreadPicker } from "./components/ThreadPicker.js";
-import { apiBase, readStoredCodexAccess, readStoredEffort, readStoredModel, readStoredScratchMode, readStoredServiceTier, readStoredSttProvider, readStoredTransportProvider, readStoredTtsProvider, readStoredVoiceCaveman, writeStoredSetting } from "./lib/api.js";
+import { apiBase, readStoredCodexAccess, readStoredEffort, readStoredModel, readStoredScratchMode, readStoredServiceTier, readStoredSttProvider, readStoredTransportProvider, readStoredTtsProvider, readStoredVoiceCaveman } from "./lib/api.js";
 import { ApiState, PrewarmState } from "./lib/clientTypes.js";
 import { desktopBridge, type MorticDesktopState } from "./desktopBridge.js";
-import { formatCount, formatMs, formatSignedMs } from "./lib/format.js";
-import { SETTINGS_VERSION, artifactTitle, chartDateLabel, deltaLifecycleLabel, effortLabels, entryLabel, entryMainText, entryNotesLabel, entryParserLabel, extractionActionLabel, extractionEvidenceLabel, extractionReasons, extractionReviewSort, extractionStatusLabels, extractionTypeLabels, extractionTypeOrder, extractionTypeShortLabels, isExtractionReviewCandidate, modeLabels, providerActionText, providerRefTitle, sttProviderLabels, transportLabels, ttsProviderLabels } from "./lib/labels.js";
+import { formatMs, formatSignedMs } from "./lib/format.js";
+import { effortLabels, entryMainText, entryNotesLabel, modeLabels, sttProviderLabels, transportLabels, ttsProviderLabels } from "./lib/labels.js";
 import { clientUnknownSparkPreflight, needsModelTransitionPreflight, sparkPreflightLabel } from "./lib/spark.js";
-import { LIVE_MODE_RUNTIME_ENABLED } from "./lib/voice.js";
 import { useVoiceEngine } from "./voice/useVoiceEngine.js";
 
 const PLACEHOLDER_THREAD_ID = "00000000-0000-0000-0000-000000000000";
@@ -76,6 +64,37 @@ function workspaceTitle(workspacePath: string | undefined): string | null {
 
 function isPlaceholderSession(session: MorticSession | null | undefined): boolean {
   return session?.threadId === PLACEHOLDER_THREAD_ID;
+}
+
+function deriveInteractionState(input: {
+  threadRequired: boolean;
+  codexUnavailable: boolean;
+  recognizing: boolean;
+  sttPhase: "idle" | "listening" | "transcribing";
+  pending: boolean;
+  speechPhase: "idle" | "buffering" | "speaking";
+  agentState: AgentState;
+}): "Select thread" | "Ready" | "Listening" | "Thinking" | "Speaking" | "Codex offline" | "Error" {
+  if (input.threadRequired) return "Select thread";
+  if (input.codexUnavailable) return "Codex offline";
+  if (input.agentState === "error") return "Error";
+  if (input.recognizing || input.sttPhase === "listening" || input.sttPhase === "transcribing") return "Listening";
+  if (input.speechPhase === "speaking" || input.speechPhase === "buffering") return "Speaking";
+  if (input.pending || input.agentState === "thinking" || input.agentState === "warming" || input.agentState === "transcribing") return "Thinking";
+  return "Ready";
+}
+
+function rendererClientId(): string {
+  const key = "mortic.rendererClientId";
+  try {
+    const existing = window.sessionStorage.getItem(key);
+    if (existing) return existing;
+    const created = crypto.randomUUID();
+    window.sessionStorage.setItem(key, created);
+    return created;
+  } catch {
+    return crypto.randomUUID();
+  }
 }
 
 function DesktopIcon({ name }: { name: "app" | "collapse" | "hide" }) {
@@ -96,18 +115,13 @@ function DesktopIcon({ name }: { name: "app" | "collapse" | "hide" }) {
   if (name === "collapse") {
     return (
       <svg className="desktop-icon" {...common}>
-        <path d="M7 4v6H1" />
-        <path d="m1 10 6-6" />
-        <path d="M17 20v-6h6" />
-        <path d="m23 14-6 6" />
+        <path d="m6 9 6 6 6-6" />
       </svg>
     );
   }
   return (
     <svg className="desktop-icon" {...common}>
       <path d="M5 12h14" />
-      <path d="M8 6h8" />
-      <path d="M8 18h8" />
     </svg>
   );
 }
@@ -338,8 +352,16 @@ export function App() {
   const api = useMemo(apiBase, []);
   const surface = useMemo(() => new URLSearchParams(window.location.search).get("surface"), []);
   const isDesktopOverlay = surface === "overlay";
+  const clientSurface: ClientSurface = isDesktopOverlay ? "overlay" : desktopBridge() ? "app" : "browser";
+  const clientId = useMemo(rendererClientId, []);
+  const latestSessionRevisionRef = useRef(-1);
+  const preferencePatchRef = useRef("");
+  const draftPatchRef = useRef("");
   const [desktopState, setDesktopState] = useState<MorticDesktopState | null>(null);
   const [state, setState] = useState<ApiState>({ session: null, loading: true, error: null });
+  const [sourceIdentity, setSourceIdentity] = useState<SessionSourceIdentity | null>(null);
+  const [serverPreferences, setServerPreferences] = useState<MorticPreferences | null>(null);
+  const [audioLease, setAudioLease] = useState<AudioLeaseState>({ phase: "idle", epoch: 0 });
   const [onboarding, setOnboarding] = useState<OnboardingStatusResponse | null>(null);
   const [onboardingBusy, setOnboardingBusy] = useState(false);
   const [scratchMode, setScratchMode] = useState<ScratchMode>("voice");
@@ -360,41 +382,12 @@ export function App() {
   const [handoff, setHandoff] = useState("");
   const [shortHandoff, setShortHandoff] = useState("");
   const [fullHandoff, setFullHandoff] = useState("");
-  const [projectState, setProjectState] = useState<ProjectStateResponse | null>(null);
-  const [projectPending, setProjectPending] = useState(false);
-  const [projectError, setProjectError] = useState<string | null>(null);
-  const [canonicalState, setCanonicalState] = useState<ProjectCanonicalStateResponse | null>(null);
-  const [canonicalStateOpen, setCanonicalStateOpen] = useState(false);
-  const [canonicalStatePending, setCanonicalStatePending] = useState(false);
-  const [chartState, setChartState] = useState<ProjectChartResponse | null>(null);
-  const [chartOpen, setChartOpen] = useState(false);
-  const [chartPending, setChartPending] = useState(false);
-  const projectViewSeqRef = useRef(0);
-  const projectSourceSwitchPendingRef = useRef(false);
-  const projectFetchSeqRef = useRef(0);
-  const chartFetchSeqRef = useRef(0);
-  const chartPendingSeqRef = useRef(0);
-  const canonicalFetchSeqRef = useRef(0);
-  const canonicalPendingSeqRef = useRef(0);
-  const artifactFetchSeqRef = useRef(0);
-  const artifactPendingSeqRef = useRef(0);
-  const [chartSearch, setChartSearch] = useState("");
-  const [chartTypeFilter, setChartTypeFilter] = useState<ExtractedItem["type"] | "all">("all");
-  const [selectedChartCheckpointId, setSelectedChartCheckpointId] = useState("");
-  const [selectedChartDeltaId, setSelectedChartDeltaId] = useState("");
-  const [forkSheetSessionId, setForkSheetSessionId] = useState<string | null>(null);
-  const [forkAccessPending, setForkAccessPending] = useState(false);
-  const [artifactPreview, setArtifactPreview] = useState<ProjectArtifactPreviewResponse | null>(null);
-  const [artifactPending, setArtifactPending] = useState(false);
+  const [copiedHandoff, setCopiedHandoff] = useState<"short" | "full" | null>(null);
+  const [clipboardFallback, setClipboardFallback] = useState("");
+  const [clearConfirmOpen, setClearConfirmOpen] = useState(false);
+  const [finderOpenRequest, setFinderOpenRequest] = useState(0);
   const [transcriptDrawerOpen, setTranscriptDrawerOpen] = useState(false);
   const [handoffReviewOpen, setHandoffReviewOpen] = useState(false);
-  const [extractionReviewOpen, setExtractionReviewOpen] = useState(false);
-  const [extractionReviewTab, setExtractionReviewTab] = useState<"pending" | "approved">("pending");
-  const [editingExtractionId, setEditingExtractionId] = useState<string | null>(null);
-  const [editingExtractionType, setEditingExtractionType] = useState<ExtractedItem["type"]>("project_state");
-  const [editingExtractionTitle, setEditingExtractionTitle] = useState("");
-  const [editingExtractionBody, setEditingExtractionBody] = useState("");
-  const [editingExtractionTaskPlan, setEditingExtractionTaskPlan] = useState("");
   const [sourceDraft, setSourceDraft] = useState("");
   const [sourcePending, setSourcePending] = useState(false);
   const [prewarm, setPrewarm] = useState<PrewarmState>({ status: "idle" });
@@ -480,6 +473,7 @@ export function App() {
   const session = state.session;
   const sessionRef = useRef<MorticSession | null>(null);
   const threadRequired = isPlaceholderSession(session);
+  const codexUnavailable = !session?.codex.available;
   const transcript = session?.transcript ?? [];
   const activeTurn = session?.activeTurn;
   const activeAppServerTrace = activeTurn?.appServerTrace ?? activeTurn?.progressTrace;
@@ -532,12 +526,29 @@ export function App() {
     (!sparkPreflightPending && !sparkContext.compactionRequired && sparkApprovalKey === sparkContext.key);
   const sparkBlocked =
     needsModelTransitionPreflight(effectiveCodexModel) && (sparkPreflightPending || sparkCompactionPending || !sparkApproved);
+  const isAudioOwner = audioLease.ownerClientId === clientId;
+
+  async function requestAudioOwnership(): Promise<boolean> {
+    if (isAudioOwner) return true;
+    try {
+      const response = await fetch(`${api}/api/session/audio-command`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ clientId, surface: clientSurface, command: "barge-in" })
+      });
+      if (!response.ok) return false;
+      const payload = (await response.json()) as { audioLease: AudioLeaseState };
+      setAudioLease(payload.audioLease);
+      return payload.audioLease.ownerClientId === clientId;
+    } catch {
+      return false;
+    }
+  }
 
   const {
     activeSttSupported,
     recognizing,
     recognizingRef,
-    liveModeActiveRef,
     speechError,
     setSpeechError,
     speechPhase,
@@ -557,12 +568,13 @@ export function App() {
     resetSpeechPlayback,
     resetQueuedTurn,
     sendTurn,
-    interruptTurn,
-    setLiveActive,
+    interruptTurn: interruptLocalAudio,
     startPushToTalkCapture,
     stopPushToTalkCapture
   } = useVoiceEngine({
     api,
+    clientId,
+    surface: clientSurface,
     state,
     setState,
     scratchMode,
@@ -597,21 +609,123 @@ export function App() {
     inputPolicy,
     setInputPolicy,
     liveModeActive,
-    setLiveModeActive
+    setLiveModeActive,
+    isAudioOwner,
+    requestAudioOwnership,
+    turnsDisabled: threadRequired || codexUnavailable
   });
+
+  async function interruptTurn(): Promise<void> {
+    interruptLocalAudio();
+    try {
+      const response = await fetch(`${api}/api/session/audio-command`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ clientId, surface: clientSurface, command: "interrupt" })
+      });
+      if (response.ok) setAudioLease(((await response.json()) as { audioLease: AudioLeaseState }).audioLease);
+    } catch {
+      // Local audio has already stopped; shared recovery happens on the next heartbeat.
+    }
+  }
+
+  async function cancelQueuedTurn(): Promise<void> {
+    try {
+      const response = await fetch(`${api}/api/session/queued-turn`, { method: "DELETE" });
+      if (!response.ok) return;
+      const snapshot = (await response.json()) as SessionSnapshot;
+      setState({ session: snapshot.session, loading: false, error: null });
+    } catch {
+      // Queue state is server-owned; next session snapshot will reconcile.
+    }
+  }
+
+  async function hideDesktopOverlay(): Promise<void> {
+    interruptLocalAudio();
+    await desktopBridge()?.hideOverlay();
+  }
 
   useEffect(() => {
     sessionRef.current = session;
   }, [session]);
 
   useEffect(() => {
+    const audioPhase = recognizing
+      ? "listening"
+      : sttPhase === "transcribing"
+        ? "transcribing"
+        : speechPhase === "speaking"
+          ? "speaking"
+          : speechPhase === "buffering"
+            ? "buffering"
+            : "idle";
+    const publish = async () => {
+      try {
+        const response = await fetch(`${api}/api/session/presence`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            clientId,
+            surface: clientSurface,
+            focused: document.hasFocus(),
+            visible: document.visibilityState === "visible",
+            audioPhase
+          })
+        });
+        if (response.ok) setAudioLease(((await response.json()) as { audioLease: AudioLeaseState }).audioLease);
+      } catch {
+        // Session SSE and heartbeat expiry recover ownership after reconnect.
+      }
+    };
+    void publish();
+    const heartbeat = window.setInterval(publish, 5_000);
+    window.addEventListener("focus", publish);
+    window.addEventListener("blur", publish);
+    document.addEventListener("visibilitychange", publish);
+    return () => {
+      window.clearInterval(heartbeat);
+      window.removeEventListener("focus", publish);
+      window.removeEventListener("blur", publish);
+      document.removeEventListener("visibilitychange", publish);
+    };
+  }, [api, clientId, clientSurface, recognizing, speechPhase, sttPhase]);
+
+  useEffect(() => {
+    const release = () => {
+      void fetch(`${api}/api/session/presence`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          clientId,
+          surface: clientSurface,
+          focused: false,
+          visible: false,
+          audioPhase: "idle"
+        }),
+        keepalive: true
+      }).catch(() => undefined);
+    };
+    window.addEventListener("pagehide", release);
+    window.addEventListener("beforeunload", release);
+    return () => {
+      window.removeEventListener("pagehide", release);
+      window.removeEventListener("beforeunload", release);
+    };
+  }, [api, clientId, clientSurface]);
+
+  useEffect(() => {
     const bridge = desktopBridge();
     if (!bridge?.onAudioCancel) return;
     return bridge.onAudioCancel(() => {
-      resetSpeechPlayback();
+      interruptLocalAudio();
       resetQueuedTurn();
+      void fetch(`${api}/api/session/audio-command`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ clientId, surface: clientSurface, command: "hide" })
+      });
     });
-  }, [resetQueuedTurn, resetSpeechPlayback]);
+  }, [api, clientId, clientSurface, interruptLocalAudio, resetQueuedTurn]);
 
   async function refreshOnboarding(): Promise<void> {
     setOnboardingBusy(true);
@@ -636,174 +750,83 @@ export function App() {
     setPending(nextPending);
   }
 
-  function invalidateProjectViews(): number {
-    const seq = projectViewSeqRef.current + 1;
-    projectViewSeqRef.current = seq;
-    projectFetchSeqRef.current += 1;
-    chartFetchSeqRef.current += 1;
-    canonicalFetchSeqRef.current += 1;
-    artifactFetchSeqRef.current += 1;
-    chartPendingSeqRef.current = 0;
-    canonicalPendingSeqRef.current = 0;
-    artifactPendingSeqRef.current = 0;
-    setProjectState(null);
-    setChartState(null);
-    setCanonicalState(null);
-    setArtifactPreview(null);
-    setChartPending(false);
-    setCanonicalStatePending(false);
-    setArtifactPending(false);
-    setProjectError(null);
-    setChartOpen(false);
-    setCanonicalStateOpen(false);
-    setExtractionReviewOpen(false);
-    setForkSheetSessionId(null);
-    setSelectedChartCheckpointId("");
-    setSelectedChartDeltaId("");
-    return seq;
+  function legacyPreferences(payload: SessionSnapshot): MorticPreferences {
+    const config = payload.appServerConfig;
+    const defaultModel = config?.selectedModel ?? config?.defaultModel ?? payload.defaultCodexModel;
+    const storedModel = readStoredModel(defaultModel);
+    const model = config?.models.some((item) => item.model === storedModel || item.id === storedModel) ? storedModel : defaultModel;
+    const modelOption = config?.models.find((item) => item.model === model || item.id === model);
+    const defaultEffort = modelOption?.defaultReasoningEffort ?? config?.selectedReasoningEffort ?? payload.defaultReasoningEffort;
+    const effort = readStoredEffort(defaultEffort);
+    return {
+      initialized: true,
+      codexModel: model,
+      reasoningEffort: modelOption?.supportedReasoningEfforts.some((item) => item.reasoningEffort === effort) ? effort : defaultEffort,
+      serviceTier: readStoredServiceTier(modelOption?.defaultServiceTier ?? config?.selectedServiceTier ?? null),
+      codexAccessPreset: readStoredCodexAccess(defaultAccessPreset(config ?? null)),
+      scratchMode: readStoredScratchMode((payload.defaultScratchMode ?? "voice") as ScratchMode),
+      shortSpokenReplies: readStoredVoiceCaveman(),
+      transportProvider: readStoredTransportProvider(payload.livekit?.defaultTransport ?? "local-browser", payload.livekit?.availableTransports ?? ["local-browser"]),
+      sttProvider: readStoredSttProvider(payload.stt.defaultProvider, payload.stt.availableProviders),
+      ttsProvider: readStoredTtsProvider(payload.tts.defaultProvider, payload.tts.availableProviders),
+      overlayHintDismissed: false
+    };
   }
 
-  function isCurrentProjectView(seq: number): boolean {
-    return seq === projectViewSeqRef.current;
-  }
-
-  async function refreshProject(options: { projectViewSeq?: number } = {}): Promise<void> {
-    if (projectSourceSwitchPendingRef.current) return;
-    const projectViewSeq = options.projectViewSeq ?? projectViewSeqRef.current;
-    const fetchSeq = ++projectFetchSeqRef.current;
-    try {
-      const response = await fetch(`${api}/api/project`);
-      const payload = (await response.json()) as ProjectStateResponse & { error?: string };
-      if (!response.ok || payload.error) {
-        throw new Error(payload.error ?? `Project request failed: ${response.status}`);
-      }
-      if (projectViewSeq !== projectViewSeqRef.current || fetchSeq !== projectFetchSeqRef.current) return;
-      setProjectState(payload);
-      setProjectError(null);
-    } catch (error) {
-      if (projectViewSeq !== projectViewSeqRef.current || fetchSeq !== projectFetchSeqRef.current) return;
-      setProjectError(error instanceof Error ? error.message : String(error));
+  function applySessionSnapshot(payload: SessionSnapshot): void {
+    if (payload.revision <= latestSessionRevisionRef.current) return;
+    latestSessionRevisionRef.current = payload.revision;
+    const previous = sessionRef.current;
+    const switchedThread = Boolean(previous && previous.threadId !== payload.session.threadId);
+    const externallyCleared = Boolean(previous && previous.transcript.length > 0 && payload.session.transcript.length === 0);
+    if (switchedThread || externallyCleared) {
+      resetSpeechPlayback();
+      resetQueuedTurn();
+      prewarmKeyRef.current = "";
+      prewarmAnnouncementKeyRef.current = "";
+      setPrewarm({ status: "idle" });
     }
-  }
 
-  async function openCanonicalState(): Promise<void> {
-    if (projectSourceSwitchPendingRef.current) return;
-    if (canonicalStatePending) return;
-    const seq = ++canonicalFetchSeqRef.current;
-    canonicalPendingSeqRef.current = seq;
-    setCanonicalStatePending(true);
-    setProjectError(null);
-    try {
-      const response = await fetch(`${api}/api/project/canonical-state`);
-      const payload = (await response.json()) as ProjectCanonicalStateResponse & { error?: string };
-      if (!response.ok || payload.error) {
-        throw new Error(payload.error ?? `Canonical state request failed: ${response.status}`);
-      }
-      if (seq !== canonicalFetchSeqRef.current) return;
-      setCanonicalState(payload);
-      setCanonicalStateOpen(true);
-    } catch (error) {
-      if (seq !== canonicalFetchSeqRef.current) return;
-      setProjectError(error instanceof Error ? error.message : String(error));
-    } finally {
-      if (seq === canonicalPendingSeqRef.current) setCanonicalStatePending(false);
-    }
-  }
+    const preferences = payload.preferences.initialized ? payload.preferences : legacyPreferences(payload);
+    setServerPreferences(preferences);
+    setAudioLease(payload.audioLease);
+    preferencePatchRef.current = JSON.stringify(preferences);
+    setSourceIdentity(payload.sourceIdentity);
+    setSpeechProjectionEnabled(payload.features?.speechProjection ?? true);
+    setProgressSoundsEnabled(payload.features?.progressSounds ?? false);
+    setProgressSpeechEnabled(payload.features?.progressSpeech ?? false);
+    setAppServerConfig(payload.appServerConfig ?? null);
+    setScratchMode(preferences.scratchMode);
+    setVoiceCaveman(preferences.shortSpokenReplies);
+    setReasoningEffort(preferences.reasoningEffort);
+    setCodexModel(preferences.codexModel);
+    setServiceTier(preferences.serviceTier ?? null);
+    setCodexAccessPreset(preferences.codexAccessPreset);
+    setTtsStatus(payload.tts);
+    setTtsProvider(preferences.ttsProvider);
+    setSttStatus(payload.stt);
+    setSttProvider(preferences.sttProvider);
+    if (payload.livekit) setLiveKitStatus(payload.livekit);
+    setTransportProvider(preferences.transportProvider);
+    setState({ session: payload.session, loading: false, error: null });
+    sessionRef.current = payload.session;
+    setSourceDraft(payload.session.sourceUri);
+    const nextDraft = payload.session.composerDraft ?? "";
+    draftPatchRef.current = nextDraft;
+    setDraft(nextDraft);
+    setHandoff(payload.session.handoff ?? "");
+    setShortHandoff(payload.session.handoffShort ?? "");
+    setFullHandoff(payload.session.handoffFull ?? "");
+    if (payload.session.activeTurn?.status === "running" && !pendingRef.current) reattachActiveTurn(payload.session.activeTurn);
+    if (payload.session.activeTurn?.status !== "running") setTurnPending(false);
+    setSettingsHydrated(true);
 
-  function selectInitialChartNodes(payload: ProjectChartResponse): void {
-    const checkpoint = [...payload.checkpoints].sort((a, b) => b.approvedAt.localeCompare(a.approvedAt))[0];
-    setSelectedChartCheckpointId(checkpoint?.id ?? "");
-    const delta = checkpoint
-      ? payload.deltas.find((candidate) => checkpoint.approvedDeltaIds.includes(candidate.id))
-      : payload.deltas[0];
-    setSelectedChartDeltaId(delta?.id ?? "");
-  }
-
-  async function refreshProjectChart(options: { open?: boolean; preserveSelection?: boolean } = {}): Promise<void> {
-    if (projectSourceSwitchPendingRef.current) return;
-    if (chartPending) return;
-    const seq = ++chartFetchSeqRef.current;
-    chartPendingSeqRef.current = seq;
-    setChartPending(true);
-    setProjectError(null);
-    try {
-      const response = await fetch(`${api}/api/project/chart`);
-      const payload = (await response.json()) as ProjectChartResponse & { error?: string };
-      if (!response.ok || payload.error) {
-        throw new Error(payload.error ?? `Project chart request failed: ${response.status}`);
-      }
-      if (seq !== chartFetchSeqRef.current) return;
-      setChartState(payload);
-      if (options.open) setChartOpen(true);
-      if (!options.preserveSelection) selectInitialChartNodes(payload);
-    } catch (error) {
-      if (seq !== chartFetchSeqRef.current) return;
-      setProjectError(error instanceof Error ? error.message : String(error));
-    } finally {
-      if (seq === chartPendingSeqRef.current) setChartPending(false);
-    }
-  }
-
-  async function openProjectChart(): Promise<void> {
-    await refreshProjectChart({ open: true });
-  }
-
-  function openForkSheet(scratch: ScratchSessionNode): void {
-    setForkSheetSessionId(scratch.id);
-    // The sheet reads requested/effective access from the fork tree; refresh
-    // it in the background so the record is current (or appears at all when
-    // the chart was never opened this session).
-    void refreshProjectChart({ preserveSelection: true });
-  }
-
-  async function setForkAccess(providerRefId: string, continuation: ProviderForkContinuation): Promise<void> {
-    if (projectSourceSwitchPendingRef.current) return;
-    const projectViewSeq = projectViewSeqRef.current;
-    setForkAccessPending(true);
-    try {
-      const response = await fetch(`${api}/api/project/fork/access`, {
-        method: "POST",
+    if (!payload.preferences.initialized) {
+      void fetch(`${api}/api/preferences`, {
+        method: "PATCH",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ providerRefId, requestedAccessPreset: continuation })
+        body: JSON.stringify(preferences)
       });
-      const payload = (await response.json()) as ProviderForkAccessResponse & { error?: string };
-      if (!response.ok || payload.error) {
-        throw new Error(payload.error ?? `Fork access update failed: ${response.status}`);
-      }
-      if (!isCurrentProjectView(projectViewSeq)) return;
-      chartFetchSeqRef.current += 1;
-      setChartState((previous) => (previous ? { ...previous, providerForks: payload.providerForks } : previous));
-    } catch (error) {
-      if (!isCurrentProjectView(projectViewSeq)) return;
-      setProjectError(error instanceof Error ? error.message : String(error));
-    } finally {
-      setForkAccessPending(false);
-    }
-  }
-
-  async function loadArtifactPreview(artifactId: string): Promise<void> {
-    if (projectSourceSwitchPendingRef.current) return;
-    if (!artifactId) {
-      setArtifactPreview(null);
-      return;
-    }
-    const seq = ++artifactFetchSeqRef.current;
-    artifactPendingSeqRef.current = seq;
-    setArtifactPending(true);
-    try {
-      const response = await fetch(`${api}/api/project/artifacts/${encodeURIComponent(artifactId)}`);
-      const payload = (await response.json()) as ProjectArtifactPreviewResponse & { error?: string };
-      if (!response.ok || payload.error) {
-        throw new Error(payload.error ?? `Artifact preview failed: ${response.status}`);
-      }
-      if (seq !== artifactFetchSeqRef.current) return;
-      setArtifactPreview(payload);
-    } catch (error) {
-      if (seq !== artifactFetchSeqRef.current) return;
-      setProjectError(error instanceof Error ? error.message : String(error));
-      setArtifactPreview(null);
-    } finally {
-      if (seq === artifactPendingSeqRef.current) setArtifactPending(false);
     }
   }
 
@@ -814,59 +837,9 @@ export function App() {
       try {
         const response = await fetch(`${api}/api/session`);
         if (!response.ok) throw new Error(`Session request failed: ${response.status}`);
-        const payload = (await response.json()) as SessionResponse;
+        const payload = (await response.json()) as SessionSnapshot;
         if (cancelled) return;
-        const defaultEffort = payload.defaultReasoningEffort;
-        const defaultModel = payload.defaultCodexModel;
-        const defaultMode = (payload.defaultScratchMode ?? "voice") as ScratchMode;
-        const tts = payload.tts;
-        const stt = payload.stt;
-        const livekit = payload.livekit;
-        const config = payload.appServerConfig ?? null;
-        const configDefaultModel = config?.selectedModel ?? config?.defaultModel ?? defaultModel;
-        const storedModel = readStoredModel(configDefaultModel);
-        const storedModelAvailable = config?.models.some((model) => model.model === storedModel || model.id === storedModel) ?? true;
-        const configModel = storedModelAvailable ? storedModel : configDefaultModel;
-        const configModelOption = config?.models.find((model) => model.model === configModel || model.id === configModel);
-        const configDefaultEffort = configModelOption?.defaultReasoningEffort ?? config?.selectedReasoningEffort ?? defaultEffort;
-        const storedEffort = readStoredEffort(configDefaultEffort);
-        const effortAvailable = configModelOption?.supportedReasoningEfforts.some((option) => option.reasoningEffort === storedEffort) ?? true;
-        const configDefaultTier = configModelOption?.defaultServiceTier ?? config?.selectedServiceTier ?? null;
-        const storedTier = readStoredServiceTier(configDefaultTier);
-        const tierAvailable = storedTier ? configModelOption?.serviceTiers.some((tier) => tier.id === storedTier) ?? false : true;
-        const configAccess = defaultAccessPreset(config);
-        setSpeechProjectionEnabled(payload.features?.speechProjection ?? true);
-        setProgressSoundsEnabled(payload.features?.progressSounds ?? false);
-        setProgressSpeechEnabled(payload.features?.progressSpeech ?? false);
-        setAppServerConfig(config);
-        setScratchMode(readStoredScratchMode(defaultMode));
-        setVoiceCaveman(readStoredVoiceCaveman());
-        setReasoningEffort(effortAvailable ? storedEffort : configDefaultEffort);
-        setCodexModel(configModel);
-        setServiceTier(tierAvailable ? storedTier : configDefaultTier);
-        setCodexAccessPreset(readStoredCodexAccess(configAccess));
-        setTtsStatus(tts);
-        setTtsProvider(readStoredTtsProvider(tts.defaultProvider, tts.availableProviders));
-        setSttStatus(stt);
-        setSttProvider(readStoredSttProvider(stt.defaultProvider, stt.availableProviders));
-        if (livekit) {
-          setLiveKitStatus(livekit);
-          setTransportProvider(readStoredTransportProvider(livekit.defaultTransport, livekit.availableTransports));
-        }
-        setInputPolicy("push_to_talk");
-        setLiveModeActive(false);
-        setState({ session: payload.session, loading: false, error: null });
-        if (payload.session.activeTurn?.status === "running") {
-          reattachActiveTurn(payload.session.activeTurn);
-        } else {
-          setTurnPending(false);
-        }
-        setSourceDraft(payload.session.sourceUri);
-        setHandoff(payload.session.handoff ?? "");
-        setShortHandoff(payload.session.handoffShort ?? "");
-        setFullHandoff(payload.session.handoffFull ?? "");
-        setSettingsHydrated(true);
-        void refreshProject();
+        applySessionSnapshot(payload);
       } catch (error) {
         if (cancelled) return;
         setState({
@@ -885,79 +858,37 @@ export function App() {
   }, [api]);
 
   useEffect(() => {
-    if (!settingsHydrated || !desktopBridge()) return;
-    let cancelled = false;
-
-    async function refreshDesktopSession() {
-      if (cancelled || pendingRef.current || sourcePending || handoffPending || handoffReviewOpen || extractionReviewOpen) return;
-      try {
-        const response = await fetch(`${api}/api/session`);
-        if (!response.ok) return;
-        const payload = (await response.json()) as SessionResponse;
-        if (cancelled) return;
-        const previous = sessionRef.current;
-        const switchedThread = Boolean(previous && previous.threadId !== payload.session.threadId);
-        const externallyCleared = Boolean(previous && previous.transcript.length > 0 && payload.session.transcript.length === 0);
-        if (switchedThread || externallyCleared) {
-          resetSpeechPlayback();
-          resetQueuedTurn();
-          setDraft("");
-          prewarmKeyRef.current = "";
-          prewarmAnnouncementKeyRef.current = "";
-          setPrewarm({ status: "idle" });
-        }
-        setState((current) => {
-          const currentSession = current.session;
-          const nextSession = payload.session;
-          const unchanged =
-            currentSession?.id === nextSession.id &&
-            currentSession?.updatedAt === nextSession.updatedAt &&
-            currentSession?.threadId === nextSession.threadId &&
-            currentSession?.transcript.length === nextSession.transcript.length &&
-            currentSession?.activeTurn?.status === nextSession.activeTurn?.status;
-          if (unchanged) return current;
-          return { session: nextSession, loading: false, error: null };
-        });
-        if (payload.session.activeTurn?.status === "running" && !pendingRef.current) {
-          reattachActiveTurn(payload.session.activeTurn);
-        }
-        setSourceDraft(payload.session.sourceUri);
-        setHandoff(payload.session.handoff ?? "");
-        setShortHandoff(payload.session.handoffShort ?? "");
-        setFullHandoff(payload.session.handoffFull ?? "");
-      } catch {
-        // Desktop surfaces should not flash an error just because a background
-        // sync tick races server shutdown or reload.
-      }
-    }
-
-    const timer = window.setInterval(refreshDesktopSession, 1200);
-    window.addEventListener("focus", refreshDesktopSession);
-    return () => {
-      cancelled = true;
-      window.clearInterval(timer);
-      window.removeEventListener("focus", refreshDesktopSession);
-    };
-  }, [api, extractionReviewOpen, handoffPending, handoffReviewOpen, reattachActiveTurn, resetQueuedTurn, resetSpeechPlayback, settingsHydrated, sourcePending]);
-
-  useEffect(() => {
     if (!settingsHydrated) return;
-    writeStoredSetting("mortic.settingsVersion", SETTINGS_VERSION);
-    writeStoredSetting("mortic.reasoningEffort", effectiveReasoningEffort);
-  }, [settingsHydrated, effectiveReasoningEffort]);
-
-  useEffect(() => {
-    if (!chartOpen || !chartState || !selectedChartDeltaId) {
-      setArtifactPreview(null);
-      return;
-    }
-    const selected = chartState.deltas.find((delta) => delta.id === selectedChartDeltaId);
-    if (!selected) {
-      setArtifactPreview(null);
-      return;
-    }
-    void loadArtifactPreview(selected.conversationArtifactId);
-  }, [chartOpen, chartState, selectedChartDeltaId]);
+    let fallbackTimer = 0;
+    const stream = new EventSource(`${api}/api/session/stream?clientId=${encodeURIComponent(clientId)}&surface=${clientSurface}`);
+    stream.onmessage = (message) => {
+      const event = JSON.parse(message.data) as SessionStreamEvent;
+      if (event.type === "snapshot") applySessionSnapshot(event.snapshot);
+      if (event.type === "audio-command" && event.targetClientId === clientId) {
+        interruptLocalAudio();
+        if (event.reason !== "interrupt") resetQueuedTurn();
+      }
+    };
+    stream.onerror = () => {
+      if (fallbackTimer) return;
+      fallbackTimer = window.setInterval(async () => {
+        try {
+          const response = await fetch(`${api}/api/session`);
+          if (response.ok) applySessionSnapshot((await response.json()) as SessionSnapshot);
+        } catch {
+          // The live stream will reconnect automatically; polling is only a quiet fallback.
+        }
+      }, 5_000);
+    };
+    stream.onopen = () => {
+      if (fallbackTimer) window.clearInterval(fallbackTimer);
+      fallbackTimer = 0;
+    };
+    return () => {
+      stream.close();
+      if (fallbackTimer) window.clearInterval(fallbackTimer);
+    };
+  }, [api, clientId, clientSurface, settingsHydrated]);
 
   useEffect(() => {
     if (!settingsHydrated || pending) return;
@@ -980,63 +911,45 @@ export function App() {
   ]);
 
   useEffect(() => {
-    if (!state.session) return;
-    void refreshProject();
-  }, [state.session?.updatedAt, state.session?.transcript.length, state.session?.handoff, state.session?.handoffShort, state.session?.handoffFull]);
+    if (!settingsHydrated || !serverPreferences) return;
+    const preferences: MorticPreferencesPatch = {
+      initialized: true,
+      codexModel,
+      reasoningEffort: effectiveReasoningEffort,
+      serviceTier,
+      codexAccessPreset,
+      scratchMode,
+      shortSpokenReplies: voiceCaveman,
+      transportProvider,
+      sttProvider,
+      ttsProvider,
+      overlayHintDismissed: serverPreferences.overlayHintDismissed
+    };
+    const serialized = JSON.stringify(preferences);
+    if (serialized === preferencePatchRef.current) return;
+    const timer = window.setTimeout(() => {
+      preferencePatchRef.current = serialized;
+      void fetch(`${api}/api/preferences`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: serialized
+      });
+    }, 250);
+    return () => window.clearTimeout(timer);
+  }, [api, codexAccessPreset, codexModel, effectiveReasoningEffort, scratchMode, serverPreferences, serviceTier, settingsHydrated, sttProvider, transportProvider, ttsProvider, voiceCaveman]);
 
   useEffect(() => {
-    if (!settingsHydrated) return;
-    writeStoredSetting("mortic.settingsVersion", SETTINGS_VERSION);
-    writeStoredSetting("mortic.codexModel", codexModel);
-  }, [settingsHydrated, codexModel]);
-
-  useEffect(() => {
-    if (!settingsHydrated) return;
-    writeStoredSetting("mortic.settingsVersion", SETTINGS_VERSION);
-    writeStoredSetting("mortic.serviceTier", serviceTier ?? "");
-  }, [settingsHydrated, serviceTier]);
-
-  useEffect(() => {
-    if (!settingsHydrated) return;
-    writeStoredSetting("mortic.settingsVersion", SETTINGS_VERSION);
-    writeStoredSetting("mortic.codexAccess", codexAccessPreset);
-  }, [codexAccessPreset, settingsHydrated]);
-
-  useEffect(() => {
-    if (!settingsHydrated) return;
-    writeStoredSetting("mortic.settingsVersion", SETTINGS_VERSION);
-    writeStoredSetting("mortic.scratchMode", scratchMode);
-  }, [settingsHydrated, scratchMode]);
-
-  useEffect(() => {
-    if (!settingsHydrated) return;
-    writeStoredSetting("mortic.settingsVersion", SETTINGS_VERSION);
-    writeStoredSetting("mortic.voiceCaveman", String(voiceCaveman));
-  }, [settingsHydrated, voiceCaveman]);
-
-  useEffect(() => {
-    if (!settingsHydrated) return;
-    writeStoredSetting("mortic.settingsVersion", SETTINGS_VERSION);
-    writeStoredSetting("mortic.ttsProvider", ttsProvider);
-  }, [settingsHydrated, ttsProvider]);
-
-  useEffect(() => {
-    if (!settingsHydrated) return;
-    writeStoredSetting("mortic.settingsVersion", SETTINGS_VERSION);
-    writeStoredSetting("mortic.sttProvider", sttProvider);
-  }, [settingsHydrated, sttProvider]);
-
-  useEffect(() => {
-    if (!settingsHydrated) return;
-    writeStoredSetting("mortic.settingsVersion", SETTINGS_VERSION);
-    writeStoredSetting("mortic.transportProvider", transportProvider);
-  }, [settingsHydrated, transportProvider]);
-
-  useEffect(() => {
-    if (!settingsHydrated) return;
-    writeStoredSetting("mortic.settingsVersion", SETTINGS_VERSION);
-    writeStoredSetting("mortic.inputPolicy", inputPolicy);
-  }, [settingsHydrated, inputPolicy]);
+    if (!settingsHydrated || draft === draftPatchRef.current) return;
+    const timer = window.setTimeout(() => {
+      draftPatchRef.current = draft;
+      void fetch(`${api}/api/session/ui`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ composerDraft: draft })
+      });
+    }, 250);
+    return () => window.clearTimeout(timer);
+  }, [api, draft, settingsHydrated]);
 
   useEffect(() => {
     const threadId = state.session?.threadId;
@@ -1325,7 +1238,6 @@ export function App() {
       setShortHandoff(payload.shortPrompt ?? "");
       setFullHandoff(payload.fullPrompt ?? "");
       setState({ session: payload.session, loading: false, error: null });
-      void refreshProject();
     } catch (error) {
       setState((current) => ({
         ...current,
@@ -1337,185 +1249,63 @@ export function App() {
     }
   }
 
-  async function commitCurrentSession(approveItemIds: string[] = []) {
-    if (projectPending || pending) return;
-    const projectViewSeq = projectViewSeqRef.current;
-    setProjectPending(true);
-    setProjectError(null);
-    try {
-      const response = await fetch(`${api}/api/project/session/commit`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json"
-        },
-        body: JSON.stringify({ approveItemIds })
-      });
-      const payload = (await response.json()) as ProjectStateResponse & { error?: string };
-      if (!response.ok || payload.error) throw new Error(payload.error ?? "Commit session failed");
-      if (!isCurrentProjectView(projectViewSeq)) return;
-      setProjectState(payload);
-      if (chartOpen || approveItemIds.length > 0) {
-        void refreshProjectChart({ preserveSelection: chartOpen });
-      }
-    } catch (error) {
-      if (!isCurrentProjectView(projectViewSeq)) return;
-      setProjectError(error instanceof Error ? error.message : String(error));
-    } finally {
-      setProjectPending(false);
-    }
-  }
-
-  async function archiveCurrentSession() {
-    if (projectPending || pending) return;
-    const projectViewSeq = projectViewSeqRef.current;
-    setProjectPending(true);
-    setProjectError(null);
-    try {
-      const response = await fetch(`${api}/api/project/session/archive`, {
-        method: "POST"
-      });
-      const payload = (await response.json()) as ProjectStateResponse & { error?: string };
-      if (!response.ok || payload.error) throw new Error(payload.error ?? "Archive session failed");
-      if (!isCurrentProjectView(projectViewSeq)) return;
-      setProjectState(payload);
-    } catch (error) {
-      if (!isCurrentProjectView(projectViewSeq)) return;
-      setProjectError(error instanceof Error ? error.message : String(error));
-    } finally {
-      setProjectPending(false);
-    }
-  }
-
-  async function runProjectAction(path: string, errorMessage: string) {
-    if (projectPending || pending) return;
-    const projectViewSeq = projectViewSeqRef.current;
-    setProjectPending(true);
-    setProjectError(null);
-    try {
-      const response = await fetch(`${api}${path}`, {
-        method: "POST"
-      });
-      const payload = (await response.json()) as ProjectStateResponse & { error?: string };
-      if (!response.ok || payload.error) throw new Error(payload.error ?? errorMessage);
-      if (!isCurrentProjectView(projectViewSeq)) return;
-      setProjectState(payload);
-    } catch (error) {
-      if (!isCurrentProjectView(projectViewSeq)) return;
-      setProjectError(error instanceof Error ? error.message : String(error));
-    } finally {
-      setProjectPending(false);
-    }
-  }
-
-  async function patchExtraction(itemId: string, patch: UpdateExtractedItemRequest) {
-    if (projectPending) return;
-    const projectViewSeq = projectViewSeqRef.current;
-    setProjectPending(true);
-    setProjectError(null);
-    try {
-      const response = await fetch(`${api}/api/project/extractions/${encodeURIComponent(itemId)}`, {
-        method: "PATCH",
-        headers: {
-          "Content-Type": "application/json"
-        },
-        body: JSON.stringify(patch)
-      });
-      const payload = (await response.json()) as ProjectStateResponse & { error?: string };
-      if (!response.ok || payload.error) throw new Error(payload.error ?? "Extraction update failed");
-      if (!isCurrentProjectView(projectViewSeq)) return;
-      setProjectState(payload);
-      if (patch.status === "approved") setExtractionReviewTab("approved");
-      if (patch.status === "approved" || patch.retire || chartOpen) {
-        void refreshProjectChart({ preserveSelection: chartOpen });
-      }
-    } catch (error) {
-      if (!isCurrentProjectView(projectViewSeq)) return;
-      setProjectError(error instanceof Error ? error.message : String(error));
-    } finally {
-      setProjectPending(false);
-    }
-  }
-
-  async function updateExtraction(itemId: string, status: ExtractionStatus) {
-    await patchExtraction(itemId, { status });
-  }
-
-  function beginEditExtraction(item: ExtractedItem) {
-    setEditingExtractionId(item.id);
-    setEditingExtractionType(item.type);
-    setEditingExtractionTitle(item.title);
-    setEditingExtractionBody(item.body);
-    setEditingExtractionTaskPlan(item.taskPlanMarkdown ?? "");
-  }
-
-  function cancelEditExtraction() {
-    setEditingExtractionId(null);
-    setEditingExtractionType("project_state");
-    setEditingExtractionTitle("");
-    setEditingExtractionBody("");
-    setEditingExtractionTaskPlan("");
-  }
-
-  async function saveExtractionEdit(itemId: string) {
-    const title = editingExtractionTitle.trim();
-    const body = editingExtractionBody.trim();
-    const taskPlanMarkdown = editingExtractionTaskPlan.trim();
-    if (!title || !body) return;
-    await patchExtraction(itemId, { type: editingExtractionType, title, body, taskPlanMarkdown });
-    cancelEditExtraction();
-  }
-
-  async function retireExtraction(itemId: string) {
-    await patchExtraction(itemId, { retire: true });
-    cancelEditExtraction();
-  }
-
-  async function copyText(text: string) {
+  async function copyHandoffText(text: string, kind?: "short" | "full") {
     if (!text) return;
-    await navigator.clipboard.writeText(text);
-  }
-
-  async function copyHandoffText(text: string) {
-    if (!text) return;
-    const projectViewSeq = projectViewSeqRef.current;
-    await copyText(text);
     try {
-      const response = await fetch(`${api}/api/project/handoff-copied`, {
-        method: "POST"
-      });
-      const payload = (await response.json()) as ProjectStateResponse & { error?: string };
-      if (response.ok && !payload.error && isCurrentProjectView(projectViewSeq)) setProjectState(payload);
+      await navigator.clipboard.writeText(text);
+      if (kind) {
+        setCopiedHandoff(kind);
+        window.setTimeout(() => setCopiedHandoff((current) => current === kind ? null : current), 1600);
+      }
     } catch {
-      // Copy should not fail just because project checkpoint bookkeeping failed.
+      setClipboardFallback(text);
     }
   }
 
-  async function clearScratch() {
-    resetSpeechPlayback();
-    resetQueuedTurn();
-    prewarmKeyRef.current = "";
-    prewarmAnnouncementKeyRef.current = "";
-    setPrewarm({ status: "idle" });
-    const response = await fetch(`${api}/api/session/clear`, {
-      method: "POST"
-    });
-    const payload = await response.json();
-    setState({ session: payload.session, loading: false, error: response.ok ? null : payload.error ?? "Could not clear scratch" });
-    void refreshProject();
-    setDraft("");
-    setHandoff("");
-    setShortHandoff("");
-    setFullHandoff("");
-    setSpeechError(null);
-    setTurnPending(false);
+  async function performClearScratch() {
+    try {
+      const response = await fetch(`${api}/api/session/clear`, {
+        method: "POST"
+      });
+      const payload = await response.json();
+      if (!response.ok) {
+        setState((current) => ({
+          ...current,
+          error: payload.error ?? "Could not clear scratch"
+        }));
+        return;
+      }
+
+      resetSpeechPlayback();
+      resetQueuedTurn();
+      prewarmKeyRef.current = "";
+      prewarmAnnouncementKeyRef.current = "";
+      setPrewarm({ status: "idle" });
+      setState({ session: payload.session, loading: false, error: null });
+      setDraft("");
+      setHandoff("");
+      setShortHandoff("");
+      setFullHandoff("");
+      setSpeechError(null);
+      setTurnPending(false);
+    } catch (error) {
+      setState((current) => ({
+        ...current,
+        error: error instanceof Error ? error.message : "Could not clear scratch"
+      }));
+    }
+  }
+
+  function requestClearScratch(): void {
+    const hasContent = transcript.length > 0 || Boolean(handoff || shortHandoff || fullHandoff || draft.trim() || queuedTurnPreview);
+    if (hasContent) setClearConfirmOpen(true);
+    else void performClearScratch();
   }
 
   async function updateSourceThread(overrideUri?: string): Promise<string | null> {
     const clean = (overrideUri ?? sourceDraft).trim();
-    if (!clean || sourcePending) return null;
+    if (!clean || sourcePending || pending) return null;
 
-    projectSourceSwitchPendingRef.current = true;
-    const projectViewSeq = invalidateProjectViews();
     resetSpeechPlayback();
     resetQueuedTurn();
     prewarmKeyRef.current = "";
@@ -1543,8 +1333,6 @@ export function App() {
       setShortHandoff("");
       setFullHandoff("");
       setTurnPending(false);
-      projectSourceSwitchPendingRef.current = false;
-      void refreshProject({ projectViewSeq });
       return payload.session.sourceUri;
     } catch (error) {
       setState((current) => ({
@@ -1552,52 +1340,13 @@ export function App() {
         loading: false,
         error: error instanceof Error ? error.message : String(error)
       }));
-      projectSourceSwitchPendingRef.current = false;
-      void refreshProject({ projectViewSeq });
       return null;
     } finally {
-      projectSourceSwitchPendingRef.current = false;
       setSourcePending(false);
     }
   }
 
   const fullPromptValue = fullHandoff || handoff;
-  const tokenBudget = useMemo(() => {
-    const transcriptTokens = estimateTranscriptTokens(transcript);
-    const shortTokens = estimateTextTokens(shortHandoff);
-    const fullTokens = estimateTextTokens(fullPromptValue);
-    const compare = (tokens: number, hasPrompt: boolean) => {
-      const savedTokens = Math.max(0, transcriptTokens - tokens);
-      return {
-        hasPrompt,
-        tokens,
-        savedTokens,
-        savedPercent: percentReduction(transcriptTokens, tokens),
-        contextWorkSavedPercent: contextWorkReduction(transcriptTokens, tokens),
-        savedOverFiveTurns: savedTokens * 5,
-        savedOverTenTurns: savedTokens * 10
-      };
-    };
-
-    return {
-      transcriptTokens,
-      short: compare(shortTokens, Boolean(shortHandoff.trim())),
-      full: compare(fullTokens, Boolean(fullPromptValue.trim()))
-    };
-  }, [transcript, shortHandoff, fullPromptValue]);
-  const futureSavingsLine = useMemo(() => {
-    const fiveTurnParts = [
-      tokenBudget.short.hasPrompt ? `short ${formatCount(tokenBudget.short.savedOverFiveTurns)}` : "",
-      tokenBudget.full.hasPrompt ? `full ${formatCount(tokenBudget.full.savedOverFiveTurns)}` : ""
-    ].filter(Boolean);
-    const tenTurnParts = [
-      tokenBudget.short.hasPrompt ? `short ${formatCount(tokenBudget.short.savedOverTenTurns)}` : "",
-      tokenBudget.full.hasPrompt ? `full ${formatCount(tokenBudget.full.savedOverTenTurns)}` : ""
-    ].filter(Boolean);
-
-    if (fiveTurnParts.length === 0) return "";
-    return `Avoided input over 5 future turns: ${fiveTurnParts.join(", ")}. Over 10: ${tenTurnParts.join(", ")}.`;
-  }, [tokenBudget]);
   const visibleAudioHealth =
     activeTurn && audioHealth?.turnId === activeTurn.id
       ? audioHealth
@@ -1638,7 +1387,7 @@ export function App() {
       : recognizing
         ? pending ? "Listening for next turn" : liveModeActive ? "Live listening" : "Listening"
       : pending || speechPhase === "speaking" || speechPhase === "buffering"
-          ? liveModeActive ? "Speak to interrupt" : "Hold M to queue"
+          ? liveModeActive ? "Speak to stop audio" : "Hold M to talk"
         : activeSttSupported
           ? liveModeActive ? "Live on" : "Hold M to talk"
           : "Unavailable";
@@ -1686,136 +1435,26 @@ export function App() {
               ? "Ready"
               : "Unavailable";
   const dockTalkLabel =
-    sttPhase === "transcribing"
-      ? "Transcribing"
-      : liveModeActive
-        ? "Live on"
-      : recognizing
-          ? pending ? "Release to queue" : "Release to send"
-      : pending || speechPhase === "speaking" || speechPhase === "buffering"
-            ? "Hold M to queue"
-            : "Hold M";
-  const canPushToTalkInterrupt = pending || speechPhase === "speaking" || speechPhase === "buffering";
+    liveModeActive ? "Live on" : "Hold M";
+  const canPushToTalkOverOutput = pending || speechPhase === "speaking" || speechPhase === "buffering";
   const pushToTalkDisabled =
     threadRequired ||
+    codexUnavailable ||
     liveModeActive ||
     sttPhase === "transcribing" ||
-    (!canPushToTalkInterrupt && (sparkBlocked || !activeSttSupported));
-  const activeProjectSession = projectState?.scratchSessions.find(
-    (candidate) => candidate.id === projectState.project.activeScratchSessionId
-  ) ?? projectState?.scratchSessions[0] ?? null;
-  const activeProjectSource = activeProjectSession
-    ? projectState?.sourceThreads.find((source) => source.id === activeProjectSession.sourceThreadId) ?? null
-    : projectState?.sourceThreads[0] ?? null;
-  const draftExtractions = dedupeExtractionItems(projectState?.extractedItems.filter(isExtractionReviewCandidate) ?? [])
-    .sort(extractionReviewSort);
-  const approvedExtractions = dedupeExtractionItems(projectState?.extractedItems.filter((item) => item.status === "approved") ?? [])
-    .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt));
-  const reviewExtractions = extractionReviewTab === "approved" ? approvedExtractions : draftExtractions;
-  const pendingExtractionCounts = extractionTypeOrder
-    .map((type) => ({
-      type,
-      total: draftExtractions.filter((item) => item.type === type).length
-    }))
-    .filter((item) => item.total > 0);
-  const reviewExtractionCounts = extractionTypeOrder
-    .map((type) => ({
-      type,
-      total: reviewExtractions.filter((item) => item.type === type).length
-    }))
-    .filter((item) => item.total > 0);
-  const projectSources = projectState?.sourceThreads ?? [];
-  const scratchSessions = projectState?.scratchSessions ?? [];
-  const chartCheckpoints = chartState?.checkpoints ?? [];
-  const chartDeltas = chartState?.deltas ?? [];
-  const chartArtifacts = chartState?.artifacts ?? [];
-  const chartProviderRefs = chartState?.providerRefs ?? [];
-  const chartCodexStatus = chartState?.providerAdapters.find((adapter) => adapter.provider === "codex") ?? null;
-  const chartTimelineCheckpoints = [...chartCheckpoints].sort((left, right) => right.approvedAt.localeCompare(left.approvedAt));
-  const selectedChartCheckpoint = chartCheckpoints.find((checkpoint) => checkpoint.id === selectedChartCheckpointId) ?? chartCheckpoints.at(-1) ?? null;
-  const selectedChartDelta = chartDeltas.find((delta) => delta.id === selectedChartDeltaId) ?? null;
-  const selectedChartArtifact = selectedChartDelta
-    ? chartArtifacts.find((artifact) => artifact.id === selectedChartDelta.conversationArtifactId)
-    : null;
-  const selectedProviderRefs = selectedChartArtifact
-    ? chartProviderRefs.filter((ref) => selectedChartArtifact.providerRefIds.includes(ref.id))
-    : [];
-  const normalizedChartSearch = normalizeExtractionText(chartSearch);
-  const visibleChartDeltas = chartDeltas
-    .filter((delta) => !selectedChartCheckpoint || selectedChartCheckpoint.approvedDeltaIds.includes(delta.id))
-    .filter((delta) => chartTypeFilter === "all" || delta.type === chartTypeFilter)
-    .filter((delta) => {
-      if (!normalizedChartSearch) return true;
-      const artifact = chartArtifacts.find((candidate) => candidate.id === delta.conversationArtifactId);
-      return normalizeExtractionText(`${delta.title} ${delta.body} ${delta.taskPlanMarkdown ?? ""} ${artifact?.title ?? ""}`).includes(normalizedChartSearch);
-    });
-  const chartDeltaCounts = extractionTypeOrder
-    .map((type) => ({
-      type,
-      total: chartDeltas.filter((delta) => delta.type === type && (!selectedChartCheckpoint || selectedChartCheckpoint.approvedDeltaIds.includes(delta.id))).length
-    }))
-    .filter((item) => item.total > 0);
+    (!canPushToTalkOverOutput && (sparkBlocked || !activeSttSupported));
+  const interactionState = deriveInteractionState({
+    threadRequired,
+    codexUnavailable,
+    recognizing,
+    sttPhase,
+    pending,
+    speechPhase,
+    agentState
+  });
   const sourceThreadLabel = session ? redactThreadId(session.threadId) : "No source";
-  const recentForkSessions = [...scratchSessions]
-    .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt))
-    .slice(0, 5);
-  const forkSheetScratch = forkSheetSessionId
-    ? scratchSessions.find((scratch) => scratch.id === forkSheetSessionId) ?? null
-    : null;
-  const forkSheetRecord = forkSheetScratch
-    ? chartState?.providerForks.find(
-        (fork) =>
-          fork.scratchSessionId === forkSheetScratch.id ||
-          (Boolean(forkSheetScratch.codexScratchThreadId) && fork.providerRefId === forkSheetScratch.codexScratchThreadId)
-      ) ?? null
-    : null;
-  const latestChartDelta = [...chartDeltas].sort((left, right) => right.updatedAt.localeCompare(left.updatedAt))[0] ?? null;
-  const latestChartArtifact = latestChartDelta
-    ? chartArtifacts.find((artifact) => artifact.id === latestChartDelta.conversationArtifactId) ?? null
-    : [...chartArtifacts].sort((left, right) => right.updatedAt.localeCompare(left.updatedAt))[0] ?? null;
-  const latestChartCheckpoint = chartTimelineCheckpoints[0] ?? null;
-  const activeProviderReference = activeProjectSession?.codexScratchThreadId
-    ? chartProviderRefs.find((ref) => ref.providerRefId === activeProjectSession.codexScratchThreadId || ref.threadId === activeProjectSession.codexScratchThreadId) ?? null
-    : activeProjectSource?.codexThreadId
-      ? chartProviderRefs.find((ref) => ref.providerRefId === activeProjectSource.codexThreadId || ref.threadId === activeProjectSource.codexThreadId) ?? null
-      : null;
-  const workspaceProjectTitle = workspaceTitle(projectState?.project.workspacePath ?? activeProjectSource?.workspacePath);
-  const storedProjectTitle = projectState?.project.title?.trim();
-  const projectDisplayTitle = workspaceProjectTitle ?? storedProjectTitle ?? "Mortic project";
-  const activeForkTitle = activeProjectSource?.title ?? activeProjectSession?.title ?? sourceThreadLabel;
-  const activeForkStatus = activeProjectSession?.status ?? (activeProjectSource ? "source" : "unlinked");
-  const activeForkAccess = activeProviderReference?.accessPreset ?? activeProjectSession?.mode ?? scratchMode;
-  const activeForkPersistence = activeProviderReference
-    ? activeProviderReference.ephemeral
-      ? "ephemeral"
-      : activeProviderReference.persisted
-        ? "persisted"
-        : "local"
-    : activeProjectSession?.ephemeral
-      ? "ephemeral"
-      : "local";
-  const scaffoldStats = [
-    { label: "Sources", value: String(projectSources.length || (session ? 1 : 0)) },
-    { label: "Forks", value: String(scratchSessions.length) },
-    { label: "Drafts", value: String(draftExtractions.length) },
-    { label: "Approved", value: String(approvedExtractions.length) }
-  ];
-  const scaffoldTrace = [
-    { label: "Master", value: projectDisplayTitle },
-    { label: "Fork", value: activeForkTitle },
-    { label: "Artifact", value: latestChartArtifact?.title ?? "Transcript / compile artifact" },
-    { label: "Delta", value: latestChartDelta?.title ?? approvedExtractions[0]?.title ?? "No approved delta yet" },
-    { label: "Checkpoint", value: latestChartCheckpoint?.title ?? (approvedExtractions.length > 0 ? "Initial canonical checkpoint" : "No canonical checkpoint yet") }
-  ];
-  const canonicalChartSummary = [
-    `${chartCheckpoints.length || (approvedExtractions.length > 0 ? 1 : 0)} checkpoints`,
-    `${chartDeltas.length || approvedExtractions.length} deltas`,
-    `${chartState?.draftCompilations.length ?? 0} compilations`
-  ].join(" · ");
-  const primaryExtraction = reviewExtractions[0] ?? null;
-  const extractionPreview = primaryExtraction
-    ? primaryExtraction.title
-    : "No project updates compiled yet.";
+  const projectDisplayTitle = sourceIdentity?.projectName ?? workspaceTitle(sourceIdentity?.workspacePath) ?? "Mortic";
+  const activeForkTitle = sourceIdentity?.threadName ?? sourceThreadLabel;
   const handoffPreview = handoffPending
     ? "Generating handoff from this scratch transcript."
     : shortHandoff || fullHandoff || handoff
@@ -1839,7 +1478,7 @@ export function App() {
       : streamingAssistantDraft?.phase === "finalizing"
         ? "Mortic finalizing"
         : "Mortic streaming";
-  const runtimeErrors = [speechError, state.error, projectError].filter(Boolean);
+  const runtimeErrors = [speechError, state.error].filter(Boolean);
   const configModels = appServerConfig?.models ?? [];
   const configModelSummary = configModelLabel(selectedModelOption, effectiveCodexModel);
   const configSummary = [
@@ -1864,22 +1503,12 @@ export function App() {
   const desktopOverlayExpanded = desktopState?.expanded ?? false;
   const desktopShortcutLabel = desktopState?.shortcutLabel ?? "Cmd+Shift+M";
   const desktopOverlayScale = desktopState?.overlayScale ?? 1;
-  const desktopDensity = desktopOverlayScale < 0.62 ? "micro" : desktopOverlayScale < 0.75 ? "compact" : "normal";
+  const desktopDensity = desktopOverlayScale < 0.62 ? "micro" : desktopOverlayScale < 0.86 ? "compact" : "normal";
   const desktopOverlayStyle = { "--desktop-overlay-scale": String(desktopOverlayScale) } as CSSProperties;
   const desktopThreadBlocked = isDesktopOverlay && threadRequired;
   const desktopProjectLabel = desktopThreadBlocked ? "Select thread" : projectDisplayTitle;
   const desktopThreadLabel = desktopThreadBlocked ? "No thread selected" : activeForkTitle;
-  const desktopHudStatus = recognizing
-    ? "Listening"
-    : desktopThreadBlocked
-      ? "Select thread"
-      : pending
-        ? "Thinking"
-        : speechPhase === "speaking" || speechPhase === "buffering"
-          ? "Speaking"
-          : session?.codex.available
-            ? "Ready"
-            : "Offline";
+  const desktopHudStatus = interactionState;
   const handoffPreviewText = shortHandoff || fullHandoff || handoff || handoffPreview;
   const handoffCopyText = fullHandoff || handoff || shortHandoff;
   const overlayStatusLine = [
@@ -1913,7 +1542,20 @@ export function App() {
         if (recognizingRef.current) stopPushToTalkCapture();
       }}
       onClick={(event) => event.preventDefault()}
-      title={desktopThreadBlocked ? "Select a Codex thread first." : "Hold M when this window is focused, or hold this button."}
+      onKeyDown={(event) => {
+        if ((event.key === "Enter" || event.key === " ") && !event.repeat) {
+          event.preventDefault();
+          void startPushToTalkCapture();
+        }
+      }}
+      onKeyUp={(event) => {
+        if (event.key === "Enter" || event.key === " ") {
+          event.preventDefault();
+          stopPushToTalkCapture();
+        }
+      }}
+      aria-pressed={recognizing}
+      title={desktopThreadBlocked ? "Select a Codex thread first." : codexUnavailable ? "Codex is offline. Recheck setup in the full app." : "Hold M when this window is focused, or hold this button."}
       disabled={desktopThreadBlocked || pushToTalkDisabled}
     >
       <strong>{dockTalkLabel}</strong>
@@ -1922,6 +1564,7 @@ export function App() {
 
   if (isDesktopOverlay) {
     return (
+      <>
       <main
         className={[
           "desktop-overlay-shell",
@@ -1930,11 +1573,12 @@ export function App() {
           desktopThreadBlocked ? "desktop-thread-required" : ""
         ].join(" ")}
         style={desktopOverlayStyle}
+        data-session-ready={Boolean(session)}
         onKeyDown={(event) => {
           if (event.key === "Escape") {
             event.preventDefault();
             if (desktopOverlayExpanded) setDesktopOverlayExpanded(false);
-            else void desktopBridge()?.hideOverlay();
+            else void hideDesktopOverlay();
           }
           if (!desktopOverlayExpanded && event.key === "Enter") {
             event.preventDefault();
@@ -1949,14 +1593,20 @@ export function App() {
               <strong>{desktopProjectLabel}</strong>
               <em>{desktopThreadLabel}</em>
             </button>
-            <div
-              className={`desktop-hud-state ${desktopThreadBlocked ? "desktop-hud-state-icon-only" : ""}`}
-              title={desktopThreadBlocked ? "Codex ready" : desktopHudStatus}
-              aria-label={desktopThreadBlocked ? "Codex ready" : desktopHudStatus}
+            <button
+              type="button"
+              className={`desktop-hud-state desktop-overlay-nodrag ${desktopThreadBlocked ? "desktop-hud-state-thread" : ""}`}
+              title={desktopHudStatus}
+              aria-label={desktopHudStatus}
+              onClick={() => {
+                if (!desktopThreadBlocked) return;
+                setDesktopOverlayExpanded(true);
+                setFinderOpenRequest((value) => value + 1);
+              }}
             >
-              <span className={`status-dot ${session?.codex.available ? "ok" : "bad"}`} />
-              {!desktopThreadBlocked && <span>{desktopHudStatus}</span>}
-            </div>
+              <span className={`status-dot ${desktopThreadBlocked ? "warn" : session?.codex.available ? "ok" : "bad"}`} />
+              <span>{desktopHudStatus}</span>
+            </button>
             <div className="desktop-hud-actions desktop-overlay-nodrag">
               {overlayMicButton}
               <button
@@ -1965,7 +1615,7 @@ export function App() {
                 onClick={() => void interruptTurn()}
                 disabled={!pending && speechPhase === "idle"}
               >
-                Interrupt
+                Stop audio
               </button>
               <button
                 type="button"
@@ -1991,8 +1641,9 @@ export function App() {
                 <ThreadPicker
                   api={api}
                   currentThreadId={session?.threadId}
-                  disabled={sourcePending}
-                  workspacePath={projectState?.project.workspacePath}
+                  disabled={sourcePending || pending}
+                  workspacePath={sourceIdentity?.workspacePath}
+                  openRequest={finderOpenRequest}
                   onSelect={(uri) => {
                     setSourceDraft(uri);
                     void updateSourceThread(uri).then((sourceUri) => {
@@ -2024,7 +1675,7 @@ export function App() {
                   <button
                     type="button"
                     className="desktop-icon-button"
-                    onClick={() => void desktopBridge()?.hideOverlay()}
+                    onClick={() => void hideDesktopOverlay()}
                     aria-label={`Hide overlay (${desktopShortcutLabel})`}
                     title={desktopShortcutLabel}
                   >
@@ -2042,8 +1693,8 @@ export function App() {
               </div>
               {desktopThreadBlocked ? (
                 <section className="compact-turn compact-thread-required">
-                  <span>Thread required</span>
-                  <p>Select a Codex thread to start.</p>
+                  <span>Mortic paused</span>
+                  <p>Choose a conversation in Finder to begin.</p>
                 </section>
               ) : state.loading ? (
                 <p>Loading session.</p>
@@ -2081,6 +1732,7 @@ export function App() {
                 <section className="compact-turn compact-queued">
                   <span>Queued</span>
                   <p>{queuedTurnPreview}</p>
+                  <button type="button" onClick={() => void cancelQueuedTurn()}>Cancel queued</button>
                 </section>
               )}
             </article>
@@ -2088,15 +1740,6 @@ export function App() {
             {!desktopThreadBlocked && <CodexWorkingBuffer trace={activeAppServerTrace} pending={pending} hasAssistantText={Boolean(assistantDraftText.trim())} />}
 
             <nav className="desktop-overlay-controls" aria-label="Voice controls">
-              <button
-                type="button"
-                onClick={() => setLiveActive(!liveModeActiveRef.current)}
-                className={liveModeActive ? "dock-active" : ""}
-                disabled={desktopThreadBlocked || !LIVE_MODE_RUNTIME_ENABLED}
-              >
-                <span>Live</span>
-                <strong>{liveModeActive ? "On" : "Off"}</strong>
-              </button>
               {overlayMicButton}
               <button
                 type="button"
@@ -2104,8 +1747,8 @@ export function App() {
                 onClick={() => void interruptTurn()}
                 disabled={desktopThreadBlocked || (!pending && speechPhase === "idle")}
               >
-                <span>Interrupt</span>
-                <strong>{speechPhase === "speaking" ? "Speaking" : "Stop"}</strong>
+                <span>Audio</span>
+                <strong>Stop</strong>
               </button>
             </nav>
 
@@ -2124,7 +1767,7 @@ export function App() {
                 rows={2}
                 disabled={desktopThreadBlocked}
               />
-              <button type="submit" disabled={desktopThreadBlocked || !draft.trim() || sparkBlocked}>{pending ? "Queue" : "Send"}</button>
+              <button type="submit" disabled={desktopThreadBlocked || codexUnavailable || !draft.trim() || sparkBlocked}>Send</button>
             </form>
 
             <section className="desktop-overlay-card desktop-handoff-card">
@@ -2137,10 +1780,26 @@ export function App() {
                 <button type="button" onClick={() => void generateHandoff()} disabled={desktopThreadBlocked || handoffPending || transcript.length === 0}>
                   {handoffPending ? "Generating" : "Generate"}
                 </button>
-                <button type="button" onClick={() => void copyHandoffText(shortHandoff)} disabled={desktopThreadBlocked || !shortHandoff}>Copy short</button>
-                <button type="button" onClick={() => void copyHandoffText(handoffCopyText)} disabled={desktopThreadBlocked || !handoffCopyText}>Copy full</button>
+                <button type="button" onClick={() => void copyHandoffText(shortHandoff, "short")} disabled={desktopThreadBlocked || !shortHandoff}>{copiedHandoff === "short" ? "Copied" : "Copy short"}</button>
+                <button type="button" onClick={() => void copyHandoffText(handoffCopyText, "full")} disabled={desktopThreadBlocked || !handoffCopyText}>{copiedHandoff === "full" ? "Copied" : "Copy full"}</button>
               </div>
             </section>
+
+            {serverPreferences && !serverPreferences.overlayHintDismissed && (
+              <aside className="desktop-overlay-hint">
+                <span>Select a thread · Hold M to talk · {desktopShortcutLabel} hides Mortic.</span>
+                <button type="button" aria-label="Dismiss hint" onClick={() => setServerPreferences({ ...serverPreferences, overlayHintDismissed: true })}>×</button>
+              </aside>
+            )}
+
+            {desktopState?.shortcutError && <p className="desktop-shortcut-error" role="alert">{desktopState.shortcutError}</p>}
+            {!desktopThreadBlocked && (sttProviderNotice || ttsProviderNotice || transportNotice) && (
+              <div className="voice-provider-notices desktop-provider-notices" role="status" aria-live="polite">
+                {transportNotice && <p>{transportNotice}</p>}
+                {sttProviderNotice && <p>{sttProviderNotice}</p>}
+                {ttsProviderNotice && <p>{ttsProviderNotice}</p>}
+              </div>
+            )}
 
             <footer className="desktop-overlay-config">
               <div className="desktop-overlay-config-summary">
@@ -2151,11 +1810,13 @@ export function App() {
           </section>
         )}
       </main>
+      {clipboardFallback && <ClipboardFallbackDialog text={clipboardFallback} onClose={() => setClipboardFallback("")} />}
+      </>
     );
   }
 
   return (
-    <main className="app-shell command-shell">
+    <main className="app-shell command-shell" data-session-ready={Boolean(session)}>
       <div className="ambient-void" aria-hidden="true" />
       <header className="command-topbar">
         <div className="brand-cluster">
@@ -2163,13 +1824,14 @@ export function App() {
         </div>
         <div className="source-form command-source-form">
           <span className="source-current" title={session?.sourceUri}>
-            {threadRequired ? "Select Codex thread" : activeProjectSource?.title ?? projectState?.project.title ?? "Pick Codex thread"}
+            {threadRequired ? "Select Codex thread" : activeForkTitle}
           </span>
           <ThreadPicker
             api={api}
             currentThreadId={session?.threadId}
-            disabled={sourcePending}
-            workspacePath={projectState?.project.workspacePath}
+            disabled={sourcePending || pending}
+            workspacePath={sourceIdentity?.workspacePath}
+            openRequest={finderOpenRequest}
             onSelect={(uri) => {
               setSourceDraft(uri);
               void updateSourceThread(uri).then((sourceUri) => {
@@ -2263,9 +1925,9 @@ export function App() {
                     </button>
                   ))}
                 </div>
-                <label className="toggle-control" title="Apply Caveman-lite compression to spoken voice answers only">
+                <label className="toggle-control" title="Keep spoken answers concise while preserving full screen notes">
                   <input type="checkbox" checked={voiceCaveman} onChange={(event) => setVoiceCaveman(event.target.checked)} disabled={scratchMode !== "voice" || pending} />
-                  Caveman speech
+                  Short spoken replies
                 </label>
                 <label className="control-select">
                   <span>Transport</span>
@@ -2329,22 +1991,33 @@ export function App() {
               {runtimeErrors.map((message) => <div key={message} className="notice error">{message}</div>)}
             </div>
           )}
+          {!onboarding?.ready && (
+            <div className="notice warning onboarding-inline" role="status">
+              <span>{session?.codex.error ?? "Codex is unavailable. Transcript and handoff remain available; turns are paused."}</span>
+              <button type="button" onClick={() => void refreshOnboarding()} disabled={onboardingBusy}>{onboardingBusy ? "Checking" : "Recheck"}</button>
+            </div>
+          )}
 
-          <section className="agent-canvas" aria-label="Mortic voice agent">
-            <div className={`agent-orb agent-${agentState} ${recognizing ? "agent-hearing" : ""} ${speechPhase === "speaking" ? "agent-speaking" : ""}`}>
+          <section className={`agent-canvas ${threadRequired ? "agent-canvas-thread-required" : ""}`} aria-label="Mortic voice agent">
+            {!threadRequired && <div className={`agent-orb agent-${agentState} ${recognizing ? "agent-hearing" : ""} ${speechPhase === "speaking" ? "agent-speaking" : ""}`}>
               <div className="orb-halo" />
               <div className="orb-core">
-                <span>{agentState === "idle" ? "READY" : agentState.toUpperCase()}</span>
+                <span>{interactionState}</span>
                 <strong>{codexStateLabel}</strong>
               </div>
-            </div>
-            <article className="live-transcript-card">
+            </div>}
+            <article className={`live-transcript-card ${threadRequired ? "thread-required-card" : ""}`}>
               <div className="live-card-header">
-                <span>Scratch</span>
+                <span>{threadRequired ? "Thread required" : "Scratch"}</span>
                 <button type="button" onClick={() => setTranscriptDrawerOpen(true)} disabled={threadRequired}>Open transcript</button>
               </div>
               {state.loading && <p>Loading session.</p>}
-              {!state.loading && threadRequired && <p>Select a Codex thread to start.</p>}
+              {!state.loading && threadRequired && (
+                <section className="thread-required-cta">
+                  <p>Select a Codex thread to start.</p>
+                  <button type="button" onClick={() => setFinderOpenRequest((value) => value + 1)}>Open Finder</button>
+                </section>
+              )}
               {!state.loading && !threadRequired && transcript.length === 0 && <p>Say or type a scratch turn.</p>}
               {!threadRequired && latestUserEntry && (
                 <section className="compact-turn compact-user">
@@ -2378,22 +2051,13 @@ export function App() {
                 <section className="compact-turn compact-queued">
                   <span>Queued</span>
                   <p>{queuedTurnPreview}</p>
+                  <button type="button" onClick={() => void cancelQueuedTurn()}>Cancel queued</button>
                 </section>
               )}
             </article>
             <CodexWorkingBuffer trace={activeAppServerTrace} pending={pending} hasAssistantText={Boolean(assistantDraftText.trim())} />
             <CodexLatentTraceBubble trace={activeAppServerTrace} pending={pending} />
             <nav className="bottom-voice-dock" aria-label="Voice controls">
-              <button
-                type="button"
-                onClick={() => setLiveActive(!liveModeActiveRef.current)}
-                className={liveModeActive ? "dock-active" : ""}
-                disabled={threadRequired || !LIVE_MODE_RUNTIME_ENABLED}
-                title="Live mode is paused until echo-safe turn detection is ready."
-              >
-                <span>Live</span>
-                <strong>{liveModeActive ? "On" : "Off"}</strong>
-              </button>
               <button
                 type="button"
                 className={`dock-mic ${recognizing ? "recording" : ""}`}
@@ -2419,18 +2083,39 @@ export function App() {
                   if (recognizingRef.current) stopPushToTalkCapture();
                 }}
                 onClick={(event) => event.preventDefault()}
+                onKeyDown={(event) => {
+                  if ((event.key === "Enter" || event.key === " ") && !event.repeat) {
+                    event.preventDefault();
+                    void startPushToTalkCapture();
+                  }
+                }}
+                onKeyUp={(event) => {
+                  if (event.key === "Enter" || event.key === " ") {
+                    event.preventDefault();
+                    stopPushToTalkCapture();
+                  }
+                }}
+                aria-pressed={recognizing}
+                title={threadRequired ? "Select a Codex thread first." : codexUnavailable ? "Codex is offline. Recheck setup above." : "Hold M or hold this button to talk."}
               >
                 <strong>{dockTalkLabel}</strong>
               </button>
               <button type="button" onClick={() => void interruptTurn()} disabled={threadRequired || (!pending && speechPhase === "idle")}>
-                <span>Interrupt</span>
-                <strong>{speechPhase === "speaking" ? "Speaking" : "Stop"}</strong>
+                <span>Audio</span>
+                <strong>Stop</strong>
               </button>
-              <button type="button" onClick={clearScratch} disabled={threadRequired || pending || transcript.length === 0}>
+              <button type="button" onClick={requestClearScratch} disabled={threadRequired || pending || (transcript.length === 0 && !draft.trim() && !handoff)}>
                 <span>Clear</span>
                 <strong>{prewarm.status === "ready" ? `Ready ${formatMs(prewarm.elapsedMs)}` : prewarm.status === "warming" ? "Warming" : "Reset"}</strong>
               </button>
             </nav>
+            {!threadRequired && (sttProviderNotice || ttsProviderNotice || transportNotice) && (
+              <div className="voice-provider-notices" role="status" aria-live="polite">
+                {transportNotice && <p>{transportNotice}</p>}
+                {sttProviderNotice && <p>{sttProviderNotice}</p>}
+                {ttsProviderNotice && <p>{ttsProviderNotice}</p>}
+              </div>
+            )}
             <form
               className="composer command-composer"
               onSubmit={(event) => {
@@ -2446,35 +2131,21 @@ export function App() {
                 rows={3}
                 disabled={threadRequired}
               />
-              <button type="submit" disabled={threadRequired || !draft.trim() || sparkBlocked}>{pending ? "Queue" : "Send"}</button>
+              <button type="submit" disabled={threadRequired || codexUnavailable || !draft.trim() || sparkBlocked}>Send</button>
             </form>
           </section>
         </section>
 
-        <InsightsPanel
-          draftExtractions={draftExtractions}
-          openProjectChart={openProjectChart}
-          chartPending={chartPending}
-          openCanonicalState={openCanonicalState}
-          canonicalStatePending={canonicalStatePending}
-          approveAllDrafts={() => commitCurrentSession(draftExtractions.map((item) => item.id))}
-          projectPending={projectPending}
-          pending={pending}
-          pendingExtractionCounts={pendingExtractionCounts}
-          extractionPreview={extractionPreview}
-          onOpenReview={() => setExtractionReviewOpen(true)}
-          handoffStateLabel={handoffStateLabel}
-          generateHandoff={generateHandoff}
-          handoffPending={handoffPending}
+        <HandoffPanel
+          pending={handoffPending}
           transcriptLength={transcript.length}
-          handoffPreview={handoffPreview}
-          tokenBudget={tokenBudget}
-          futureSavingsLine={futureSavingsLine}
-          copyHandoffText={copyHandoffText}
           shortHandoff={shortHandoff}
           fullHandoff={fullHandoff}
           handoff={handoff}
-          onOpenHandoffReview={() => setHandoffReviewOpen(true)}
+          onGenerate={() => void generateHandoff()}
+          onPreview={() => setHandoffReviewOpen(true)}
+          onCopy={(text, kind) => void copyHandoffText(text, kind)}
+          copied={copiedHandoff}
         />
       </section>
 
@@ -2487,40 +2158,8 @@ export function App() {
         />
       )}
 
-      {extractionReviewOpen && (
-        <ExtractionReviewModal
-          extractionReviewTab={extractionReviewTab}
-          setExtractionReviewTab={setExtractionReviewTab}
-          approvedExtractions={approvedExtractions}
-          draftExtractions={draftExtractions}
-          reviewExtractions={reviewExtractions}
-          reviewExtractionCounts={reviewExtractionCounts}
-          editingExtractionId={editingExtractionId}
-          editingExtractionType={editingExtractionType}
-          setEditingExtractionType={setEditingExtractionType}
-          editingExtractionTitle={editingExtractionTitle}
-          setEditingExtractionTitle={setEditingExtractionTitle}
-          editingExtractionBody={editingExtractionBody}
-          setEditingExtractionBody={setEditingExtractionBody}
-          editingExtractionTaskPlan={editingExtractionTaskPlan}
-          setEditingExtractionTaskPlan={setEditingExtractionTaskPlan}
-          beginEditExtraction={beginEditExtraction}
-          cancelEditExtraction={cancelEditExtraction}
-          saveExtractionEdit={saveExtractionEdit}
-          retireExtraction={retireExtraction}
-          updateExtraction={updateExtraction}
-          openProjectChart={openProjectChart}
-          openCanonicalState={openCanonicalState}
-          chartPending={chartPending}
-          canonicalStatePending={canonicalStatePending}
-          projectPending={projectPending}
-          onClose={() => setExtractionReviewOpen(false)}
-        />
-      )}
-
       {handoffReviewOpen && (
         <HandoffReviewModal
-          draftExtractions={draftExtractions}
           shortHandoff={shortHandoff}
           setShortHandoff={setShortHandoff}
           fullHandoff={fullHandoff}
@@ -2536,57 +2175,21 @@ export function App() {
         />
       )}
 
-      {chartOpen && chartState && (
-        <ChartModal
-          chartState={chartState}
-          chartPending={chartPending}
-          chartSearch={chartSearch}
-          setChartSearch={setChartSearch}
-          chartTypeFilter={chartTypeFilter}
-          setChartTypeFilter={setChartTypeFilter}
-          chartCodexStatus={chartCodexStatus}
-          chartCheckpoints={chartCheckpoints}
-          chartTimelineCheckpoints={chartTimelineCheckpoints}
-          chartDeltas={chartDeltas}
-          visibleChartDeltas={visibleChartDeltas}
-          chartDeltaCounts={chartDeltaCounts}
-          chartArtifacts={chartArtifacts}
-          selectedChartCheckpoint={selectedChartCheckpoint}
-          selectedChartDelta={selectedChartDelta}
-          selectedChartArtifact={selectedChartArtifact}
-          selectedProviderRefs={selectedProviderRefs}
-          artifactPreview={artifactPreview}
-          artifactPending={artifactPending}
-          setSelectedChartCheckpointId={setSelectedChartCheckpointId}
-          setSelectedChartDeltaId={setSelectedChartDeltaId}
-          refreshProjectChart={refreshProjectChart}
-          copyText={copyText}
-          onClose={() => setChartOpen(false)}
+      {clearConfirmOpen && (
+        <ConfirmDialog
+          title="Clear this scratch?"
+          detail="This removes the transcript, handoff, draft, and queued speech from every open Mortic surface."
+          confirmLabel="Clear scratch"
+          onClose={() => setClearConfirmOpen(false)}
+          onConfirm={() => {
+            setClearConfirmOpen(false);
+            void performClearScratch();
+          }}
         />
       )}
 
-      {canonicalStateOpen && canonicalState && (
-        <CanonicalStateModal
-          canonicalState={canonicalState}
-          copyText={copyText}
-          onClose={() => setCanonicalStateOpen(false)}
-        />
-      )}
+      {clipboardFallback && <ClipboardFallbackDialog text={clipboardFallback} onClose={() => setClipboardFallback("")} />}
 
-      {forkSheetScratch && (
-        <ForkActionSheet
-          key={forkSheetScratch.id}
-          scratch={forkSheetScratch}
-          fork={forkSheetRecord}
-          pending={forkAccessPending || chartPending}
-          onSelect={(providerRefId, continuation) => void setForkAccess(providerRefId, continuation)}
-          onClose={() => setForkSheetSessionId(null)}
-        />
-      )}
-
-      {onboarding && !onboarding.ready && (
-        <OnboardingScreen status={onboarding} busy={onboardingBusy} onRecheck={() => void refreshOnboarding()} />
-      )}
     </main>
   );
 }

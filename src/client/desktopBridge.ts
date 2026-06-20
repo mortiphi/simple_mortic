@@ -4,6 +4,8 @@ export type MorticDesktopState = {
   expanded: boolean;
   visible: boolean;
   overlayScale: number;
+  shortcutRegistered: boolean;
+  shortcutError?: string;
 };
 
 export type MorticDesktopBridge = {
@@ -12,6 +14,7 @@ export type MorticDesktopBridge = {
   hideOverlay: () => Promise<MorticDesktopState>;
   openFullApp: () => Promise<MorticDesktopState>;
   rememberSource: (sourceUri: string) => Promise<MorticDesktopState>;
+  openExternal: (url: string) => Promise<boolean>;
   onDesktopState?: (listener: (state: MorticDesktopState) => void) => () => void;
   onAudioCancel?: (listener: () => void) => () => void;
 };

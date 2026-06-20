@@ -171,8 +171,8 @@ assert.equal(
     progressSpeechActive: false,
     liveAssistantText: "buffered assistant text"
   }),
-  true,
-  "barge-in should still mute post-completion buffered playback"
+  false,
+  "stale visible assistant text after completion should not trigger barge-in"
 );
 assert.equal(
   hasAssistantOutputForBargeIn({

@@ -2,15 +2,15 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import path from "node:path";
 
-import { app, BrowserWindow, globalShortcut, ipcMain, screen } from "electron";
+import { app, BrowserWindow, globalShortcut, ipcMain, screen, shell } from "electron";
 
 import { morticHomeDir, startMorticRuntime, type StartedMorticRuntime } from "../cli/runtime.js";
-import { listCodexRecentThreads } from "../server/codex.js";
 import { parseThreadUri } from "../shared/threadUri.js";
 
 type DesktopPrefs = {
   explicitSourceUri?: string;
   rememberedAt?: string;
+  validatedExplicitSource?: boolean;
   collapsedOverlayScale?: number;
   expandedOverlayScale?: number;
   // Legacy scale from the first fixed-preset pass. Used as a fallback only.
@@ -33,6 +33,10 @@ let fullWindow: BrowserWindow | null = null;
 let overlayExpanded = false;
 let applyingOverlayBounds = false;
 let applyingOverlayBoundsTimer: ReturnType<typeof setTimeout> | undefined;
+let shortcutRegistered = false;
+let shortcutError: string | undefined;
+let captureScaleOverride: number | undefined;
+let captureSweepStarted = false;
 
 const hasSingleInstanceLock = app.requestSingleInstanceLock();
 
@@ -70,6 +74,7 @@ function clampOverlayScale(value: unknown): number {
 }
 
 function overlayScale(): number {
+  if (captureScaleOverride !== undefined) return captureScaleOverride;
   const prefs = readPrefs();
   const preferred = overlayExpanded ? prefs.expandedOverlayScale : prefs.collapsedOverlayScale;
   return clampOverlayScale(preferred ?? prefs.overlayScale);
@@ -79,29 +84,25 @@ function currentOverlayBaseSize() {
   return overlayExpanded ? OVERLAY_EXPANDED : OVERLAY_COLLAPSED;
 }
 
-function isWithinWorkspace(candidate: string, workspace: string): boolean {
-  const resolvedCandidate = path.resolve(candidate);
-  const resolvedWorkspace = path.resolve(workspace);
-  return resolvedCandidate === resolvedWorkspace || resolvedCandidate.startsWith(`${resolvedWorkspace}${path.sep}`);
-}
-
 async function initialThreadRef(): Promise<string | undefined> {
+  const captureSourceUri = process.env.MORTIC_DESKTOP_CAPTURE_SOURCE_URI?.trim();
+  if (captureSourceUri) {
+    try {
+      parseThreadUri(captureSourceUri);
+      return captureSourceUri;
+    } catch {
+      throw new Error("MORTIC_DESKTOP_CAPTURE_SOURCE_URI is not a valid Codex thread URI");
+    }
+  }
   const prefs = readPrefs();
   const explicitSourceUri = prefs.explicitSourceUri?.trim();
-  if (!explicitSourceUri) return undefined;
+  if (!explicitSourceUri || prefs.validatedExplicitSource !== true) return undefined;
 
-  let explicitThreadId: string;
   try {
-    explicitThreadId = parseThreadUri(explicitSourceUri).threadId;
+    parseThreadUri(explicitSourceUri);
   } catch {
     return undefined;
   }
-  const recentThreads = await listCodexRecentThreads({ limit: 100 }).catch(() => []);
-  const recent = recentThreads.find((thread) => thread.sourceUri === explicitSourceUri || thread.threadId === explicitThreadId);
-  if (recent?.cwd && !isWithinWorkspace(recent.cwd, process.cwd())) {
-    return undefined;
-  }
-
   return explicitSourceUri;
 }
 
@@ -153,8 +154,8 @@ function fullAppOwnsScreen(): boolean {
   return Boolean(fullWindow && !fullWindow.isDestroyed() && fullWindow.isVisible());
 }
 
-function hideOverlay(): void {
-  overlayWindow?.webContents.send("mortic-desktop:audio-cancel");
+function hideOverlay(cancelAudio = true): void {
+  if (cancelAudio) overlayWindow?.webContents.send("mortic-desktop:audio-cancel");
   overlayWindow?.hide();
   overlayWindow?.webContents.send("mortic-desktop:state", desktopState());
 }
@@ -205,9 +206,10 @@ function createOverlayWindow(): BrowserWindow {
       preload: path.join(runtime?.projectRoot ?? process.cwd(), "dist", "desktop", "desktop", "preload.cjs"),
       contextIsolation: true,
       nodeIntegration: false,
-      sandbox: false
+      sandbox: true
     }
   });
+  secureWindow(win);
   win.setAlwaysOnTop(true, "floating");
   overlayWindow = win;
   configureOverlayResizeMode();
@@ -216,6 +218,15 @@ function createOverlayWindow(): BrowserWindow {
   win.once("ready-to-show", () => {
     positionOverlay();
     if (!fullAppOwnsScreen()) win.show();
+  });
+  win.webContents.once("did-finish-load", () => {
+    if (process.env.MORTIC_DESKTOP_CAPTURE_DIR && !captureSweepStarted) {
+      captureSweepStarted = true;
+      void runVisualCaptureSweep(win, process.env.MORTIC_DESKTOP_CAPTURE_DIR).catch((error) => {
+        console.error(`Desktop capture sweep failed: ${error instanceof Error ? error.message : String(error)}`);
+        app.quit();
+      });
+    }
   });
   win.on("closed", () => {
     overlayWindow = null;
@@ -236,6 +247,148 @@ function createOverlayWindow(): BrowserWindow {
   return win;
 }
 
+async function runVisualCaptureSweep(win: BrowserWindow, outputDir: string): Promise<void> {
+  mkdirSync(outputDir, { recursive: true });
+  await waitForCaptureState(win, `Boolean(document.querySelector('[data-session-ready="true"]'))`);
+  const originalExpanded = overlayExpanded;
+  for (const expanded of [false, true]) {
+    overlayExpanded = expanded;
+    for (const scale of [1, 0.75, 0.55, 0.4]) {
+      captureScaleOverride = scale;
+      positionOverlay();
+      win.webContents.send("mortic-desktop:state", desktopState());
+      await waitForCaptureState(win, `(() => {
+        const shell = document.querySelector(".desktop-overlay-shell");
+        if (!shell) return false;
+        const modeReady = shell.classList.contains(${JSON.stringify(expanded ? "desktop-overlay-expanded" : "desktop-overlay-collapsed")});
+        const renderedScale = Number.parseFloat(shell.style.getPropertyValue("--desktop-overlay-scale"));
+        return modeReady && Math.abs(renderedScale - ${scale}) < 0.01;
+      })()`);
+      await new Promise((resolve) => setTimeout(resolve, 180));
+      const image = await win.webContents.capturePage();
+      const mode = expanded ? "expanded" : "collapsed";
+      const stem = `${mode}-${Math.round(scale * 100)}`;
+      writeFileSync(path.join(outputDir, `${stem}.png`), image.toPNG());
+      writeFileSync(
+        path.join(outputDir, `${stem}.json`),
+        `${JSON.stringify(await captureLayoutMetrics(win, mode, scale), null, 2)}\n`,
+        "utf8"
+      );
+    }
+  }
+  const appWindow = createFullWindow();
+  await waitForCaptureState(appWindow, `Boolean(document.querySelector('.app-shell[data-session-ready="true"]'))`);
+  await new Promise((resolve) => setTimeout(resolve, 250));
+  writeFileSync(path.join(outputDir, "full-app.png"), (await appWindow.webContents.capturePage()).toPNG());
+  writeFileSync(
+    path.join(outputDir, "full-app.json"),
+    `${JSON.stringify(await captureFullAppMetrics(appWindow), null, 2)}\n`,
+    "utf8"
+  );
+  appWindow.destroy();
+  captureScaleOverride = undefined;
+  overlayExpanded = originalExpanded;
+  app.quit();
+}
+
+async function captureFullAppMetrics(win: BrowserWindow): Promise<unknown> {
+  return win.webContents.executeJavaScript(`(() => {
+    const shell = document.querySelector(".app-shell");
+    const selectors = [".command-topbar", ".command-main", ".handoff-panel", ".bottom-voice-dock", ".studio-settings"];
+    const elements = selectors.flatMap((selector) => [...document.querySelectorAll(selector)].map((element) => {
+      const rect = element.getBoundingClientRect();
+      return { selector, rect: { left: rect.left, top: rect.top, right: rect.right, bottom: rect.bottom, width: rect.width, height: rect.height } };
+    }));
+    return {
+      viewport: { width: innerWidth, height: innerHeight },
+      sessionReady: shell?.dataset.sessionReady === "true",
+      documentOverflow: { x: document.documentElement.scrollWidth - innerWidth, y: document.documentElement.scrollHeight - innerHeight },
+      elements
+    };
+  })()`);
+}
+
+async function waitForCaptureState(win: BrowserWindow, expression: string): Promise<void> {
+  const deadline = Date.now() + 30_000;
+  while (Date.now() < deadline) {
+    if (await win.webContents.executeJavaScript(expression, true)) return;
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  throw new Error("Renderer did not reach a stable capture state");
+}
+
+async function captureLayoutMetrics(win: BrowserWindow, mode: string, scale: number): Promise<unknown> {
+  return win.webContents.executeJavaScript(`(() => {
+    const selectors = [
+      ".desktop-hud",
+      ".desktop-hud-identity",
+      ".desktop-hud-state",
+      ".desktop-hud-actions",
+      ".desktop-command-panel",
+      ".desktop-panel-header",
+      ".desktop-overlay-transcript",
+      ".desktop-overlay-transcript > .live-card-header",
+      ".desktop-overlay-transcript > .compact-turn",
+      ".codex-working-buffer",
+      ".desktop-overlay-controls",
+      ".desktop-overlay-composer",
+      ".desktop-handoff-card",
+      ".desktop-overlay-hint",
+      ".desktop-provider-notices",
+      ".desktop-overlay-config"
+    ];
+    const visible = (element) => {
+      const style = getComputedStyle(element);
+      const rect = element.getBoundingClientRect();
+      return style.display !== "none" && style.visibility !== "hidden" && rect.width > 0 && rect.height > 0;
+    };
+    const rectFor = (element) => {
+      const rect = element.getBoundingClientRect();
+      return {
+        left: Math.round(rect.left * 100) / 100,
+        top: Math.round(rect.top * 100) / 100,
+        right: Math.round(rect.right * 100) / 100,
+        bottom: Math.round(rect.bottom * 100) / 100,
+        width: Math.round(rect.width * 100) / 100,
+        height: Math.round(rect.height * 100) / 100
+      };
+    };
+    const elements = selectors.flatMap((selector) => [...document.querySelectorAll(selector)]
+      .filter(visible)
+      .map((element, index) => ({ selector, index, element, rect: rectFor(element) })));
+    const outside = elements.filter(({ rect }) => rect.left < -1 || rect.top < -1 || rect.right > innerWidth + 1 || rect.bottom > innerHeight + 1)
+      .map(({ selector, index, rect }) => ({ selector, index, rect }));
+    const parentClipping = elements.filter(({ element, rect }) => {
+      if (!element.matches(".desktop-overlay-transcript > .live-card-header, .desktop-overlay-transcript > .compact-turn")) return false;
+      const parent = element.parentElement?.getBoundingClientRect();
+      return Boolean(parent && (rect.left < parent.left - 1 || rect.top < parent.top - 1 || rect.right > parent.right + 1 || rect.bottom > parent.bottom + 1));
+    }).map(({ selector, index, rect }) => ({ selector, index, rect }));
+    const major = elements.filter(({ element }) => element.parentElement?.classList.contains("desktop-command-panel") || element.parentElement?.classList.contains("desktop-hud"));
+    const overlaps = [];
+    for (let left = 0; left < major.length; left += 1) {
+      for (let right = left + 1; right < major.length; right += 1) {
+        const a = major[left];
+        const b = major[right];
+        const width = Math.min(a.rect.right, b.rect.right) - Math.max(a.rect.left, b.rect.left);
+        const height = Math.min(a.rect.bottom, b.rect.bottom) - Math.max(a.rect.top, b.rect.top);
+        if (width > 1 && height > 1) overlaps.push({ left: a.selector, right: b.selector, width, height });
+      }
+    }
+    const shell = document.querySelector(".desktop-overlay-shell");
+    return {
+      viewport: { width: innerWidth, height: innerHeight },
+      density: shell ? [...shell.classList].find((name) => name.startsWith("desktop-density-")) : null,
+      sessionReady: shell?.dataset.sessionReady === "true",
+      threadRequired: shell?.classList.contains("desktop-thread-required") ?? false,
+      documentOverflow: { x: document.documentElement.scrollWidth - innerWidth, y: document.documentElement.scrollHeight - innerHeight },
+      outside,
+      parentClipping,
+      overlaps,
+      elements: elements.map(({ selector, index, rect }) => ({ selector, index, rect }))
+    };
+  })()`);
+}
+
 function createFullWindow(): BrowserWindow {
   const win = new BrowserWindow({
     width: 1320,
@@ -247,19 +400,20 @@ function createFullWindow(): BrowserWindow {
       preload: path.join(runtime?.projectRoot ?? process.cwd(), "dist", "desktop", "desktop", "preload.cjs"),
       contextIsolation: true,
       nodeIntegration: false,
-      sandbox: false
+      sandbox: true
     }
   });
+  secureWindow(win);
   win.loadURL(fullAppUrl());
   win.once("ready-to-show", () => {
-    hideOverlay();
+    hideOverlay(false);
     win.show();
   });
-  win.on("show", hideOverlay);
-  win.on("focus", hideOverlay);
-  win.on("maximize", hideOverlay);
-  win.on("enter-full-screen", hideOverlay);
-  win.on("restore", hideOverlay);
+  win.on("show", () => hideOverlay(false));
+  win.on("focus", () => hideOverlay(false));
+  win.on("maximize", () => hideOverlay(false));
+  win.on("enter-full-screen", () => hideOverlay(false));
+  win.on("restore", () => hideOverlay(false));
   win.on("closed", () => {
     fullWindow = null;
     if (runtime) {
@@ -270,7 +424,7 @@ function createFullWindow(): BrowserWindow {
 }
 
 function showFullApp(): void {
-  hideOverlay();
+  hideOverlay(false);
   if (!fullWindow) {
     fullWindow = createFullWindow();
     return;
@@ -282,7 +436,7 @@ function showFullApp(): void {
 
 function toggleOverlay(): void {
   if (fullAppOwnsScreen()) {
-    hideOverlay();
+    hideOverlay(false);
     fullWindow?.focus();
     return;
   }
@@ -291,7 +445,7 @@ function toggleOverlay(): void {
     return;
   }
   if (overlayWindow.isVisible()) {
-    overlayWindow.hide();
+    hideOverlay(true);
   } else {
     revealOverlay();
   }
@@ -309,8 +463,33 @@ function desktopState() {
     shortcutLabel: process.platform === "darwin" ? "Cmd+Shift+M" : "Ctrl+Shift+M",
     expanded: overlayExpanded,
     visible: overlayWindow?.isVisible() ?? false,
-    overlayScale: overlayScale()
+    overlayScale: overlayScale(),
+    shortcutRegistered,
+    shortcutError
   };
+}
+
+function approvedExternalUrl(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  try {
+    const url = new URL(value);
+    return url.protocol === "https:" ? url.toString() : null;
+  } catch {
+    return null;
+  }
+}
+
+function secureWindow(win: BrowserWindow): void {
+  win.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
+  win.webContents.on("will-navigate", (event, target) => {
+    const allowedOrigin = runtime ? new URL(runtime.url).origin : null;
+    try {
+      if (allowedOrigin && new URL(target).origin === allowedOrigin) return;
+    } catch {
+      // Invalid renderer navigation targets are denied below.
+    }
+    event.preventDefault();
+  });
 }
 
 function registerIpc(): void {
@@ -332,10 +511,17 @@ function registerIpc(): void {
       writePrefs({
         ...readPrefs(),
         explicitSourceUri: sourceUri.trim(),
-        rememberedAt: new Date().toISOString()
+        rememberedAt: new Date().toISOString(),
+        validatedExplicitSource: true
       });
     }
     return desktopState();
+  });
+  ipcMain.handle("mortic-desktop:open-external", async (_event, value: unknown) => {
+    const url = approvedExternalUrl(value);
+    if (!url) return false;
+    await shell.openExternal(url);
+    return true;
   });
 }
 
@@ -353,7 +539,9 @@ async function boot(): Promise<void> {
   });
 
   overlayWindow = createOverlayWindow();
-  globalShortcut.register(SHORTCUT, toggleOverlay);
+  shortcutRegistered = globalShortcut.register(SHORTCUT, toggleOverlay);
+  shortcutError = shortcutRegistered ? undefined : `${SHORTCUT} is already in use by another application.`;
+  overlayWindow.webContents.send("mortic-desktop:state", desktopState());
 }
 
 app.whenReady().then(() => {

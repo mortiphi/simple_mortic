@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import path from "node:path";
 import { Readable } from "node:stream";
 
 import cors from "@fastify/cors";
@@ -22,6 +23,8 @@ import {
   runCodexTurn
 } from "./codex.js";
 import type { SessionStorage } from "./storage.js";
+import { createMemoryPreferencesStore, type PreferencesStore } from "./preferences.js";
+import { SessionCoordinator, isAudioLeasePhase } from "./sessionCoordinator.js";
 import type { ProjectStore } from "./projectStorage.js";
 import { createProjectStore, projectDirForWorkspace } from "./projectStorage.js";
 import { codexProviderAdapter } from "./providerAdapters.js";
@@ -44,9 +47,13 @@ import {
   ttsProviders,
   codexApprovalPolicies,
   codexFilesystemModes,
+  codexAccessPresets,
+  clientSurfaces,
+  sttProviders,
+  transportProviders,
   type AppServerConfigMetadata,
   type AppServerActivity,
-  type CodexRuntimePolicy,
+  type AudioCommandRequest,
   type AudioHealthRequest,
   type ApproveCompilationRequest,
   type DeepgramHealthResponse,
@@ -54,15 +61,22 @@ import {
   type ElevenLabsHealthResponse,
   type ForkCheckpoint,
   type HandoffRequest,
+  type ClientPresenceRequest,
   type LiveKitTokenRequest,
   type MorticSession,
+  type MorticPreferences,
+  type MorticPreferencesPatch,
   type OnboardingStatusResponse,
   type PrewarmRequest,
   type ProgressSpeechTrace,
   type ProviderForkAccessRequest,
   type ProviderForkAccessResponse,
+  type QueuedTurn,
   type ReasoningEffort,
   type RuntimeContextRestore,
+  type SessionSnapshot,
+  type SessionStreamEvent,
+  type SessionUiPatch,
   type ScratchMode,
   type SkillSyncStatus,
   type SparkContextCompactRequest,
@@ -73,7 +87,8 @@ import {
   type TurnLogEntry,
   type TurnRequest,
   type TurnRun,
-  type UpdateExtractedItemRequest
+  type UpdateExtractedItemRequest,
+  type CodexRuntimePolicy
 } from "../shared/types.js";
 import {
   classifyModelTransitionTokenCount,
@@ -97,6 +112,8 @@ import {
 type MorticServerOptions = {
   storage: SessionStorage;
   projectStore?: ProjectStore;
+  canonicalMemoryEnabled?: boolean;
+  preferencesStore?: PreferencesStore;
   staticDir?: string;
   runtimeContext?: RuntimeContextRestore;
   projectTitle?: string;
@@ -105,6 +122,24 @@ type MorticServerOptions = {
 
 const DEFAULT_REASONING_EFFORT: ReasoningEffort = defaultScratchSettings.reasoningEffort;
 const DEFAULT_SCRATCH_MODE: ScratchMode = "text";
+const ACTIVE_TURN_STALE_MS = Number(process.env.MORTIC_ACTIVE_TURN_STALE_MS ?? 20 * 60 * 1000);
+const TURN_REPLAY_TTL_MS = 10 * 60 * 1000;
+
+export function defaultMorticPreferences(): MorticPreferences {
+  return {
+    initialized: false,
+    codexModel: DEFAULT_CODEX_MODEL,
+    reasoningEffort: DEFAULT_REASONING_EFFORT,
+    serviceTier: null,
+    codexAccessPreset: "approve",
+    scratchMode: defaultScratchSettings.scratchMode,
+    shortSpokenReplies: false,
+    transportProvider: getLiveKitStatus().defaultTransport,
+    sttProvider: getSttStatus().defaultProvider,
+    ttsProvider: getTtsStatus().defaultProvider,
+    overlayHintDismissed: false
+  };
+}
 
 type EffectiveScratchSettings = {
   scratchMode: ScratchMode;
@@ -676,14 +711,55 @@ export async function createMorticServer(options: MorticServerOptions) {
   });
   const turnStreams = new Map<string, Set<(event: unknown) => void>>();
   const turnReplay = new Map<string, { text: string; updatedAt: string }>();
+  const sessionStreams = new Set<(event: SessionStreamEvent) => void>();
+  const preferencesStore = options.preferencesStore ?? createMemoryPreferencesStore(defaultMorticPreferences());
+  const canonicalMemoryEnabled = options.canonicalMemoryEnabled ?? false;
   let runtimeContext = options.runtimeContext;
   let appServerConfigCache: AppServerConfigMetadata | undefined;
+  const sourceNameCache = new Map<string, { name: string; expiresAt: number }>();
+  let sessionRevision = 0;
+  let sessionBroadcastQueue: Promise<void> = Promise.resolve();
+  const sessionCoordinator = new SessionCoordinator((reason) => {
+    void emitSessionSnapshot(reason);
+  });
+  const leaseSweep = setInterval(() => sessionCoordinator.sweep(), 5_000);
+  const turnSweep = setInterval(() => {
+    sweepTurnReplay();
+    void sweepStaleActiveTurn();
+  }, 15_000);
+  app.addHook("onClose", async () => {
+    clearInterval(leaseSweep);
+    clearInterval(turnSweep);
+  });
 
   function currentRuntimeContext(session?: MorticSession): RuntimeContextRestore | undefined {
     return session?.runtimeContext ?? runtimeContext;
   }
 
-  function sessionResponse(session: MorticSession) {
+  async function sourceIdentity(session: MorticSession) {
+    const context = currentRuntimeContext(session);
+    const workspacePath = context?.effectiveCwd ?? process.cwd();
+    const placeholder = session.threadId === "00000000-0000-0000-0000-000000000000";
+    const cachedName = sourceNameCache.get(session.threadId);
+    let threadName = "No thread selected";
+    if (!placeholder) {
+      if (cachedName && cachedName.expiresAt > Date.now()) {
+        threadName = cachedName.name;
+      } else {
+        threadName = (await codexProviderAdapter.threadName(session.threadId)) ?? prewarmThreadName(session.threadId);
+        sourceNameCache.set(session.threadId, { name: threadName, expiresAt: Date.now() + 30_000 });
+      }
+    }
+    return {
+      projectName: path.basename(workspacePath) || "Mortic",
+      workspacePath,
+      threadName,
+      threadId: session.threadId,
+      sourceUri: session.sourceUri
+    };
+  }
+
+  async function sessionResponse(session: MorticSession) {
     return {
       session,
       runtimeContext: currentRuntimeContext(session),
@@ -697,6 +773,40 @@ export async function createMorticServer(options: MorticServerOptions) {
       livekit: getLiveKitStatus()
     };
   }
+
+  async function sessionSnapshot(session: MorticSession, reason: string): Promise<SessionSnapshot> {
+    return {
+      ...(await sessionResponse(session)),
+      revision: sessionRevision,
+      reason,
+      sourceIdentity: await sourceIdentity(session),
+      preferences: await preferencesStore.read(),
+      audioLease: sessionCoordinator.state()
+    };
+  }
+
+  function emitSessionEvent(event: SessionStreamEvent): void {
+    for (const listener of Array.from(sessionStreams)) {
+      try {
+        listener(event);
+      } catch (error) {
+        console.warn(`Mortic session stream listener failed: ${error instanceof Error ? error.message : String(error)}`);
+        sessionStreams.delete(listener);
+      }
+    }
+  }
+
+  async function emitSessionSnapshot(reason: string, suppliedSession?: MorticSession): Promise<void> {
+    const run = sessionBroadcastQueue.then(async () => {
+      sessionRevision += 1;
+      const session = suppliedSession ?? (await options.storage.read());
+      emitSessionEvent({ type: "snapshot", snapshot: await sessionSnapshot(session, reason) });
+    });
+    sessionBroadcastQueue = run.catch(() => undefined);
+    await run;
+  }
+
+  sessionCoordinator.subscribe(emitSessionEvent);
 
   async function refreshAppServerConfig(): Promise<void> {
     try {
@@ -713,7 +823,15 @@ export async function createMorticServer(options: MorticServerOptions) {
   function emitTurnEvent(turnId: string, event: unknown): void {
     const listeners = turnStreams.get(turnId);
     if (!listeners) return;
-    for (const listener of listeners) listener(event);
+    for (const listener of Array.from(listeners)) {
+      try {
+        listener(event);
+      } catch (error) {
+        console.warn(`Mortic turn stream listener failed: ${error instanceof Error ? error.message : String(error)}`);
+        listeners.delete(listener);
+      }
+    }
+    if (listeners.size === 0) turnStreams.delete(turnId);
   }
 
   function subscribeTurn(turnId: string, listener: (event: unknown) => void): () => void {
@@ -730,6 +848,7 @@ export async function createMorticServer(options: MorticServerOptions) {
   }
 
   function updateTurnReplay(turnId: string, text: string): void {
+    sweepTurnReplay();
     turnReplay.set(turnId, {
       text,
       updatedAt: new Date().toISOString()
@@ -740,12 +859,111 @@ export async function createMorticServer(options: MorticServerOptions) {
     turnReplay.delete(turnId);
   }
 
+  function sweepTurnReplay(): void {
+    const now = Date.now();
+    for (const [turnId, replay] of turnReplay.entries()) {
+      const updatedAt = Date.parse(replay.updatedAt);
+      if (!Number.isFinite(updatedAt) || now - updatedAt > TURN_REPLAY_TTL_MS) {
+        turnReplay.delete(turnId);
+      }
+    }
+  }
+
+  function queuedTurnFromRequest(session: MorticSession, body: TurnRequest): QueuedTurn {
+    const now = new Date().toISOString();
+    const sourceSurface = clientSurfaces.includes(body.surface as (typeof clientSurfaces)[number])
+      ? body.surface
+      : undefined;
+    return {
+      id: randomUUID(),
+      status: "queued",
+      text: body.text.trim(),
+      createdAt: now,
+      updatedAt: now,
+      sourceUri: session.sourceUri,
+      threadId: session.threadId,
+      sourceClientId: typeof body.clientId === "string" && body.clientId.trim() ? body.clientId.trim() : undefined,
+      sourceSurface,
+      request: {
+        ...body,
+        text: body.text.trim(),
+        surface: sourceSurface
+      }
+    };
+  }
+
+  async function storeQueuedTurn(session: MorticSession, body: TurnRequest, reason: string): Promise<MorticSession> {
+    const queued = queuedTurnFromRequest(session, body);
+    const updated = await options.storage.setQueuedTurn(queued);
+    await emitSessionSnapshot(reason, updated);
+    return updated;
+  }
+
+  async function drainQueuedTurn(reason: string): Promise<void> {
+    const session = await options.storage.read();
+    const queued = session.queuedTurn;
+    if (!queued || queued.status === "draining") return;
+    if (queued.sourceUri !== session.sourceUri || queued.threadId !== session.threadId) {
+      const cleared = await options.storage.setQueuedTurn(undefined);
+      await emitSessionSnapshot(`${reason}-queued-turn-stale-source`, cleared);
+      return;
+    }
+    if (session.activeTurn?.status === "running") return;
+
+    const draining = await options.storage.setQueuedTurn({
+      ...queued,
+      status: "draining",
+      updatedAt: new Date().toISOString()
+    });
+    await emitSessionSnapshot(`${reason}-queued-turn-draining`, draining);
+    const cleared = await options.storage.setQueuedTurn(undefined);
+    await emitSessionSnapshot(`${reason}-queued-turn-starting`, cleared);
+    void app.inject({
+      method: "POST",
+      url: "/api/turn",
+      payload: queued.request
+    }).then((response) => {
+      if (response.statusCode >= 400) {
+        console.warn(`Mortic queued turn failed to start: ${response.statusCode} ${response.body}`);
+      }
+    }).catch((error) => {
+      console.warn(`Mortic queued turn failed to start: ${error instanceof Error ? error.message : String(error)}`);
+    });
+  }
+
+  async function sweepStaleActiveTurn(): Promise<void> {
+    const session = await options.storage.read();
+    const turn = session.activeTurn;
+    if (!turn || turn.status !== "running") return;
+    const updatedAt = Date.parse(turn.updatedAt);
+    if (Number.isFinite(updatedAt) && Date.now() - updatedAt < ACTIVE_TURN_STALE_MS) return;
+    const startedAt = Number.isNaN(Date.parse(turn.createdAt)) ? Date.now() : Date.parse(turn.createdAt);
+    const updated = await addTurnLog(options.storage, turn.id, startedAt, "Recovered stale running turn", "No turn update observed before timeout.", {
+      status: "failed",
+      error: "Recovered stale running turn",
+      metrics: {
+        totalMs: Date.now() - startedAt
+      }
+    });
+    clearTurnReplay(turn.id);
+    if (updated.activeTurn?.id === turn.id) {
+      emitTurnEvent(turn.id, {
+        type: "failed",
+        turn: updated.activeTurn,
+        session: updated
+      });
+      await emitSessionSnapshot("turn-stale-recovered", updated);
+      await drainQueuedTurn("turn-stale-recovered");
+    }
+  }
+
   function warnProjectStoreFailure(operation: string, error: unknown): void {
     const message = error instanceof Error ? error.message : String(error);
     console.warn(`Mortic project store ${operation} failed: ${message}`);
   }
 
   async function syncProjectSession(session: MorticSession, type: string, detail?: unknown): Promise<void> {
+    if (!canonicalMemoryEnabled) return;
     try {
       await options.projectStore?.syncSession(session, {
         type,
@@ -757,6 +975,7 @@ export async function createMorticServer(options: MorticServerOptions) {
   }
 
   async function recordProjectEvent(session: MorticSession, type: string, detail?: unknown): Promise<void> {
+    if (!canonicalMemoryEnabled) return;
     try {
       await options.projectStore?.recordEvent(session, {
         type,
@@ -767,8 +986,25 @@ export async function createMorticServer(options: MorticServerOptions) {
     }
   }
 
+  function canonicalUnavailable(session?: MorticSession) {
+    return {
+      code: canonicalMemoryEnabled ? "project_storage_unavailable" : "canonical_memory_disabled",
+      error: canonicalMemoryEnabled ? "Project storage is unavailable" : "Canonical memory is disabled",
+      ...(session ? { session } : {})
+    };
+  }
+
   await app.register(cors, {
-    origin: true
+    origin(origin, callback) {
+      if (!origin) return callback(null, true);
+      try {
+        const url = new URL(origin);
+        const loopback = url.protocol === "http:" && (url.hostname === "127.0.0.1" || url.hostname === "localhost" || url.hostname === "::1");
+        return callback(null, loopback);
+      } catch {
+        return callback(null, false);
+      }
+    }
   });
   await app.register(websocket);
 
@@ -804,45 +1040,167 @@ export async function createMorticServer(options: MorticServerOptions) {
     const session = await options.storage.read();
     await refreshAppServerConfig();
     await syncProjectSession(session, "session.loaded");
-    return sessionResponse(session);
+    return sessionSnapshot(session, "session-read");
   });
 
-  app.get("/api/project", async () => {
-    const session = await options.storage.read();
-    if (!options.projectStore) {
-      return {
-        error: "Project storage is unavailable"
-      };
+  app.get<{ Querystring: { clientId?: string; surface?: string } }>("/api/session/stream", async (request, reply) => {
+    const clientId = request.query.clientId?.trim();
+    const surface = request.query.surface;
+    if (!clientId || !clientSurfaces.includes(surface as (typeof clientSurfaces)[number])) {
+      return reply.code(400).send({ error: "A valid clientId and surface are required" });
     }
+
+    reply.raw.setHeader("Content-Type", "text/event-stream");
+    reply.raw.setHeader("Cache-Control", "no-cache, no-transform");
+    reply.raw.setHeader("Connection", "keep-alive");
+    reply.raw.setHeader("X-Accel-Buffering", "no");
+    reply.hijack();
+
+    const write = (event: SessionStreamEvent) => reply.raw.write(`data: ${JSON.stringify(event)}\n\n`);
+    const session = await options.storage.read();
+    write({ type: "snapshot", snapshot: await sessionSnapshot(session, "stream-connected") });
+    const unsubscribe = (() => {
+      sessionStreams.add(write);
+      return () => sessionStreams.delete(write);
+    })();
+    const keepAlive = setInterval(() => reply.raw.write(": keepalive\n\n"), 10_000);
+    request.raw.on("close", () => {
+      clearInterval(keepAlive);
+      unsubscribe();
+      reply.raw.end();
+    });
+  });
+
+  app.patch<{ Body: SessionUiPatch }>("/api/session/ui", async (request, reply) => {
+    if (request.body?.composerDraft !== undefined && typeof request.body.composerDraft !== "string") {
+      return reply.code(400).send({ error: "composerDraft must be a string" });
+    }
+    const composerDraft = (request.body?.composerDraft ?? "").slice(0, 100_000);
+    const session = await options.storage.setComposerDraft(composerDraft);
+    await emitSessionSnapshot("composer-updated", session);
+    return sessionSnapshot(session, "composer-updated");
+  });
+
+  app.delete("/api/session/queued-turn", async () => {
+    const session = await options.storage.setQueuedTurn(undefined);
+    await emitSessionSnapshot("queued-turn-cleared", session);
+    return sessionSnapshot(session, "queued-turn-cleared");
+  });
+
+  app.patch<{ Body: MorticPreferencesPatch }>("/api/preferences", async (request, reply) => {
+    const current = await preferencesStore.read();
+    const body = request.body ?? {};
+    const model = typeof body.codexModel === "string" ? body.codexModel.trim() : current.codexModel;
+    const modelOption = appServerConfigCache?.models.find((candidate) => candidate.model === model || candidate.id === model);
+    if (body.codexModel !== undefined && appServerConfigCache?.models.length && !modelOption) {
+      return reply.code(400).send({ error: "Model is not available from Codex app-server" });
+    }
+    if (body.reasoningEffort !== undefined && !isReasoningEffort(body.reasoningEffort)) {
+      return reply.code(400).send({ error: "Unsupported reasoning effort" });
+    }
+    const selectedModel = modelOption ?? appServerConfigCache?.models.find((candidate) => candidate.model === current.codexModel || candidate.id === current.codexModel);
+    if (
+      body.reasoningEffort !== undefined &&
+      selectedModel?.supportedReasoningEfforts.length &&
+      !selectedModel.supportedReasoningEfforts.some((option) => option.reasoningEffort === body.reasoningEffort)
+    ) {
+      return reply.code(400).send({ error: "Reasoning effort is not supported by the selected model" });
+    }
+    if (
+      body.serviceTier !== undefined &&
+      body.serviceTier !== null &&
+      selectedModel?.serviceTiers.length &&
+      !selectedModel.serviceTiers.some((tier) => tier.id === body.serviceTier)
+    ) {
+      return reply.code(400).send({ error: "Service tier is not supported by the selected model" });
+    }
+    if (body.codexAccessPreset !== undefined && !codexAccessPresets.includes(body.codexAccessPreset)) {
+      return reply.code(400).send({ error: "Unsupported access preset" });
+    }
+    if (body.scratchMode !== undefined && !isScratchMode(body.scratchMode)) {
+      return reply.code(400).send({ error: "Unsupported scratch mode" });
+    }
+    if (body.transportProvider !== undefined && !transportProviders.includes(body.transportProvider)) {
+      return reply.code(400).send({ error: "Unsupported transport provider" });
+    }
+    if (body.sttProvider !== undefined && !sttProviders.includes(body.sttProvider)) {
+      return reply.code(400).send({ error: "Unsupported STT provider" });
+    }
+    if (body.ttsProvider !== undefined && !ttsProviders.includes(body.ttsProvider)) {
+      return reply.code(400).send({ error: "Unsupported TTS provider" });
+    }
+    if (body.transportProvider !== undefined && !getLiveKitStatus().availableTransports.includes(body.transportProvider)) {
+      return reply.code(400).send({ error: "Transport provider is not configured" });
+    }
+    if (body.sttProvider !== undefined && !getSttStatus().availableProviders.includes(body.sttProvider)) {
+      return reply.code(400).send({ error: "STT provider is not configured" });
+    }
+    if (body.ttsProvider !== undefined && !getTtsStatus().availableProviders.includes(body.ttsProvider)) {
+      return reply.code(400).send({ error: "TTS provider is not configured" });
+    }
+    if (body.shortSpokenReplies !== undefined && typeof body.shortSpokenReplies !== "boolean") {
+      return reply.code(400).send({ error: "shortSpokenReplies must be boolean" });
+    }
+    if (body.overlayHintDismissed !== undefined && typeof body.overlayHintDismissed !== "boolean") {
+      return reply.code(400).send({ error: "overlayHintDismissed must be boolean" });
+    }
+    const preferences = await preferencesStore.patch({
+      ...body,
+      codexModel: modelOption?.model ?? model,
+      initialized: body.initialized ?? true
+    });
+    await emitSessionSnapshot("preferences-updated");
+    return { preferences, revision: sessionRevision };
+  });
+
+  app.post<{ Body: ClientPresenceRequest }>("/api/session/presence", async (request, reply) => {
+    const body = request.body;
+    if (
+      !body ||
+      typeof body.clientId !== "string" ||
+      !clientSurfaces.includes(body.surface) ||
+      typeof body.focused !== "boolean" ||
+      typeof body.visible !== "boolean" ||
+      (body.audioPhase !== undefined && !isAudioLeasePhase(body.audioPhase))
+    ) {
+      return reply.code(400).send({ error: "Invalid client presence" });
+    }
+    return { audioLease: sessionCoordinator.presence(body) };
+  });
+
+  app.post<{ Body: AudioCommandRequest }>("/api/session/audio-command", async (request, reply) => {
+    const body = request.body;
+    if (
+      !body ||
+      typeof body.clientId !== "string" ||
+      !clientSurfaces.includes(body.surface) ||
+      !["interrupt", "barge-in", "hide"].includes(body.command)
+    ) {
+      return reply.code(400).send({ error: "Invalid audio command" });
+    }
+    return { audioLease: sessionCoordinator.command(body) };
+  });
+
+  app.get("/api/project", async (_request, reply) => {
+    const session = await options.storage.read();
+    if (!canonicalMemoryEnabled || !options.projectStore) return reply.code(503).send(canonicalUnavailable(session));
     return options.projectStore.snapshot(session);
   });
 
   app.get("/api/project/canonical-state", async (_request, reply) => {
-    if (!options.projectStore) {
-      return reply.code(503).send({
-        error: "Project storage is unavailable"
-      });
-    }
+    if (!canonicalMemoryEnabled || !options.projectStore) return reply.code(503).send(canonicalUnavailable());
     return options.projectStore.canonicalState();
   });
 
   app.get("/api/project/chart", async (_request, reply) => {
     const session = await options.storage.read();
-    if (!options.projectStore) {
-      return reply.code(503).send({
-        error: "Project storage is unavailable"
-      });
-    }
+    if (!canonicalMemoryEnabled || !options.projectStore) return reply.code(503).send(canonicalUnavailable(session));
     return options.projectStore.chart(currentRuntimeContext(session));
   });
 
   app.post<{ Body: ProviderForkAccessRequest }>("/api/project/fork/access", async (request, reply) => {
     const session = await options.storage.read();
-    if (!options.projectStore) {
-      return reply.code(503).send({
-        error: "Project storage is unavailable"
-      });
-    }
+    if (!canonicalMemoryEnabled || !options.projectStore) return reply.code(503).send(canonicalUnavailable(session));
     const body = request.body ?? ({} as ProviderForkAccessRequest);
     if (!body.providerRefId || !providerForkContinuations.includes(body.requestedAccessPreset)) {
       return reply.code(400).send({
@@ -873,11 +1231,7 @@ export async function createMorticServer(options: MorticServerOptions) {
     };
   }>("/api/project/coverage/latest", async (request, reply) => {
     const session = await options.storage.read();
-    if (!options.projectStore) {
-      return reply.code(503).send({
-        error: "Project storage is unavailable"
-      });
-    }
+    if (!canonicalMemoryEnabled || !options.projectStore) return reply.code(503).send(canonicalUnavailable(session));
     const chart = await options.projectStore.chart(currentRuntimeContext(session));
     const provider = request.query.provider || "codex";
     const coverageReceipts = chart.coverageReceipts
@@ -896,11 +1250,7 @@ export async function createMorticServer(options: MorticServerOptions) {
 
   app.get<{ Params: { artifactId: string } }>("/api/project/artifacts/:artifactId", async (request, reply) => {
     const session = await options.storage.read();
-    if (!options.projectStore) {
-      return reply.code(503).send({
-        error: "Project storage is unavailable"
-      });
-    }
+    if (!canonicalMemoryEnabled || !options.projectStore) return reply.code(503).send(canonicalUnavailable(session));
     const preview = await options.projectStore.artifactPreview(request.params.artifactId, currentRuntimeContext(session));
     if (!preview) {
       return reply.code(404).send({ error: "Artifact not found" });
@@ -910,9 +1260,7 @@ export async function createMorticServer(options: MorticServerOptions) {
 
   app.post<{ Body: DraftCompilationImportRequest }>("/api/project/draft-compilations/import", async (request, reply) => {
     const session = await options.storage.read();
-    if (!options.projectStore) {
-      return reply.code(503).send({ error: "Project storage is unavailable", session });
-    }
+    if (!canonicalMemoryEnabled || !options.projectStore) return reply.code(503).send(canonicalUnavailable(session));
     if (session.activeTurn?.status === "running") {
       return reply.code(409).send({ error: "A turn is running. Finish or interrupt it before importing canonical draft deltas.", session });
     }
@@ -926,9 +1274,7 @@ export async function createMorticServer(options: MorticServerOptions) {
 
   app.post<{ Params: { compilationId: string }; Body: ApproveCompilationRequest }>("/api/project/compilations/:compilationId/approve", async (request, reply) => {
     const session = await options.storage.read();
-    if (!options.projectStore) {
-      return reply.code(503).send({ error: "Project storage is unavailable", session });
-    }
+    if (!canonicalMemoryEnabled || !options.projectStore) return reply.code(503).send(canonicalUnavailable(session));
     if (session.activeTurn?.status === "running") {
       return reply.code(409).send({ error: "A turn is running. Finish or interrupt it before approving canonical deltas.", session });
     }
@@ -978,7 +1324,7 @@ export async function createMorticServer(options: MorticServerOptions) {
 
     if (session.activeTurn?.status === "running") {
       return reply.code(409).send({
-        error: "A Mortic turn is already running. Interrupt or wait before compacting context.",
+        error: "A Mortic turn is already running. Wait before compacting context.",
         session,
         before,
         preflight: before,
@@ -1091,6 +1437,7 @@ export async function createMorticServer(options: MorticServerOptions) {
       // means same project dir, so the existing store is kept as-is.
       let nextProjectStore: ProjectStore | undefined;
       if (
+        canonicalMemoryEnabled &&
         options.projectStore &&
         nextRuntimeContext &&
         projectDirForWorkspace(nextRuntimeContext.effectiveCwd) !== options.projectStore.projectDir
@@ -1119,7 +1466,8 @@ export async function createMorticServer(options: MorticServerOptions) {
         options.projectStore = nextProjectStore;
       }
       await syncProjectSession(updated, "source_thread.selected", { sourceUri: parsed.sourceUri, threadId: parsed.threadId });
-      return sessionResponse(updated);
+      await emitSessionSnapshot("source-selected", updated);
+      return sessionSnapshot(updated, "source-selected");
     } catch (error) {
       return reply.code(400).send({
         error: error instanceof Error ? error.message : String(error)
@@ -1131,14 +1479,13 @@ export async function createMorticServer(options: MorticServerOptions) {
     await resetCodexScratch();
     const session = await options.storage.clear();
     await syncProjectSession(session, "session.cleared");
-    return sessionResponse(session);
+    await emitSessionSnapshot("session-cleared", session);
+    return sessionSnapshot(session, "session-cleared");
   });
 
   app.post<{ Body: { approveItemIds?: string[] } }>("/api/project/session/commit", async (request, reply) => {
     const session = await options.storage.read();
-    if (!options.projectStore) {
-      return reply.code(503).send({ error: "Project storage is unavailable", session });
-    }
+    if (!canonicalMemoryEnabled || !options.projectStore) return reply.code(503).send(canonicalUnavailable(session));
     if (session.activeTurn?.status === "running") {
       return reply.code(409).send({ error: "A turn is running. Finish or interrupt it before committing.", session });
     }
@@ -1150,9 +1497,7 @@ export async function createMorticServer(options: MorticServerOptions) {
 
   app.post("/api/project/session/archive", async (_request, reply) => {
     const session = await options.storage.read();
-    if (!options.projectStore) {
-      return reply.code(503).send({ error: "Project storage is unavailable", session });
-    }
+    if (!canonicalMemoryEnabled || !options.projectStore) return reply.code(503).send(canonicalUnavailable(session));
     if (session.activeTurn?.status === "running") {
       return reply.code(409).send({ error: "A turn is running. Finish or interrupt it before archiving.", session });
     }
@@ -1160,39 +1505,29 @@ export async function createMorticServer(options: MorticServerOptions) {
   });
 
   app.post("/api/project/checkpoint/confirm", async (_request, reply) => {
-    if (!options.projectStore) {
-      return reply.code(503).send({ error: "Project storage is unavailable" });
-    }
+    if (!canonicalMemoryEnabled || !options.projectStore) return reply.code(503).send(canonicalUnavailable());
     return options.projectStore.confirmSourceCheckpoint();
   });
 
   app.post("/api/project/checkpoint/dismiss", async (_request, reply) => {
-    if (!options.projectStore) {
-      return reply.code(503).send({ error: "Project storage is unavailable" });
-    }
+    if (!canonicalMemoryEnabled || !options.projectStore) return reply.code(503).send(canonicalUnavailable());
     return options.projectStore.dismissSourceCheckpoint();
   });
 
   app.post("/api/project/checkpoint/manual", async (_request, reply) => {
     const session = await options.storage.read();
-    if (!options.projectStore) {
-      return reply.code(503).send({ error: "Project storage is unavailable", session });
-    }
+    if (!canonicalMemoryEnabled || !options.projectStore) return reply.code(503).send(canonicalUnavailable(session));
     return options.projectStore.createManualSourceCheckpoint(session);
   });
 
   app.post("/api/project/handoff-copied", async (_request, reply) => {
     const session = await options.storage.read();
-    if (!options.projectStore) {
-      return reply.code(503).send({ error: "Project storage is unavailable", session });
-    }
+    if (!canonicalMemoryEnabled || !options.projectStore) return reply.code(503).send(canonicalUnavailable(session));
     return options.projectStore.markHandoffCopied(session);
   });
 
   app.patch<{ Params: { itemId: string }; Body: UpdateExtractedItemRequest }>("/api/project/extractions/:itemId", async (request, reply) => {
-    if (!options.projectStore) {
-      return reply.code(503).send({ error: "Project storage is unavailable" });
-    }
+    if (!canonicalMemoryEnabled || !options.projectStore) return reply.code(503).send(canonicalUnavailable());
     const patch: UpdateExtractedItemRequest = {};
     if (isExtractionStatus(request.body?.status)) patch.status = request.body.status;
     if (isExtractedItemType(request.body?.type)) patch.type = request.body.type;
@@ -1395,6 +1730,7 @@ export async function createMorticServer(options: MorticServerOptions) {
         reasoningEffort: effective.reasoningEffort,
         checkpoint
       });
+      await emitSessionSnapshot("scratch-prewarmed", sessionWithCheckpoint);
 
       return {
         session: sessionWithCheckpoint,
@@ -1463,9 +1799,12 @@ export async function createMorticServer(options: MorticServerOptions) {
     const effectiveCodexRuntimePolicy = effective.codexRuntimePolicy;
 
     if (sessionBeforeTurn.activeTurn?.status === "running") {
-      return reply.code(409).send({
-        error: "A Mortic turn is already running. Interrupt or wait for it to finish before starting another.",
-        session: sessionBeforeTurn
+      const queuedSession = await storeQueuedTurn(sessionBeforeTurn, body, "queued-turn-updated");
+      return reply.code(202).send({
+        queued: true,
+        queuedTurn: queuedSession.queuedTurn,
+        session: queuedSession,
+        serverAcceptMs: Date.now() - requestStartMs
       });
     }
 
@@ -1559,14 +1898,20 @@ export async function createMorticServer(options: MorticServerOptions) {
       ...sessionBeforeTurn,
       transcript: [...sessionBeforeTurn.transcript, userEntry],
       handoff: undefined,
+      handoffShort: undefined,
+      handoffFull: undefined,
+      composerDraft: undefined,
+      queuedTurn: undefined,
       activeTurn
     });
-    await syncProjectSession(await options.storage.read(), "turn.user_appended", {
+    const startedSession = await options.storage.read();
+    await syncProjectSession(startedSession, "turn.user_appended", {
       turnId,
       entryId: userEntry.id,
       scratchMode: effectiveScratchMode,
       codexModel: effectiveCodexModel
     });
+    await emitSessionSnapshot("turn-started", startedSession);
 
     void (async () => {
       const codexStartMs = Date.now();
@@ -1858,6 +2203,8 @@ export async function createMorticServer(options: MorticServerOptions) {
             turn: updated.activeTurn,
             session: updated
           });
+          await emitSessionSnapshot("turn-completed", updated);
+          await drainQueuedTurn("turn-completed");
         }
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
@@ -1897,6 +2244,8 @@ export async function createMorticServer(options: MorticServerOptions) {
             turn: updated.activeTurn,
             session: updated
           });
+          await emitSessionSnapshot("turn-failed", updated);
+          await drainQueuedTurn("turn-failed");
         }
       }
     })();
@@ -1982,6 +2331,8 @@ export async function createMorticServer(options: MorticServerOptions) {
     }
 
     await interruptCodexScratch();
+    await emitSessionSnapshot("turn-interrupted", updated);
+    await drainQueuedTurn("turn-interrupted");
 
     return {
       interrupted: true,
@@ -2083,11 +2434,13 @@ export async function createMorticServer(options: MorticServerOptions) {
       const prompts = parseHandoffPrompts(handoff);
       const updated = await options.storage.setHandoff(prompts);
       await syncProjectSession(updated, "handoff.generated", { generatedBy: "codex" });
+      await emitSessionSnapshot("handoff-generated", updated);
       return { ...prompts, session: updated, generatedBy: "codex" };
     } catch {
       const prompts = localHandoff(session.sourceUri, transcriptMarkdown);
       const updated = await options.storage.setHandoff(prompts);
       await syncProjectSession(updated, "handoff.generated", { generatedBy: "local" });
+      await emitSessionSnapshot("handoff-generated", updated);
       return { ...prompts, session: updated, generatedBy: "local" };
     }
   });

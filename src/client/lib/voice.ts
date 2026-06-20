@@ -44,6 +44,16 @@ export function findSentenceEnd(text: string, minChars: number): number | null {
   return null;
 }
 
+export function findClauseEnd(text: string, minChars: number): number | null {
+  const clausePattern = /[,;:](?=\s|$)|[.!?](?=\s|$)|\n+/g;
+  let match: RegExpExecArray | null;
+  while ((match = clausePattern.exec(text)) !== null) {
+    const end = match.index + match[0].length;
+    if (end >= minChars && isSpeakableText(text.slice(0, end))) return end;
+  }
+  return null;
+}
+
 export function lastWhitespaceBefore(text: string, maxChars: number): number | null {
   const safeMax = Math.min(maxChars, text.length);
   const index = text.slice(0, safeMax).search(/\s+\S*$/);
@@ -83,7 +93,7 @@ export function chooseSpeakableEnd(text: string, start: number, force: boolean, 
     return start + (whitespaceEnd ?? maxChars);
   }
 
-  const sentenceEnd = findSentenceEnd(remaining, minChars);
+  const sentenceEnd = start === 0 ? findClauseEnd(remaining, minChars) : findSentenceEnd(remaining, minChars);
   if (sentenceEnd !== null && sentenceEnd <= maxChars) return start + sentenceEnd;
 
   if (remaining.length < maxChars) return null;

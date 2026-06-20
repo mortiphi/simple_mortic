@@ -3,7 +3,7 @@ import { homedir } from "node:os";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
 
-import type { CodexStatus, ForkCheckpoint, MorticSession, RuntimeContextRestore, TranscriptEntry, TurnRun } from "../shared/types.js";
+import type { CodexStatus, ForkCheckpoint, MorticSession, QueuedTurn, RuntimeContextRestore, TranscriptEntry, TurnRun } from "../shared/types.js";
 
 export type SessionStorage = {
   sessionDir: string;
@@ -13,8 +13,11 @@ export type SessionStorage = {
   clear(): Promise<MorticSession>;
   setActiveTurn(turn: TurnRun | undefined): Promise<MorticSession>;
   updateActiveTurn(updater: (turn: TurnRun | undefined, session: MorticSession) => TurnRun | undefined): Promise<MorticSession>;
+  setQueuedTurn(turn: QueuedTurn | undefined): Promise<MorticSession>;
+  updateQueuedTurn(updater: (turn: QueuedTurn | undefined, session: MorticSession) => QueuedTurn | undefined): Promise<MorticSession>;
   append(entry: TranscriptEntry): Promise<MorticSession>;
   setHandoff(params: { handoff: string; shortPrompt?: string; fullPrompt?: string }): Promise<MorticSession>;
+  setComposerDraft(composerDraft: string): Promise<MorticSession>;
   setForkCheckpoint(checkpoint: ForkCheckpoint | undefined): Promise<MorticSession>;
   transcriptMarkdown(session?: MorticSession): Promise<string>;
 };
@@ -115,10 +118,10 @@ export async function createSessionStorage(params: {
   session.codex = params.codex;
   if (params.runtimeContext) session.runtimeContext = params.runtimeContext;
 
-  const sessionDir = existing?.sessionDir ?? path.join(baseDir(), session.id);
-  const sessionPath = path.join(sessionDir, "session.json");
-  const transcriptPath = path.join(sessionDir, "transcript.md");
-  const handoffPath = path.join(sessionDir, "handoff.md");
+  let sessionDir = existing?.sessionDir ?? path.join(baseDir(), session.id);
+  let sessionPath = path.join(sessionDir, "session.json");
+  let transcriptPath = path.join(sessionDir, "transcript.md");
+  let handoffPath = path.join(sessionDir, "handoff.md");
   let ioQueue: Promise<void> = Promise.resolve();
 
   await mkdir(sessionDir, { recursive: true });
@@ -183,20 +186,31 @@ export async function createSessionStorage(params: {
     runtimeContext?: RuntimeContextRestore;
   }): Promise<MorticSession> {
     return enqueue(async () => {
-      const current = await readRaw();
-      const next: MorticSession = {
-        ...current,
-        sourceUri: params.sourceUri,
-        threadId: params.threadId,
-        transcript: [],
-        activeTurn: undefined,
-        handoff: undefined,
-        handoffShort: undefined,
-        handoffFull: undefined,
-        forkCheckpoint: undefined,
-        codex: params.codex,
-        runtimeContext: params.runtimeContext
-      };
+      const restored = await latestSessionForSource(params);
+      const now = new Date().toISOString();
+      const next: MorticSession = restored
+        ? {
+            ...restored.session,
+            codex: params.codex,
+            runtimeContext: params.runtimeContext,
+            activeTurn: undefined,
+            queuedTurn: undefined
+          }
+        : {
+            id: randomUUID(),
+            sourceUri: params.sourceUri,
+            threadId: params.threadId,
+            createdAt: now,
+            updatedAt: now,
+            transcript: [],
+            codex: params.codex,
+            runtimeContext: params.runtimeContext
+          };
+      sessionDir = restored?.sessionDir ?? path.join(baseDir(), next.id);
+      sessionPath = path.join(sessionDir, "session.json");
+      transcriptPath = path.join(sessionDir, "transcript.md");
+      handoffPath = path.join(sessionDir, "handoff.md");
+      await mkdir(sessionDir, { recursive: true });
       await writeRaw(next);
       return readRaw();
     });
@@ -212,8 +226,10 @@ export async function createSessionStorage(params: {
         handoff: undefined,
         handoffShort: undefined,
         handoffFull: undefined,
+        composerDraft: undefined,
         forkCheckpoint: undefined,
         activeTurn: undefined,
+        queuedTurn: undefined,
         clearedAt: now
       };
       await writeRaw(next);
@@ -245,6 +261,30 @@ export async function createSessionStorage(params: {
     });
   }
 
+  async function setQueuedTurn(turn: QueuedTurn | undefined): Promise<MorticSession> {
+    return enqueue(async () => {
+      const current = await readRaw();
+      const next: MorticSession = {
+        ...current,
+        queuedTurn: turn
+      };
+      await writeRaw(next);
+      return readRaw();
+    });
+  }
+
+  async function updateQueuedTurn(updater: (turn: QueuedTurn | undefined, session: MorticSession) => QueuedTurn | undefined): Promise<MorticSession> {
+    return enqueue(async () => {
+      const current = await readRaw();
+      const next: MorticSession = {
+        ...current,
+        queuedTurn: updater(current.queuedTurn, current)
+      };
+      await writeRaw(next);
+      return readRaw();
+    });
+  }
+
   async function setHandoff(params: { handoff: string; shortPrompt?: string; fullPrompt?: string }): Promise<MorticSession> {
     return enqueue(async () => {
       const current = await readRaw();
@@ -253,6 +293,18 @@ export async function createSessionStorage(params: {
         handoff: params.handoff,
         handoffShort: params.shortPrompt,
         handoffFull: params.fullPrompt
+      };
+      await writeRaw(next);
+      return readRaw();
+    });
+  }
+
+  async function setComposerDraft(composerDraft: string): Promise<MorticSession> {
+    return enqueue(async () => {
+      const current = await readRaw();
+      const next: MorticSession = {
+        ...current,
+        composerDraft: composerDraft || undefined
       };
       await writeRaw(next);
       return readRaw();
@@ -278,15 +330,20 @@ export async function createSessionStorage(params: {
   }
 
   const storage: SessionStorage = {
-    sessionDir,
+    get sessionDir() {
+      return sessionDir;
+    },
     read,
     write,
     resetSource,
     clear,
     setActiveTurn,
     updateActiveTurn,
+    setQueuedTurn,
+    updateQueuedTurn,
     append,
     setHandoff,
+    setComposerDraft,
     setForkCheckpoint,
     transcriptMarkdown
   };

@@ -354,6 +354,19 @@ export type RuntimeContextRestore = {
   audit: RuntimeContextAuditEntry[];
 };
 
+export type QueuedTurn = {
+  id: string;
+  status: "queued" | "draining";
+  text: string;
+  createdAt: string;
+  updatedAt: string;
+  sourceUri: string;
+  threadId: string;
+  sourceClientId?: string;
+  sourceSurface?: ClientSurface;
+  request: TurnRequest;
+};
+
 export type MorticSession = {
   id: string;
   sourceUri: string;
@@ -365,10 +378,83 @@ export type MorticSession = {
   handoff?: string;
   handoffShort?: string;
   handoffFull?: string;
+  composerDraft?: string;
   forkCheckpoint?: ForkCheckpoint;
   codex: CodexStatus;
   runtimeContext?: RuntimeContextRestore;
   activeTurn?: TurnRun;
+  queuedTurn?: QueuedTurn;
+};
+
+export const clientSurfaces = ["overlay", "app", "browser"] as const;
+export type ClientSurface = (typeof clientSurfaces)[number];
+
+export const audioLeasePhases = ["idle", "listening", "transcribing", "buffering", "speaking"] as const;
+export type AudioLeasePhase = (typeof audioLeasePhases)[number];
+
+export type SessionSourceIdentity = {
+  projectName: string;
+  workspacePath: string;
+  threadName: string;
+  threadId: string;
+  sourceUri: string;
+};
+
+export type MorticPreferences = {
+  initialized: boolean;
+  codexModel: string;
+  reasoningEffort: ReasoningEffort;
+  serviceTier?: string | null;
+  codexAccessPreset: CodexAccessPreset;
+  scratchMode: ScratchMode;
+  shortSpokenReplies: boolean;
+  transportProvider: TransportProvider;
+  sttProvider: SttProvider;
+  ttsProvider: TtsProvider;
+  overlayHintDismissed: boolean;
+};
+
+export type AudioLeaseState = {
+  ownerClientId?: string;
+  ownerSurface?: ClientSurface;
+  pendingClientId?: string;
+  pendingSurface?: ClientSurface;
+  phase: AudioLeasePhase;
+  epoch: number;
+};
+
+export type SessionSnapshot = SessionResponse & {
+  revision: number;
+  reason: string;
+  sourceIdentity: SessionSourceIdentity;
+  preferences: MorticPreferences;
+  audioLease: AudioLeaseState;
+};
+
+export type SessionStreamEvent =
+  | { type: "snapshot"; snapshot: SessionSnapshot }
+  | { type: "audio-command"; targetClientId: string; command: "stop"; reason: "interrupt" | "barge-in" | "hide" };
+
+export type SessionUiPatch = {
+  composerDraft?: string;
+};
+
+export type MorticPreferencesPatch = Partial<Omit<MorticPreferences, "initialized">> & {
+  initialized?: boolean;
+};
+
+export type ClientPresenceRequest = {
+  clientId: string;
+  surface: ClientSurface;
+  focused: boolean;
+  visible: boolean;
+  audioPhase?: AudioLeasePhase;
+};
+
+export type AudioCommandRequest = {
+  clientId: string;
+  surface: ClientSurface;
+  command: "interrupt" | "barge-in" | "hide";
 };
 
 export type SessionResponse = {
@@ -547,6 +633,8 @@ export type TurnRequest = {
   sttMetrics?: SttTurnMetrics;
   transportProvider?: TransportProvider;
   inputPolicy?: InputPolicy;
+  clientId?: string;
+  surface?: ClientSurface;
   transportState?: TransportState;
   transportStats?: {
     packetLoss?: number;

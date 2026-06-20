@@ -4,6 +4,7 @@ import type { Dispatch, MutableRefObject, SetStateAction } from "react";
 import {
   type AudioHealthRequest,
   type CaptureState,
+  type ClientSurface,
   type CodexRuntimePolicy,
   type InputPolicy,
   type LiveKitStatus,
@@ -80,6 +81,8 @@ type BargeInState = {
 
 export interface VoiceEngineParams {
   api: string;
+  clientId: string;
+  surface: ClientSurface;
   state: ApiState;
   setState: Dispatch<SetStateAction<ApiState>>;
   scratchMode: ScratchMode;
@@ -115,15 +118,18 @@ export interface VoiceEngineParams {
   setInputPolicy: Dispatch<SetStateAction<InputPolicy>>;
   liveModeActive: boolean;
   setLiveModeActive: Dispatch<SetStateAction<boolean>>;
+  isAudioOwner: boolean;
+  requestAudioOwnership: () => Promise<boolean>;
+  turnsDisabled: boolean;
 }
 
-// Voice engine extracted verbatim from App.tsx: recognition/capture state machines,
-// WAV segment recorder, remote STT segment loop, speech queue + ledger, TTS runtime,
-// SSE turn-stream handlers, PTT key handling, audio-health posting, progress sounds,
-// and LiveKit transport glue. Zero behavior change intended.
+// Voice engine owns recognition/capture, speech queueing, TTS, streamed turn events,
+// PTT/barge-in, audio-health reporting, and transport integration.
 export function useVoiceEngine(params: VoiceEngineParams) {
   const {
     api,
+    clientId,
+    surface,
     state,
     setState,
     scratchMode,
@@ -156,8 +162,16 @@ export function useVoiceEngine(params: VoiceEngineParams) {
     inputPolicy,
     setInputPolicy,
     liveModeActive,
-    setLiveModeActive
+    setLiveModeActive,
+    isAudioOwner,
+    requestAudioOwnership,
+    turnsDisabled
   } = params;
+  const isAudioOwnerRef = useRef(isAudioOwner);
+
+  useEffect(() => {
+    isAudioOwnerRef.current = isAudioOwner;
+  }, [isAudioOwner]);
 
   const [transportState, setTransportState] = useState<TransportState>("disconnected");
   const [transportStats, setTransportStats] = useState<LiveKitTransportStats>({
@@ -234,7 +248,6 @@ export function useVoiceEngine(params: VoiceEngineParams) {
   const progressSpeechLastAtRef = useRef(0);
   const progressSpeechCountRef = useRef(0);
   const progressSpeechLabelsRef = useRef<Set<string>>(new Set());
-  const queuedTurnRef = useRef<{ text: string; options: { sttMetrics?: SttTurnMetrics } } | null>(null);
   const currentTurnIdRef = useRef<string | null>(null);
   const currentTurnScratchModeRef = useRef<ScratchMode | null>(null);
   const exactSpeechProjectionRef = useRef(false);
@@ -339,7 +352,7 @@ export function useVoiceEngine(params: VoiceEngineParams) {
     if (!text || mode !== "voice") return;
     if (prewarmAnnouncementKeyRef.current === key) return;
 
-    if (pendingRef.current || recognitionRef.current) return;
+    if (pendingRef.current || recognitionRef.current || !isAudioOwnerRef.current) return;
     const provider = ttsRuntimeRef.current;
     if (!provider) {
       window.setTimeout(() => announcePrewarmConfirmation(key, text, mode), 250);
@@ -562,6 +575,7 @@ export function useVoiceEngine(params: VoiceEngineParams) {
     if (progressSoundRef.current) return;
 
     const audio = new Audio(progressKeyboardLoopUrl);
+    audio.dataset.morticAudio = "progress";
     audio.loop = true;
     audio.preload = "auto";
     audio.volume = 0.08;
@@ -600,20 +614,8 @@ export function useVoiceEngine(params: VoiceEngineParams) {
   }, [liveAssistantText, pending, progressSoundsEnabled, progressVisible]);
 
   useEffect(() => {
-    if (pending || !queuedTurnPreview) return;
-    const timer = window.setTimeout(() => {
-      if (pendingRef.current) return;
-      const queued = queuedTurnRef.current;
-      if (!queued) {
-        setQueuedTurnPreview(null);
-        return;
-      }
-      queuedTurnRef.current = null;
-      setQueuedTurnPreview(null);
-      void sendTurn(queued.text, queued.options);
-    }, 0);
-    return () => window.clearTimeout(timer);
-  }, [pending, queuedTurnPreview]);
+    setQueuedTurnPreview(state.session?.queuedTurn?.text ?? null);
+  }, [state.session?.queuedTurn?.id, state.session?.queuedTurn?.text, state.session?.queuedTurn?.status]);
 
   useEffect(() => {
     return () => {
@@ -674,7 +676,7 @@ export function useVoiceEngine(params: VoiceEngineParams) {
   }
 
   function speakProgressStatus(payload: Extract<TurnStreamEvent, { type: "status" }>): void {
-    if (!progressSpeechEnabled || !payload.speakable || payload.scratchMode !== "voice") return;
+    if (!isAudioOwnerRef.current || !progressSpeechEnabled || !payload.speakable || payload.scratchMode !== "voice") return;
     if (!pendingRef.current || currentTurnScratchModeRef.current !== "voice") return;
     if (liveAssistantTextRef.current.trim() || speakingRef.current || speechQueueRef.current.length > 0) return;
     if (progressSpeechCountRef.current >= 3) return;
@@ -1082,10 +1084,11 @@ export function useVoiceEngine(params: VoiceEngineParams) {
     speechPhaseRef.current = "idle";
     setSpeechPhase("idle");
     ttsRuntimeRef.current?.cancel();
+    stopProgressSound();
     if ("speechSynthesis" in window) {
       window.speechSynthesis.cancel();
     }
-    for (const media of Array.from(document.querySelectorAll<HTMLMediaElement>("audio,video"))) {
+    for (const media of Array.from(document.querySelectorAll<HTMLMediaElement>('[data-mortic-audio="tts"]'))) {
       media.muted = true;
       media.pause();
       try {
@@ -1129,8 +1132,6 @@ export function useVoiceEngine(params: VoiceEngineParams) {
   }
 
   function resetQueuedTurn() {
-    queuedTurnRef.current = null;
-    setQueuedTurnPreview(null);
     bargeInCaptureRef.current = false;
     bargeInStateRef.current = null;
     clearBargeInNoSpeechTimer();
@@ -1148,8 +1149,7 @@ export function useVoiceEngine(params: VoiceEngineParams) {
       speechPhase: speechPhaseRef.current,
       speaking: speakingRef.current,
       speechQueueLength: speechQueueRef.current.length,
-      progressSpeechActive: progressSpeechActiveRef.current,
-      liveAssistantText: liveAssistantTextRef.current
+      progressSpeechActive: progressSpeechActiveRef.current
     });
   }
 
@@ -1212,8 +1212,7 @@ export function useVoiceEngine(params: VoiceEngineParams) {
       patchBargeInAudioHealth({
         ttsProviderStatus: "Local audio muted for barge-in",
         bargeInStartedMs: elapsedSinceTurnStart(),
-        bargeInAudioStopMs: elapsedSinceTurnStart(),
-        interruptionLatencyMs: 0
+        bargeInAudioStopMs: elapsedSinceTurnStart()
       });
     }
     cancelSpeechAudio();
@@ -1371,12 +1370,31 @@ export function useVoiceEngine(params: VoiceEngineParams) {
       if (!options.final) setAssistantDraft(displayText, "streaming", options.turnId);
       return;
     }
+    if (!isAudioOwnerRef.current) {
+      liveAssistantTextRef.current = speechText;
+      lastQueuedCharRef.current = speechText.length;
+      assistantVisibleStartedRef.current = true;
+      setLiveAssistantText(displayText);
+      if (!options.final) setAssistantDraft(displayText, "streaming", options.turnId);
+      if (options.final) exactSpeechProjectionRef.current = false;
+      setSpeechPhase("idle");
+      return;
+    }
     const previousSpeechText = liveAssistantTextRef.current;
-    if (previousSpeechText && speechText !== previousSpeechText && !speechText.startsWith(previousSpeechText)) {
-      console.warn("[Mortic] assistant text diverged from previously streamed text; keeping monotonic speech ledger", {
+    const speechDiverged = Boolean(previousSpeechText && speechText !== previousSpeechText && !speechText.startsWith(previousSpeechText));
+    if (speechDiverged) {
+      console.warn("[Mortic] assistant text diverged from previously streamed text; stopping audio and keeping screen truth", {
         previousChars: previousSpeechText.length,
         nextChars: speechText.length,
         lastQueuedChar: lastQueuedCharRef.current
+      });
+      cancelSpeechAudio();
+      speechLedgerRef.current = [];
+      spokenCharsRef.current = 0;
+      lastQueuedCharRef.current = speechText.length;
+      setTtsProviderNotice("Answer corrected while streaming. Audio stopped; screen shows the corrected answer.");
+      updateAudioHealth({
+        ttsProviderStatus: "Assistant speech corrected while streaming; audio stopped before replay."
       });
     }
 
@@ -1392,7 +1410,7 @@ export function useVoiceEngine(params: VoiceEngineParams) {
       finalChars: options.final ? speechText.length : audioHealthRef.current?.finalChars,
       speechAfterFinalMs
     });
-    if (speechText.trim()) {
+    if (speechText.trim() && !speechDiverged) {
       setSpeechPhase(speechMutedForCurrentTurn() ? "idle" : speakingRef.current ? "speaking" : "buffering");
     }
 
@@ -1412,7 +1430,7 @@ export function useVoiceEngine(params: VoiceEngineParams) {
       return;
     }
 
-    if (!previousSpeechText || speechText.startsWith(previousSpeechText)) {
+    if (!speechDiverged && (!previousSpeechText || speechText.startsWith(previousSpeechText))) {
       const queued = queueAvailableSpeech(speechText, Boolean(options.force));
       if (assistantVisibleStartedRef.current || queued) {
         const visiblePatch = displayText.trim() ? firstTimingPatch("firstVisibleTextMs") : null;
@@ -1421,6 +1439,12 @@ export function useVoiceEngine(params: VoiceEngineParams) {
         if (!options.final) setAssistantDraft(displayText, "streaming", options.turnId);
         if (visiblePatch) updateAudioHealth(visiblePatch);
       }
+    } else if (speechDiverged) {
+      const visiblePatch = displayText.trim() ? firstTimingPatch("firstVisibleTextMs") : null;
+      assistantVisibleStartedRef.current = true;
+      setLiveAssistantText(displayText);
+      if (!options.final) setAssistantDraft(displayText, "streaming", options.turnId);
+      if (visiblePatch) updateAudioHealth(visiblePatch);
     }
     syncAudioLedger();
     if (options.turnId) scheduleAudioHealthSync(options.turnId, options.final ? 60 : 250);
@@ -1514,7 +1538,7 @@ export function useVoiceEngine(params: VoiceEngineParams) {
       }
       if (intent === "push-to-talk-down") {
         event.preventDefault();
-        startPushToTalkCapture();
+        void startPushToTalkCapture();
       }
     }
 
@@ -1559,15 +1583,10 @@ export function useVoiceEngine(params: VoiceEngineParams) {
   }, []);
 
   async function sendTurn(text: string, options: { sttMetrics?: SttTurnMetrics } = {}) {
+    if (turnsDisabled) return;
     const clean = text.trim();
     if (!clean) return;
-    if (pendingRef.current) {
-      queuedTurnRef.current = { text: clean, options };
-      recordBargeInQueued();
-      setQueuedTurnPreview(clean);
-      setDraft("");
-      return;
-    }
+    const wasPending = pendingRef.current;
     const turnScratchMode = scratchMode;
     if (bargeInStateRef.current) setBargeInPhase("idle");
     if (needsModelTransitionPreflight(effectiveCodexModel) && (sparkPreflightPending || sparkCompactionPending || !sparkApproved)) {
@@ -1580,11 +1599,13 @@ export function useVoiceEngine(params: VoiceEngineParams) {
       return;
     }
 
-    resetSpeechPlayback();
-    exactSpeechProjectionRef.current = shouldUseExactSpeechProjection(clean);
+    if (!wasPending) {
+      resetSpeechPlayback();
+      exactSpeechProjectionRef.current = shouldUseExactSpeechProjection(clean);
+      currentTurnScratchModeRef.current = turnScratchMode;
+      setTurnPending(true);
+    }
     clearRecognitionBuffers(true);
-    currentTurnScratchModeRef.current = turnScratchMode;
-    setTurnPending(true);
     setUiDispatchMs(null);
     setDraft("");
     setSpeechError(null);
@@ -1609,6 +1630,8 @@ export function useVoiceEngine(params: VoiceEngineParams) {
           sttMetrics: options.sttMetrics,
           transportProvider,
           inputPolicy,
+          clientId,
+          surface,
           transportState,
           transportStats
         })
@@ -1625,6 +1648,11 @@ export function useVoiceEngine(params: VoiceEngineParams) {
         return;
       }
       setState({ session: payload.session, loading: false, error: null });
+      if (payload.queued) {
+        recordBargeInQueued();
+        setQueuedTurnPreview(payload.queuedTurn?.text ?? clean);
+        return;
+      }
       if (turnScratchMode === "voice") {
         startAudioHealth(payload.turnId, uiStart);
       } else {
@@ -1847,10 +1875,35 @@ export function useVoiceEngine(params: VoiceEngineParams) {
         return payload;
       };
 
+      const transcribeSegmentWithRetry = async (segment: RemoteSttSegment, index: number): Promise<SttTranscriptionResponse & { error?: string }> => {
+        try {
+          return await transcribeSegment(segment, index);
+        } catch (firstError) {
+          try {
+            return await transcribeSegment(segment, index);
+          } catch (secondError) {
+            throw new Error(
+              `Segment ${index + 1} failed after retry: ${
+                secondError instanceof Error ? secondError.message : firstError instanceof Error ? firstError.message : String(secondError)
+              }`
+            );
+          }
+        }
+      };
+
       const payloads =
         recording.segments.length === 1
-          ? [await transcribeSegment(recording.segments[0], 0)]
-          : await Promise.all(recording.segments.map((segment, index) => transcribeSegment(segment, index)));
+          ? [await transcribeSegmentWithRetry(recording.segments[0], 0)]
+          : (await Promise.allSettled(recording.segments.map((segment, index) => transcribeSegmentWithRetry(segment, index)))).flatMap((result) =>
+              result.status === "fulfilled" ? [result.value] : []
+            );
+
+      if (payloads.length === 0) {
+        throw new Error("Remote transcription failed for every segment");
+      }
+      if (payloads.length < recording.segments.length) {
+        setSttProviderNotice(`${sttProviderLabels[sttProvider]} transcribed ${payloads.length}/${recording.segments.length} segments; missing audio was skipped after retry.`);
+      }
 
       if (!isCurrentRecognitionSession(recognitionSessionRef.current, recording.sessionId)) return;
       let finalPayload: SttTranscriptionResponse | null = null;
@@ -2030,7 +2083,7 @@ export function useVoiceEngine(params: VoiceEngineParams) {
           setDraft(liveModeActiveRef.current ? `Live listening... ${seconds.toFixed(1)} s` : `Listening... ${seconds.toFixed(1)} s`);
         }
         if (
-          (liveModeActiveRef.current || bargeInCaptureRef.current) &&
+          (liveModeActiveRef.current || (bargeInCaptureRef.current && bargeInStateRef.current?.source !== "push-to-talk")) &&
           capture.firstSpeechDetectedMs !== undefined &&
           now - lastSpeechAt > 1300 &&
           now - capture.sessionStartedAt > 1700
@@ -2262,8 +2315,13 @@ export function useVoiceEngine(params: VoiceEngineParams) {
     setLiveActive(!liveModeActiveRef.current);
   }
 
-  function startPushToTalkCapture() {
+  async function startPushToTalkCapture() {
     preservePushToTalkViewport();
+    if (turnsDisabled) return;
+    if (!isAudioOwnerRef.current && !(await requestAudioOwnership())) {
+      setSpeechError("Mortic could not move microphone control to this window.");
+      return;
+    }
     if (bargeInCaptureRef.current && (recognizingRef.current || sttPhaseRef.current === "listening")) {
       stopRecognition({ submit: true, emptyNotice: false });
       return;
@@ -2296,7 +2354,9 @@ export function useVoiceEngine(params: VoiceEngineParams) {
         !recognizingRef.current &&
         sttPhaseRef.current !== "transcribing"
       ) {
-        startRecognition();
+        void requestAudioOwnership().then((owned) => {
+          if (owned) startRecognition();
+        });
       }
     }, speechPhase === "speaking" || speechPhase === "buffering" ? 0 : 250);
     return () => window.clearTimeout(timer);

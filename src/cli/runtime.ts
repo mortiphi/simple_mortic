@@ -7,9 +7,10 @@ import { fileURLToPath } from "node:url";
 import open from "open";
 import type { ViteDevServer } from "vite";
 
-import { createMorticServer } from "../server/app.js";
+import { createMorticServer, defaultMorticPreferences } from "../server/app.js";
 import { getCodexStatus, listCodexRecentThreads, prewarmCodexScratch, shutdownCodexBridges } from "../server/codex.js";
 import { createProjectStore } from "../server/projectStorage.js";
+import { createPreferencesStore } from "../server/preferences.js";
 import { codexProviderAdapter } from "../server/providerAdapters.js";
 import { resolveRuntimeContext } from "../server/runtimeContext.js";
 import { syncVendoredSkills } from "../server/skillSync.js";
@@ -30,7 +31,7 @@ export type StartedMorticRuntime = {
   threadId: string;
   projectRoot: string;
   sessionDir: string;
-  projectDir: string;
+  projectDir?: string;
   close: () => Promise<void>;
 };
 
@@ -188,16 +189,22 @@ export async function startMorticRuntime(options: StartMorticRuntimeOptions): Pr
     runtimeContext
   });
   const initialSession = await storage.read();
-  const projectStore = await createProjectStore({
-    workspacePath: runtimeContext.effectiveCwd,
-    sourceUri: parsed.sourceUri,
-    threadId: parsed.threadId
-  });
-  await projectStore.syncSession(initialSession, { type: "cli.started" });
+  const canonicalMemoryEnabled = process.env.MORTIC_CANONICAL_MEMORY === "1";
+  const projectStore = canonicalMemoryEnabled
+    ? await createProjectStore({
+        workspacePath: runtimeContext.effectiveCwd,
+        sourceUri: parsed.sourceUri,
+        threadId: parsed.threadId
+      })
+    : undefined;
+  if (projectStore) await projectStore.syncSession(initialSession, { type: "cli.started" });
+  const preferencesStore = await createPreferencesStore(defaultMorticPreferences());
 
   const app = await createMorticServer({
     storage,
     projectStore,
+    canonicalMemoryEnabled,
+    preferencesStore,
     staticDir: hasStaticBuild ? staticDir : undefined,
     runtimeContext,
     resolveRuntimeContext: async ({ threadId }) => await resolveRuntimeContext({
@@ -249,7 +256,7 @@ export async function startMorticRuntime(options: StartMorticRuntimeOptions): Pr
   log(`API:    ${apiBase}`);
   log(`UI:     ${url}`);
   log(`Data:   ${storage.sessionDir}`);
-  log(`Project:${projectStore.projectDir}`);
+  log(`Memory: ${projectStore ? `on ${projectStore.projectDir}` : "off"}`);
   log(`Runtime:${runtimeContext.status} cwd ${runtimeContext.effectiveCwd}`);
   if (runtimeContext.recordedCwd && runtimeContext.recordedCwd !== runtimeContext.effectiveCwd) {
     log(`Intended:${runtimeContext.recordedCwd}`);
@@ -315,7 +322,7 @@ export async function startMorticRuntime(options: StartMorticRuntimeOptions): Pr
     threadId: parsed.threadId,
     projectRoot: root,
     sessionDir: storage.sessionDir,
-    projectDir: projectStore.projectDir,
+    projectDir: projectStore?.projectDir,
     close
   };
 }
