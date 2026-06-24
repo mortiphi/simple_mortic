@@ -17,6 +17,7 @@ import type {
   TranscriptRole
 } from "../shared/types.js";
 import { runCodexIsolatedTurn, runCodexTurn } from "./codex.js";
+import { findVendoredSkillsDir } from "./skillSync.js";
 
 type CanonicalEvidence = {
   source: "transcript" | "session" | "production_json" | "production_md";
@@ -109,8 +110,21 @@ const typeMap: Record<CanonicalDelta["type"], ExtractedItemType> = {
   backlog_update: "backlog"
 };
 
-function skillDir(): string {
+function syncedSkillDir(): string {
   return path.join(process.env.CODEX_HOME || path.join(homedir(), ".codex"), "skills", "mortic-canonical-state");
+}
+
+function vendoredSkillDir(): string | null {
+  const skillsDir = findVendoredSkillsDir();
+  return skillsDir ? path.join(skillsDir, "mortic-canonical-state") : null;
+}
+
+function skillDir(): string {
+  const synced = syncedSkillDir();
+  if (existsSync(path.join(synced, "SKILL.md"))) return synced;
+  const vendored = vendoredSkillDir();
+  if (vendored && existsSync(path.join(vendored, "SKILL.md"))) return vendored;
+  return synced;
 }
 
 function normalize(value: string): string {
@@ -191,7 +205,11 @@ async function runSkillScript(scriptName: string, input: CanonicalSkillInput): P
   const dir = skillDir();
   const scriptPath = path.join(dir, "scripts", scriptName);
   if (!existsSync(scriptPath)) {
-    throw new Error(`Mortic canonical-state skill script missing: ${scriptPath}`);
+    const vendored = vendoredSkillDir();
+    throw new Error(
+      `Mortic canonical-state skill script missing: ${scriptPath}` +
+        (vendored ? ` (vendored fallback checked at ${vendored})` : " (vendored fallback not found)")
+    );
   }
   const workDir = await mkdtemp(path.join(tmpdir(), "mortic-canonical-"));
   const inputPath = path.join(workDir, "input.json");

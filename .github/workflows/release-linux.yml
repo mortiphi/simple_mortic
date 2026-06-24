@@ -22,6 +22,8 @@ jobs:
 
       - run: npm ci
       - run: npm run typecheck
+      - run: npm test
+      - run: npm run dist:linux:dir
       - run: npm run dist:linux:deb
 
       - name: Create checksums

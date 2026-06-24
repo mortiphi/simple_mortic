@@ -86,8 +86,6 @@ npm run dev -- codex://threads/<thread-id>
 npm test
 ```
 
-See [docs/index.md](docs/index.md) for architecture, release, canonical-state, and archived planning notes.
-
 ## Linux desktop packages
 
 For Linux users, prefer the packaged desktop build. Do not ask users to run Electron from `node_modules`, and do not rely on an npm/npx install path for the first release.

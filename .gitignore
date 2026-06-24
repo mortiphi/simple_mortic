@@ -1,9 +1,9 @@
 # Dependencies
-node_modules/
+/node_modules/
 
 # Build output
-dist/
-release/
+/dist/
+/release/
 
 # Local environment and secrets
 .env

@@ -3,6 +3,7 @@
   "productName": "Mortic",
   "desktopName": "mortic-desktop",
   "version": "0.1.0",
+  "private": true,
   "description": "Local voice sidecar and canonical project-memory layer for Codex CLI threads.",
   "homepage": "https://github.com/Aeroknight786/simple_mortic",
   "author": {
