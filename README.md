@@ -77,6 +77,36 @@ npm run dev -- codex://threads/<thread-id>
 npm test
 ```
 
+## Linux desktop packages
+
+For Linux users, prefer the browser/localhost path (`npx mortic ...`) or install a packaged desktop build. Do not ask users to run Electron from `node_modules`.
+
+Build the Debian/Ubuntu desktop package:
+
+```bash
+npm run dist:linux
+```
+
+This writes a `.deb` artifact to `release/`. The package installs the desktop app as `mortic-desktop`; the existing `mortic` CLI command remains the Node CLI. The generated Debian/RPM post-install hook configures Electron's `chrome-sandbox` under `/opt/Mortic`, so users do not need to manually `chown` or `chmod` the helper in a project checkout.
+
+Build RPM on a release machine with `rpmbuild` installed:
+
+```bash
+npm run dist:linux:rpm
+```
+
+Build both package formats:
+
+```bash
+npm run dist:linux:all
+```
+
+Quickly validate the packaged app layout without building installers:
+
+```bash
+npm run dist:linux:dir
+```
+
 ## License
 
 MIT
