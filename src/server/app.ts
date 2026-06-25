@@ -25,8 +25,6 @@ import {
 import type { SessionStorage } from "./storage.js";
 import { createMemoryPreferencesStore, type PreferencesStore } from "./preferences.js";
 import { SessionCoordinator, isAudioLeasePhase } from "./sessionCoordinator.js";
-import type { ProjectStore } from "./projectStorage.js";
-import { createProjectStore, projectDirForWorkspace } from "./projectStorage.js";
 import { codexProviderAdapter } from "./providerAdapters.js";
 import { syncVendoredSkills } from "./skillSync.js";
 import { parseThreadUri } from "../shared/threadUri.js";
@@ -41,9 +39,6 @@ import {
 import {
   reasoningEfforts,
   scratchModes,
-  extractionStatuses,
-  extractedItemTypes,
-  providerForkContinuations,
   ttsProviders,
   codexApprovalPolicies,
   codexFilesystemModes,
@@ -55,9 +50,7 @@ import {
   type AppServerActivity,
   type AudioCommandRequest,
   type AudioHealthRequest,
-  type ApproveCompilationRequest,
   type DeepgramHealthResponse,
-  type DraftCompilationImportRequest,
   type ElevenLabsHealthResponse,
   type ForkCheckpoint,
   type HandoffRequest,
@@ -69,8 +62,6 @@ import {
   type OnboardingStatusResponse,
   type PrewarmRequest,
   type ProgressSpeechTrace,
-  type ProviderForkAccessRequest,
-  type ProviderForkAccessResponse,
   type QueuedTurn,
   type ReasoningEffort,
   type RuntimeContextRestore,
@@ -87,7 +78,6 @@ import {
   type TurnLogEntry,
   type TurnRequest,
   type TurnRun,
-  type UpdateExtractedItemRequest,
   type CodexRuntimePolicy
 } from "../shared/types.js";
 import {
@@ -111,8 +101,6 @@ import {
 
 type MorticServerOptions = {
   storage: SessionStorage;
-  projectStore?: ProjectStore;
-  canonicalMemoryEnabled?: boolean;
   preferencesStore?: PreferencesStore;
   staticDir?: string;
   runtimeContext?: RuntimeContextRestore;
@@ -160,14 +148,6 @@ function isScratchMode(value: unknown): value is ScratchMode {
 
 function isTtsProvider(value: unknown): value is TtsProvider {
   return typeof value === "string" && ttsProviders.includes(value as TtsProvider);
-}
-
-function isExtractionStatus(value: unknown): value is (typeof extractionStatuses)[number] {
-  return typeof value === "string" && extractionStatuses.includes(value as (typeof extractionStatuses)[number]);
-}
-
-function isExtractedItemType(value: unknown): value is (typeof extractedItemTypes)[number] {
-  return typeof value === "string" && extractedItemTypes.includes(value as (typeof extractedItemTypes)[number]);
 }
 
 function normalizeCodexModel(value: unknown): string {
@@ -713,7 +693,6 @@ export async function createMorticServer(options: MorticServerOptions) {
   const turnReplay = new Map<string, { text: string; updatedAt: string }>();
   const sessionStreams = new Set<(event: SessionStreamEvent) => void>();
   const preferencesStore = options.preferencesStore ?? createMemoryPreferencesStore(defaultMorticPreferences());
-  const canonicalMemoryEnabled = options.canonicalMemoryEnabled ?? false;
   let runtimeContext = options.runtimeContext;
   let appServerConfigCache: AppServerConfigMetadata | undefined;
   const sourceNameCache = new Map<string, { name: string; expiresAt: number }>();
@@ -957,43 +936,6 @@ export async function createMorticServer(options: MorticServerOptions) {
     }
   }
 
-  function warnProjectStoreFailure(operation: string, error: unknown): void {
-    const message = error instanceof Error ? error.message : String(error);
-    console.warn(`Mortic project store ${operation} failed: ${message}`);
-  }
-
-  async function syncProjectSession(session: MorticSession, type: string, detail?: unknown): Promise<void> {
-    if (!canonicalMemoryEnabled) return;
-    try {
-      await options.projectStore?.syncSession(session, {
-        type,
-        detail
-      });
-    } catch (error) {
-      warnProjectStoreFailure(`syncSession(${type})`, error);
-    }
-  }
-
-  async function recordProjectEvent(session: MorticSession, type: string, detail?: unknown): Promise<void> {
-    if (!canonicalMemoryEnabled) return;
-    try {
-      await options.projectStore?.recordEvent(session, {
-        type,
-        detail
-      });
-    } catch (error) {
-      warnProjectStoreFailure(`recordEvent(${type})`, error);
-    }
-  }
-
-  function canonicalUnavailable(session?: MorticSession) {
-    return {
-      code: canonicalMemoryEnabled ? "project_storage_unavailable" : "canonical_memory_disabled",
-      error: canonicalMemoryEnabled ? "Project storage is unavailable" : "Canonical memory is disabled",
-      ...(session ? { session } : {})
-    };
-  }
-
   await app.register(cors, {
     origin(origin, callback) {
       if (!origin) return callback(null, true);
@@ -1039,7 +981,6 @@ export async function createMorticServer(options: MorticServerOptions) {
   app.get("/api/session", async () => {
     const session = await options.storage.read();
     await refreshAppServerConfig();
-    await syncProjectSession(session, "session.loaded");
     return sessionSnapshot(session, "session-read");
   });
 
@@ -1179,111 +1120,6 @@ export async function createMorticServer(options: MorticServerOptions) {
       return reply.code(400).send({ error: "Invalid audio command" });
     }
     return { audioLease: sessionCoordinator.command(body) };
-  });
-
-  app.get("/api/project", async (_request, reply) => {
-    const session = await options.storage.read();
-    if (!canonicalMemoryEnabled || !options.projectStore) return reply.code(503).send(canonicalUnavailable(session));
-    return options.projectStore.snapshot(session);
-  });
-
-  app.get("/api/project/canonical-state", async (_request, reply) => {
-    if (!canonicalMemoryEnabled || !options.projectStore) return reply.code(503).send(canonicalUnavailable());
-    return options.projectStore.canonicalState();
-  });
-
-  app.get("/api/project/chart", async (_request, reply) => {
-    const session = await options.storage.read();
-    if (!canonicalMemoryEnabled || !options.projectStore) return reply.code(503).send(canonicalUnavailable(session));
-    return options.projectStore.chart(currentRuntimeContext(session));
-  });
-
-  app.post<{ Body: ProviderForkAccessRequest }>("/api/project/fork/access", async (request, reply) => {
-    const session = await options.storage.read();
-    if (!canonicalMemoryEnabled || !options.projectStore) return reply.code(503).send(canonicalUnavailable(session));
-    const body = request.body ?? ({} as ProviderForkAccessRequest);
-    if (!body.providerRefId || !providerForkContinuations.includes(body.requestedAccessPreset)) {
-      return reply.code(400).send({
-        error: `providerRefId and a requestedAccessPreset of ${providerForkContinuations.join(", ")} are required`
-      });
-    }
-    try {
-      const providerForks = await options.projectStore.setProviderForkAccess(
-        body.providerRefId,
-        body.requestedAccessPreset,
-        currentRuntimeContext(session)
-      );
-      return { providerForks } satisfies ProviderForkAccessResponse;
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      return reply.code(message.startsWith("Unknown provider fork") ? 404 : 500).send({ error: message });
-    }
-  });
-
-  app.get<{
-    Querystring: {
-      provider?: string;
-      providerRefId?: string;
-      conversationId?: string;
-      threadId?: string;
-      importId?: string;
-      includeAll?: string;
-    };
-  }>("/api/project/coverage/latest", async (request, reply) => {
-    const session = await options.storage.read();
-    if (!canonicalMemoryEnabled || !options.projectStore) return reply.code(503).send(canonicalUnavailable(session));
-    const chart = await options.projectStore.chart(currentRuntimeContext(session));
-    const provider = request.query.provider || "codex";
-    const coverageReceipts = chart.coverageReceipts
-      .filter((receipt) => receipt.provider === provider)
-      .filter((receipt) => !request.query.providerRefId || receipt.providerRefId === request.query.providerRefId)
-      .filter((receipt) => !request.query.conversationId || receipt.conversationId === request.query.conversationId)
-      .filter((receipt) => !request.query.threadId || receipt.threadId === request.query.threadId)
-      .filter((receipt) => !request.query.importId || receipt.importId === request.query.importId)
-      .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
-    return {
-      projectId: chart.project.id,
-      receipt: coverageReceipts[0],
-      coverageReceipts: request.query.includeAll === "true" ? coverageReceipts : coverageReceipts.slice(0, 1)
-    };
-  });
-
-  app.get<{ Params: { artifactId: string } }>("/api/project/artifacts/:artifactId", async (request, reply) => {
-    const session = await options.storage.read();
-    if (!canonicalMemoryEnabled || !options.projectStore) return reply.code(503).send(canonicalUnavailable(session));
-    const preview = await options.projectStore.artifactPreview(request.params.artifactId, currentRuntimeContext(session));
-    if (!preview) {
-      return reply.code(404).send({ error: "Artifact not found" });
-    }
-    return preview;
-  });
-
-  app.post<{ Body: DraftCompilationImportRequest }>("/api/project/draft-compilations/import", async (request, reply) => {
-    const session = await options.storage.read();
-    if (!canonicalMemoryEnabled || !options.projectStore) return reply.code(503).send(canonicalUnavailable(session));
-    if (session.activeTurn?.status === "running") {
-      return reply.code(409).send({ error: "A turn is running. Finish or interrupt it before importing canonical draft deltas.", session });
-    }
-    try {
-      return await options.projectStore.importDraftCompilation(request.body, session, currentRuntimeContext(session));
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      return reply.code(400).send({ error: message, session });
-    }
-  });
-
-  app.post<{ Params: { compilationId: string }; Body: ApproveCompilationRequest }>("/api/project/compilations/:compilationId/approve", async (request, reply) => {
-    const session = await options.storage.read();
-    if (!canonicalMemoryEnabled || !options.projectStore) return reply.code(503).send(canonicalUnavailable(session));
-    if (session.activeTurn?.status === "running") {
-      return reply.code(409).send({ error: "A turn is running. Finish or interrupt it before approving canonical deltas.", session });
-    }
-    try {
-      return await options.projectStore.approveCompilation(request.params.compilationId, request.body, currentRuntimeContext(session));
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error);
-      return reply.code(message.includes("not found") ? 404 : 400).send({ error: message, session });
-    }
   });
 
   app.get<{
@@ -1430,30 +1266,6 @@ export async function createMorticServer(options: MorticServerOptions) {
       const nextRuntimeContext = options.resolveRuntimeContext
         ? await options.resolveRuntimeContext({ sourceUri: parsed.sourceUri, threadId: parsed.threadId })
         : runtimeContext;
-      // When the new thread resolves to a different workspace, rebuild the
-      // project store BEFORE touching scratch or session state so the routes
-      // reading options.projectStore serve the new project — and so a store
-      // failure leaves the previous source thread fully intact. Same workspace
-      // means same project dir, so the existing store is kept as-is.
-      let nextProjectStore: ProjectStore | undefined;
-      if (
-        canonicalMemoryEnabled &&
-        options.projectStore &&
-        nextRuntimeContext &&
-        projectDirForWorkspace(nextRuntimeContext.effectiveCwd) !== options.projectStore.projectDir
-      ) {
-        try {
-          nextProjectStore = await createProjectStore({
-            workspacePath: nextRuntimeContext.effectiveCwd,
-            sourceUri: parsed.sourceUri,
-            threadId: parsed.threadId
-          });
-        } catch (error) {
-          return reply.code(500).send({
-            error: error instanceof Error ? error.message : String(error)
-          });
-        }
-      }
       runtimeContext = nextRuntimeContext;
       await resetCodexScratch();
       const updated = await options.storage.resetSource({
@@ -1462,10 +1274,6 @@ export async function createMorticServer(options: MorticServerOptions) {
         codex: await getCodexStatus(),
         runtimeContext
       });
-      if (nextProjectStore) {
-        options.projectStore = nextProjectStore;
-      }
-      await syncProjectSession(updated, "source_thread.selected", { sourceUri: parsed.sourceUri, threadId: parsed.threadId });
       await emitSessionSnapshot("source-selected", updated);
       return sessionSnapshot(updated, "source-selected");
     } catch (error) {
@@ -1478,67 +1286,8 @@ export async function createMorticServer(options: MorticServerOptions) {
   app.post("/api/session/clear", async () => {
     await resetCodexScratch();
     const session = await options.storage.clear();
-    await syncProjectSession(session, "session.cleared");
     await emitSessionSnapshot("session-cleared", session);
     return sessionSnapshot(session, "session-cleared");
-  });
-
-  app.post<{ Body: { approveItemIds?: string[] } }>("/api/project/session/commit", async (request, reply) => {
-    const session = await options.storage.read();
-    if (!canonicalMemoryEnabled || !options.projectStore) return reply.code(503).send(canonicalUnavailable(session));
-    if (session.activeTurn?.status === "running") {
-      return reply.code(409).send({ error: "A turn is running. Finish or interrupt it before committing.", session });
-    }
-    const approveItemIds = Array.isArray(request.body?.approveItemIds)
-      ? request.body.approveItemIds.filter((id): id is string => typeof id === "string")
-      : [];
-    return options.projectStore.commitSession(session, approveItemIds);
-  });
-
-  app.post("/api/project/session/archive", async (_request, reply) => {
-    const session = await options.storage.read();
-    if (!canonicalMemoryEnabled || !options.projectStore) return reply.code(503).send(canonicalUnavailable(session));
-    if (session.activeTurn?.status === "running") {
-      return reply.code(409).send({ error: "A turn is running. Finish or interrupt it before archiving.", session });
-    }
-    return options.projectStore.archiveSession(session);
-  });
-
-  app.post("/api/project/checkpoint/confirm", async (_request, reply) => {
-    if (!canonicalMemoryEnabled || !options.projectStore) return reply.code(503).send(canonicalUnavailable());
-    return options.projectStore.confirmSourceCheckpoint();
-  });
-
-  app.post("/api/project/checkpoint/dismiss", async (_request, reply) => {
-    if (!canonicalMemoryEnabled || !options.projectStore) return reply.code(503).send(canonicalUnavailable());
-    return options.projectStore.dismissSourceCheckpoint();
-  });
-
-  app.post("/api/project/checkpoint/manual", async (_request, reply) => {
-    const session = await options.storage.read();
-    if (!canonicalMemoryEnabled || !options.projectStore) return reply.code(503).send(canonicalUnavailable(session));
-    return options.projectStore.createManualSourceCheckpoint(session);
-  });
-
-  app.post("/api/project/handoff-copied", async (_request, reply) => {
-    const session = await options.storage.read();
-    if (!canonicalMemoryEnabled || !options.projectStore) return reply.code(503).send(canonicalUnavailable(session));
-    return options.projectStore.markHandoffCopied(session);
-  });
-
-  app.patch<{ Params: { itemId: string }; Body: UpdateExtractedItemRequest }>("/api/project/extractions/:itemId", async (request, reply) => {
-    if (!canonicalMemoryEnabled || !options.projectStore) return reply.code(503).send(canonicalUnavailable());
-    const patch: UpdateExtractedItemRequest = {};
-    if (isExtractionStatus(request.body?.status)) patch.status = request.body.status;
-    if (isExtractedItemType(request.body?.type)) patch.type = request.body.type;
-    if (typeof request.body?.title === "string") patch.title = request.body.title;
-    if (typeof request.body?.body === "string") patch.body = request.body.body;
-    if (request.body && Object.prototype.hasOwnProperty.call(request.body, "taskPlanMarkdown")) {
-      patch.taskPlanMarkdown = typeof request.body.taskPlanMarkdown === "string" ? request.body.taskPlanMarkdown : undefined;
-    }
-    if (typeof request.body?.mergeIntoId === "string") patch.mergeIntoId = request.body.mergeIntoId;
-    if (request.body?.retire === true) patch.retire = true;
-    return options.projectStore.updateExtractedItem(request.params.itemId, patch);
   });
 
   app.get<{ Querystring: { limit?: string; cwd?: string; searchTerm?: string } }>("/api/provider/threads", async (request) => {
@@ -1723,13 +1472,6 @@ export async function createMorticServer(options: MorticServerOptions) {
           "Prioritize Mortic turns after this fork checkpoint when generating handoff prompts; inherited source context is only background."
       });
       const sessionWithCheckpoint = checkpoint ? await options.storage.setForkCheckpoint(checkpoint) : latest;
-      await syncProjectSession(sessionWithCheckpoint, "scratch.prewarmed", {
-        scratchMode: effective.scratchMode,
-        codexModel: effective.codexModel,
-        serviceTier: effective.serviceTier,
-        reasoningEffort: effective.reasoningEffort,
-        checkpoint
-      });
       await emitSessionSnapshot("scratch-prewarmed", sessionWithCheckpoint);
 
       return {
@@ -1845,7 +1587,6 @@ export async function createMorticServer(options: MorticServerOptions) {
       updates?: Partial<TurnRun>
     ): Promise<MorticSession> => {
       const updated = await addTurnLog(options.storage, turnId, startMs, label, detail, updates);
-      await recordProjectEvent(updated, "turn.log", { turnId, label, detail });
       emitLogUpdate(updated);
       return updated;
     };
@@ -1905,12 +1646,6 @@ export async function createMorticServer(options: MorticServerOptions) {
       activeTurn
     });
     const startedSession = await options.storage.read();
-    await syncProjectSession(startedSession, "turn.user_appended", {
-      turnId,
-      entryId: userEntry.id,
-      scratchMode: effectiveScratchMode,
-      codexModel: effectiveCodexModel
-    });
     await emitSessionSnapshot("turn-started", startedSession);
 
     void (async () => {
@@ -2179,11 +1914,6 @@ export async function createMorticServer(options: MorticServerOptions) {
         const latestBeforeAppend = await options.storage.read();
         if (latestBeforeAppend.activeTurn?.id !== turnId || latestBeforeAppend.activeTurn.status !== "running") return;
         const withAssistant = await options.storage.append(assistantEntry);
-        await syncProjectSession(withAssistant, "turn.assistant_appended", {
-          turnId,
-          entryId: assistantEntry.id,
-          parserMode: assistantEntry.parserMode
-        });
         const finalizedTrace = finalizeProgress();
         const updated = await logAndEmit("Assistant response appended", `${Buffer.byteLength(assistantText, "utf8")} display bytes`, {
           status: "completed",
@@ -2220,11 +1950,6 @@ export async function createMorticServer(options: MorticServerOptions) {
         const latestBeforeAppend = await options.storage.read();
         if (latestBeforeAppend.activeTurn?.id !== turnId || latestBeforeAppend.activeTurn.status !== "running") return;
         const withFailure = await options.storage.append(assistantEntry);
-        await syncProjectSession(withFailure, "turn.failed_assistant_appended", {
-          turnId,
-          entryId: assistantEntry.id,
-          error: message
-        });
         const finalizedTrace = finalizeProgress();
         const updated = await logAndEmit("Turn failed", message, {
           status: "failed",
@@ -2288,7 +2013,6 @@ export async function createMorticServer(options: MorticServerOptions) {
     }
 
     const updated = await updateAudioHealth(options.storage, request.params.turnId, body);
-    await recordProjectEvent(updated, "turn.audio_health", { turnId: request.params.turnId, provider: body.provider, ttsError: body.ttsError });
     if (updated.activeTurn?.id === request.params.turnId) {
       emitTurnEvent(request.params.turnId, {
         type: "log",
@@ -2319,7 +2043,6 @@ export async function createMorticServer(options: MorticServerOptions) {
         totalMs: Date.now() - startMs
       }
     });
-    await syncProjectSession(updated, "turn.interrupted", { turnId: request.params.turnId });
 
     if (updated.activeTurn?.id === request.params.turnId) {
       clearTurnReplay(request.params.turnId);
@@ -2433,13 +2156,11 @@ export async function createMorticServer(options: MorticServerOptions) {
       }
       const prompts = parseHandoffPrompts(handoff);
       const updated = await options.storage.setHandoff(prompts);
-      await syncProjectSession(updated, "handoff.generated", { generatedBy: "codex" });
       await emitSessionSnapshot("handoff-generated", updated);
       return { ...prompts, session: updated, generatedBy: "codex" };
     } catch {
       const prompts = localHandoff(session.sourceUri, transcriptMarkdown);
       const updated = await options.storage.setHandoff(prompts);
-      await syncProjectSession(updated, "handoff.generated", { generatedBy: "local" });
       await emitSessionSnapshot("handoff-generated", updated);
       return { ...prompts, session: updated, generatedBy: "local" };
     }

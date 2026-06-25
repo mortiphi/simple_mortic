@@ -18,10 +18,10 @@ release/0.1-stabilize
 ## Repo Files
 
 - [ ] `.github/workflows/ci.yml` exists and runs on `main`, `release/**`, pull requests, and manual dispatch.
-- [ ] `.github/workflows/release-linux.yml` exists and runs on `v*.*.*` tags.
+- [ ] `.github/workflows/release.yml` exists and runs on `v*.*.*` tags.
 - [ ] `.github/pull_request_template.md` exists.
-- [ ] `docs/release/RELEASE.md` exists.
-- [ ] `docs/release/RELEASE_CRITERIA.md` exists.
+- [ ] `docs/release/release.md` exists.
+- [ ] `docs/release/release-criteria.md` exists.
 - [ ] `CHANGELOG.md` exists.
 - [ ] README presents GitHub Release desktop downloads as the first install path.
 - [ ] `package.json` and `package-lock.json` are committed together.
@@ -79,13 +79,13 @@ After the first release succeeds, merge the stabilization branch back to `main`.
 
 ## Release Flow
 
-When the target branch satisfies `docs/release/RELEASE_CRITERIA.md`:
+When the target branch satisfies `docs/release/release-criteria.md`:
 
 ```bash
 npm version patch
 git push --follow-tags
 ```
 
-The tag triggers `.github/workflows/release-linux.yml`, which uploads the Debian package and checksums to GitHub Releases.
+The tag triggers `.github/workflows/release.yml`, which uploads Linux, macOS, and Windows desktop artifacts plus checksums to GitHub Releases.
 
 Publishing to npm is intentionally deferred. The first public install path is the GitHub Release desktop package.

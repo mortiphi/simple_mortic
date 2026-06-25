@@ -1,17 +1,17 @@
 # Canonical State Pipeline
 
-This pipeline was extracted from the original handoff notes.
+This pipeline is parked design context for future canonical-state work. It is not active implementation.
 
 ## Core Flow
 
 1. A scratch transcript accumulates voice or text turns.
-2. Compile produces draft project-state material.
+2. A future compile/extract action produces draft project-state material.
 3. Draft cards remain pending until reviewed.
 4. Approved deltas update canonical state.
 5. Canonical checkpoints become the durable project chart.
 6. Provider conversations remain evidence and metadata, not the source of truth.
 
-## Server Files
+## Removed Server Files
 
 ```text
 src/server/projectStorage.ts
@@ -38,5 +38,4 @@ skills/mortic-canonical-state/fixtures/corpus.json
 
 ## Release Caveat
 
-Canonical state removal is planned separately. Until that lands, canonical-state tests remain part of the release bar because the code is still present.
-
+Canonical state is not part of the current release bar. Future work should add new code, tests, and evaluation fixtures alongside the feature when it is reintroduced.

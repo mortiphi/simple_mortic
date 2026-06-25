@@ -38,11 +38,8 @@ src/client/lib/voice.ts
 - The source thread picker lists recent Codex conversations.
 - Voice turns land in scratch forks, not source threads.
 - Transcript and handoff surfaces should make spoken text and notes distinct.
-- Canonical/project panels exist in the codebase but are separate from the first-release product promise.
+- Canonical/project-memory panels are not part of the active client surface.
 
 ## Source Switch Guard
 
-`src/client/App.tsx` contains project-view generation guards that prevent stale project data from appearing after switching source threads.
-
-Do not reintroduce unguarded async project responses such as direct stale `setProjectState(payload)` calls after source switching.
-
+When the selected source thread changes, the client clears the current scratch session and rehydrates from the server snapshot for the new thread.

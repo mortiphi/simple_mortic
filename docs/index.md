@@ -1,51 +1,51 @@
 # Mortic Docs
 
-This directory separates current release truth, experimental workstreams, future product plans, architecture notes, reviews, and raw historical source material.
+This directory separates current release truth, deferred design notes, future product plans, architecture notes, reviews, and raw historical source material.
 
 ## Current Release Scope
 
-- [Voice Sidecar MVP](current/VOICE_SIDECAR_MVP.md): original MVP plan for the Codex scratch-fork voice sidecar.
-- [Safety Invariants](current/SAFETY_INVARIANTS.md): rules that must hold for source-thread safety and release readiness.
-- [Scope Boundaries](current/SCOPE_BOUNDARIES.md): extracted notes on first-release scope versus deferred work.
+- [Voice Sidecar MVP](current/voice-sidecar-mvp.md): original MVP plan for the Codex scratch-fork voice sidecar.
+- [Safety Invariants](current/safety-invariants.md): rules that must hold for source-thread safety and release readiness.
+- [Scope Boundaries](current/scope-boundaries.md): extracted notes on first-release scope versus deferred work.
 
-The first release target is the desktop voice sidecar for Codex scratch forks. Canonical state management exists in the codebase but is not the primary first-release product promise.
+The current product surface is the desktop voice sidecar for Codex scratch forks. Canonical/project-memory code has been removed from the active app.
 
 ## Canonical State
 
-- [Canonical State Overview](canonical-state/OVERVIEW.md): what the feature is, why it exists, and why it is treated separately from the first release.
-- [Canonical State Pipeline](canonical-state/PIPELINE.md): extracted implementation flow and file map.
+- [Canonical State Overview](canonical-state/overview.md): parked design notes for a future canonical-state workstream.
+- [Canonical State Pipeline](canonical-state/pipeline.md): intended future pipeline, not active implementation.
 
 ## Architecture
 
-- [System Overview](architecture/SYSTEM_OVERVIEW.md): CLI boot, server, client, skills, and runtime shape.
-- [Codex Bridge](architecture/CODEX_BRIDGE.md): app-server bridge, CLI PTY fallback, and provider boundaries.
-- [Voice Pipeline](architecture/VOICE_PIPELINE.md): STT, Codex turn, voice-output parsing, and TTS.
-- [Project Storage](architecture/PROJECT_STORAGE.md): local storage shape for sessions and project memory.
-- [Client UI](architecture/CLIENT_UI.md): extracted UI concepts and key client files.
+- [System Overview](architecture/system-overview.md): CLI boot, server, client, skills, and runtime shape.
+- [Codex Bridge](architecture/codex-bridge.md): app-server bridge, CLI PTY fallback, and provider boundaries.
+- [Voice Pipeline](architecture/voice-pipeline.md): STT, Codex turn, voice-output parsing, and TTS.
+- [Session Storage](architecture/session-storage.md): local storage shape for voice-sidecar sessions.
+- [Client UI](architecture/client-ui.md): extracted UI concepts and key client files.
 
 ## Development
 
-- [Local Setup](development/LOCAL_SETUP.md): development commands and source-build doctor flow.
-- [Local State](development/LOCAL_STATE.md): environment and state directories.
-- [Testing](development/TESTING.md): test scripts, evals, and release validation commands.
-- [Agent Guide](development/AGENT_GUIDE.md): working rules for future agents in this repo.
+- [Local Setup](development/local-setup.md): development commands and source-build doctor flow.
+- [Local State](development/local-state.md): environment and state directories.
+- [Testing](development/testing.md): test scripts, evals, and release validation commands.
+- [Agent Guide](development/agent-guide.md): working rules for future agents in this repo.
 
 ## Release
 
-- [Development Setup](release/DEVELOPMENT_SETUP.md): branch model, GitHub settings, and release flow setup.
-- [Release Checklist](release/RELEASE.md): release commands and post-release checks.
-- [Release Criteria](release/RELEASE_CRITERIA.md): release readiness bar.
-- [Packaging](release/PACKAGING.md): desktop package notes extracted from handoff material.
+- [Development Setup](release/development-setup.md): branch model, GitHub settings, and release flow setup.
+- [Release Checklist](release/release.md): release commands and post-release checks.
+- [Release Criteria](release/release-criteria.md): release readiness bar.
+- [Packaging](release/packaging.md): desktop package notes extracted from handoff material.
 
 ## Future Product Direction
 
-- [Future Branch Manager Spec](future/FUTURE_BRANCH_MANAGER_SPEC.md): later rewrite of the branch-manager idea.
-- [Future Branch Manager Spec Original](future/FUTURE_BRANCH_MANAGER_SPEC_ORIGINAL.md): earlier branch-manager spec with additional sketches and references.
+- [Future Branch Manager Spec](future/future-branch-manager-spec.md): later rewrite of the branch-manager idea.
+- [Future Branch Manager Spec Original](future/future-branch-manager-spec-original.md): earlier branch-manager spec with additional sketches and references.
 
 ## Reviews
 
-- [Claude Review](reviews/CLAUDE_REVIEW.md): product and release maturity review.
-- [Ensemble Adversarial Review](reviews/ENSEMBLE_ADVERSARIAL_REVIEW.md): UX/UI adversarial review.
+- [Claude Review](reviews/claude-review.md): product and release maturity review.
+- [Ensemble Adversarial Review](reviews/ensemble-adversarial-review.md): UX/UI adversarial review.
 
 ## Archive
 

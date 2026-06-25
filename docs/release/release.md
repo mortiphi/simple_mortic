@@ -14,6 +14,7 @@ npm run typecheck
 npm test
 npm run dist:linux:dir
 npm run dist:linux:deb
+npm run check:release-artifacts
 ```
 
 ## Create Release
@@ -31,8 +32,9 @@ Use `npm version minor` or `npm version major` when the release warrants it.
 
 - Confirm the GitHub Actions release workflow completed.
 - Confirm the GitHub Release exists.
-- Confirm the `.deb` and `checksums.txt` assets are attached.
+- Confirm the Linux, macOS, Windows, and checksum assets are attached.
 - Download the `.deb` from GitHub and install-test it.
+- Download the macOS Apple Silicon and Windows installer artifacts from GitHub and smoke-test them on matching machines.
 - Launch `mortic-desktop` from the installed package and confirm the app reaches the first-run or session screen.
 - From a source build, run `node dist/node/cli/main.js doctor` and confirm the expected Codex/login status.
 - Merge release stabilization changes back into `main` if the tag came from a `release/*` branch.

@@ -23,7 +23,7 @@ export function OnboardingScreen({ status, busy, onRecheck }: OnboardingScreenPr
       <section className="onboarding-card" role="dialog" aria-modal="true" aria-label="Mortic setup">
         <h2>Set up Mortic</h2>
         <p className="onboarding-intro">
-          Mortic drives the Codex CLI for voice turns and Compile. Finish the steps below, then check again.
+          Mortic drives the Codex CLI for voice turns and handoff prompts. Finish the steps below, then check again.
         </p>
         <ol className="onboarding-steps">
           <li className={stepStateClass(codexInstalled)}>
@@ -62,7 +62,7 @@ export function OnboardingScreen({ status, busy, onRecheck }: OnboardingScreenPr
             <div>
               <strong>Mortic skills</strong>
               {skillsOk ? (
-                <span className="onboarding-step-detail">Compile and voice-output skills are synced to ~/.codex/skills</span>
+                <span className="onboarding-step-detail">Voice-output skill is synced to ~/.codex/skills</span>
               ) : (
                 <span className="onboarding-step-detail">
                   Skill sync failed:

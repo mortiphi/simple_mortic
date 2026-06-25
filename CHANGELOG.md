@@ -8,6 +8,7 @@
 - Deferred npm/npx distribution for the first release.
 - Reorganized project docs by current scope, architecture, canonical-state work, future plans, reviews, release notes, and raw archives.
 - Archived and extracted the extra-scope audit into first-release scope-boundary docs.
+- Removed canonical/project-memory routes, storage, skills, evals, and release tests from the active voice-sidecar app.
 
 ## 0.1.0
 

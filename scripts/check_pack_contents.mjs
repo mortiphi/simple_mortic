@@ -46,7 +46,7 @@ for (const file of files) {
 const required = [
   "dist/node/cli/main.js",
   "dist/client/index.html",
-  "skills/mortic-canonical-state/SKILL.md",
+  "skills/mortic-voice-output/SKILL.md",
   "scripts/codex_pty_worker.py"
 ];
 for (const file of required) {

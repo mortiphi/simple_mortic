@@ -1,6 +1,6 @@
 # Safety Invariants
 
-These rules were extracted from the original agent handoff and should stay true as the repo moves toward a first desktop release.
+These rules should stay true as the repo moves toward a first desktop release.
 
 ## Source Thread Safety
 
@@ -22,9 +22,7 @@ These rules were extracted from the original agent handoff and should stay true 
 
 ## Canonical State Boundaries
 
-Canonical state work is separate from the first release product promise.
-
-If enabled, canonical state changes must happen only through approved deltas and checkpoints. Draft compilations, extracted cards, and scratch transcripts are evidence or pending material until explicitly approved.
+Canonical/project-memory implementation is not part of the active product surface. If this workstream returns later, canonical state changes must happen only through approved deltas and checkpoints. Draft material and scratch transcripts are evidence or pending material until explicitly approved.
 
 ## Operational Resilience
 
@@ -36,4 +34,3 @@ The first release should be able to boot with:
 - local browser voice fallback,
 - Codex CLI installed and logged in,
 - optional cloud provider keys supplied by the user.
-

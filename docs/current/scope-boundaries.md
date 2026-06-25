@@ -1,6 +1,6 @@
 # Scope Boundaries
 
-This note was extracted from the archived `EXTRA_SCOPE.md` audit. It separates the narrow first-release voice sidecar from adjacent or deferred work that exists in the repository.
+This note separates the voice sidecar from adjacent or deferred work.
 
 ## First-Release Core
 
@@ -12,13 +12,13 @@ CLI arg -> scratch fork -> push-to-talk voice -> Codex turn -> TTS -> transcript
 
 For the first downloadable desktop release, avoid expanding the public promise beyond this unless a feature is already required for the packaged app to boot safely.
 
-## Deferred Or Adjacent Workstreams
+## Removed Or Deferred Workstreams
 
-The repo currently contains code and docs beyond the narrow voice-sidecar MVP. These areas should be treated deliberately rather than accidentally included in first-release scope.
+The repo still contains reference docs, evals, design mocks, and future specs beyond the narrow voice-sidecar MVP. These areas should be treated deliberately rather than accidentally included in release scope.
 
 ### Canonical State And Project Memory
 
-Canonical-state and project-memory work includes:
+Canonical-state and project-memory implementation has been removed from the active app. Removed areas include:
 
 - `src/server/canonicalStateSkill.ts`
 - `src/server/projectStorage.ts`
@@ -28,7 +28,7 @@ Canonical-state and project-memory work includes:
 - `skills/mortic-canonical-state/`
 - canonical/project storage tests and evals
 
-This work is important but should be handled as its own workstream: complete it, hide it, or remove it in a dedicated pass.
+Future canonical-state work should restart from the parked docs under `docs/canonical-state/`, not from active server/client code.
 
 ### Advanced Runtime And Context Features
 
@@ -54,7 +54,7 @@ These should be documented and exposed according to actual release readiness.
 
 ### Client UI Extras
 
-Extra UI surfaces include:
+Removed UI surfaces include:
 
 - canonical chart/project panels,
 - extraction review modals,
@@ -64,7 +64,7 @@ Extra UI surfaces include:
 - thread switching picker,
 - Markdown helpers for chart and extraction rendering.
 
-Some surfaces may be useful, but the first-release user story should stay focused.
+The current user story stays focused on the voice sidecar.
 
 ### Evals, Design Mocks, And Future Plans
 
@@ -83,7 +83,7 @@ When preparing the first release, classify changes as one of:
 
 - required for the voice sidecar to work safely,
 - packaging/release infrastructure,
-- deferred canonical-state work,
+- future canonical-state work,
 - future branch-manager work,
 - internal evaluation/design/reference material.
 

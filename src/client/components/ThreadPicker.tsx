@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 
 import type { ProviderThreadSummary } from "../../shared/types.js";
-import { chartDateLabel } from "../lib/labels.js";
+import { threadDateLabel } from "../lib/labels.js";
 
 export type ThreadPickerProps = {
   api: string;
@@ -170,14 +170,14 @@ export function ThreadPicker({ api, currentThreadId, disabled, workspacePath, on
                 <small>Thread</small>
                 <strong>{threadTitle(thread)}</strong>
               </span>
-              <span className="thread-picker-date">{chartDateLabel(thread.updatedAt)}</span>
+              <span className="thread-picker-date">{threadDateLabel(thread.updatedAt)}</span>
             </button>
           ))}
           {previewThread && (
             <section className="thread-picker-preview" aria-label="Thread preview">
               <small>Preview</small>
               <strong>{threadTitle(previewThread)}</strong>
-              <span>{workspaceLabel(previewThread.cwd)} · {chartDateLabel(previewThread.updatedAt)}</span>
+              <span>{workspaceLabel(previewThread.cwd)} · {threadDateLabel(previewThread.updatedAt)}</span>
               <code>{previewThread.sourceUri}</code>
               <button type="button" onClick={() => commitThread(previewThread)}>
                 {previewThread.threadId === currentThreadId ? "Current thread" : "Open this thread"}

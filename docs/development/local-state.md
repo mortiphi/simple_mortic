@@ -25,12 +25,9 @@ Do not commit `.env` files or secrets.
 ```text
 ~/.mortic/
   sessions/
-  projects/
 ```
 
 Session folders hold transcripts, handoffs, and session metadata.
-
-Project folders hold project memory and canonical-state artifacts when that workstream is enabled.
 
 ## Codex State
 
@@ -42,4 +39,3 @@ Project folders hold project memory and canonical-state artifacts when that work
 ```
 
 Vendored Mortic skills are synced into `~/.codex/skills`.
-
