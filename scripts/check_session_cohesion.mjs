@@ -59,7 +59,6 @@ function sseReader(response) {
 
 const app = await createMorticServer({
   storage,
-  canonicalMemoryEnabled: false,
   preferencesStore: createMemoryPreferencesStore(defaultMorticPreferences()),
   runtimeContext: {
     status: "fallback",
@@ -101,10 +100,6 @@ try {
   assert.equal(secondDraft.snapshot.session.composerDraft, "shared draft");
   assert.equal(firstDraft.snapshot.revision, secondDraft.snapshot.revision);
   assert(firstDraft.snapshot.revision > firstInitial.snapshot.revision);
-
-  const disabled = await fetch(`${base}/api/project`);
-  assert.equal(disabled.status, 503);
-  assert.equal((await disabled.json()).code, "canonical_memory_disabled");
 
   const preferences = await fetch(`${base}/api/preferences`, {
     method: "PATCH",

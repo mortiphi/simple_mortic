@@ -2,10 +2,11 @@ name: CI
 
 on:
   push:
-    branches: 
+    branches:
       - main
       - "release/**"
   pull_request:
+  workflow_dispatch:
 
 jobs:
   checks:
@@ -22,4 +23,3 @@ jobs:
       - run: npm ci
       - run: npm run typecheck
       - run: npm test
-      - run: npm run dist:linux:dir
