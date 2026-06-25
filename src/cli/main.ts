@@ -7,7 +7,6 @@ import { fileURLToPath } from "node:url";
 
 import { getLiveKitStatus } from "../server/livekit.js";
 import { codexProviderAdapter } from "../server/providerAdapters.js";
-import { syncVendoredSkills } from "../server/skillSync.js";
 import { getSttStatus } from "../server/stt.js";
 import { getTtsStatus } from "../server/tts.js";
 import { startMorticRuntime } from "./runtime.js";
@@ -28,7 +27,7 @@ Usage:
   npm run dev -- codex://threads/<thread-id>
 
 Commands:
-  doctor             Diagnose the install (codex, login, skills, python3, voice keys) and exit
+  doctor             Diagnose the install (codex, login, python3, voice keys) and exit
 
 Options:
   --no-open          Do not open the browser automatically
@@ -177,21 +176,6 @@ async function runDoctor(): Promise<never> {
       ? `logged in${provider.accountId ? ` (${provider.accountId})` : ""}`
       : `${provider.loginStatus}${provider.loginCommand ? ` — run \`${provider.loginCommand}\`` : ""}`
   );
-
-  const skillResults = await syncVendoredSkills().catch((error) => {
-    const detail = error instanceof Error ? error.message : String(error);
-    return [{ skill: "*", action: "error" as const, detail, targetDir: "" }];
-  });
-  const skillsOk = skillResults.length > 0 && skillResults.every((result) => result.action !== "error");
-  const skillSummary =
-    skillResults
-      .map((result) =>
-        result.detail && result.action !== "current"
-          ? `${result.skill} ${result.action} (${result.detail})`
-          : `${result.skill} ${result.action}`
-      )
-      .join("; ") || "no vendored skills found";
-  doctorLine(skillsOk, "Skills", skillSummary);
 
   if (process.platform === "win32") {
     doctorLine(false, "Python3", "Codex CLI PTY fallback is POSIX only and stays disabled on Windows");

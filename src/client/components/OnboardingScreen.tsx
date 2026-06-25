@@ -14,9 +14,6 @@ export function OnboardingScreen({ status, busy, onRecheck }: OnboardingScreenPr
   const provider = status.provider;
   const codexInstalled = provider.available;
   const loggedIn = codexInstalled && provider.loginStatus !== "logged-out";
-  const skillErrors = status.skills.filter((skill) => skill.action === "error");
-  const keptCopies = status.skills.filter((skill) => skill.action === "kept-user-copy");
-  const skillsOk = skillErrors.length === 0;
 
   return (
     <div className="modal-backdrop onboarding-backdrop" role="presentation">
@@ -57,30 +54,7 @@ export function OnboardingScreen({ status, busy, onRecheck }: OnboardingScreenPr
               )}
             </div>
           </li>
-          <li className={stepStateClass(skillsOk)}>
-            <span className="onboarding-step-mark" aria-hidden="true">{skillsOk ? "✓" : "3"}</span>
-            <div>
-              <strong>Mortic skills</strong>
-              {skillsOk ? (
-                <span className="onboarding-step-detail">Voice-output skill is synced to ~/.codex/skills</span>
-              ) : (
-                <span className="onboarding-step-detail">
-                  Skill sync failed:
-                  {skillErrors.map((skill) => (
-                    <em key={skill.skill} className="onboarding-step-error">
-                      {skill.skill}: {skill.detail ?? "unknown error"}
-                    </em>
-                  ))}
-                </span>
-              )}
-            </div>
-          </li>
         </ol>
-        {keptCopies.length > 0 && (
-          <p className="onboarding-note">
-            Kept your edited cop{keptCopies.length === 1 ? "y" : "ies"} of {keptCopies.map((skill) => skill.skill).join(", ")} — Mortic never overwrites skills you changed.
-          </p>
-        )}
         <div className="onboarding-actions">
           <button type="button" onClick={onRecheck} disabled={busy}>
             {busy ? "Checking…" : "Check again"}

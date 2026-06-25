@@ -15,7 +15,6 @@ const defaults = {
   serviceTier: null,
   codexAccessPreset: "ask",
   scratchMode: "voice",
-  shortSpokenReplies: false,
   transportProvider: "local-browser",
   sttProvider: "browser",
   ttsProvider: "browser",
@@ -25,12 +24,12 @@ const defaults = {
 try {
   const store = await createPreferencesStore(defaults);
   const [first, second] = await Promise.all([
-    store.patch({ initialized: true, shortSpokenReplies: true }),
+    store.patch({ initialized: true }),
     store.patch({ scratchMode: "text", overlayHintDismissed: true })
   ]);
 
-  assert.equal(first.shortSpokenReplies, true);
-  assert.equal(second.shortSpokenReplies, true, "queued patches must retain prior writes");
+  assert.equal(first.initialized, true);
+  assert.equal(second.initialized, true, "queued patches must retain prior writes");
   assert.equal(second.scratchMode, "text");
   assert.equal(second.overlayHintDismissed, true);
 

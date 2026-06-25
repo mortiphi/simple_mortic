@@ -7,9 +7,7 @@ import type { ReasoningEffort, ScratchMode } from "./types.js";
 export const defaultScratchSettings: {
   scratchMode: ScratchMode;
   reasoningEffort: ReasoningEffort;
-  voiceCaveman: boolean;
 } = {
   scratchMode: "voice",
-  reasoningEffort: "none",
-  voiceCaveman: false
+  reasoningEffort: "none"
 };

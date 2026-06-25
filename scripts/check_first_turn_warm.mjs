@@ -35,7 +35,6 @@ const { CodexAppServerBridge } = await import("../dist/node/server/appServerBrid
 // 1. Boot/client default alignment.
 assert.equal(defaultScratchSettings.scratchMode, "voice", "default scratch mode must stay voice");
 assert.equal(defaultScratchSettings.reasoningEffort, "none", "default reasoning effort must stay none");
-assert.equal(defaultScratchSettings.voiceCaveman, false, "default caveman toggle must stay off");
 
 const bridge = new CodexAppServerBridge();
 const scratchParams = {
@@ -43,8 +42,7 @@ const scratchParams = {
   cwd: statsDir,
   model: "default",
   reasoningEffort: defaultScratchSettings.reasoningEffort,
-  scratchMode: defaultScratchSettings.scratchMode,
-  voiceCaveman: defaultScratchSettings.voiceCaveman
+  scratchMode: defaultScratchSettings.scratchMode
 };
 
 try {

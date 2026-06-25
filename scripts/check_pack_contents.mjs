@@ -5,8 +5,8 @@ import { fileURLToPath } from "node:url";
 
 // Tarball safety check. `npm pack` must produce a self-contained, secret-free
 // package: the repo .env (and any other env file) must never ship, internal
-// material (caveman/, evals/, planning docs, artifacts) stays out, and the
-// runtime essentials (CLI entry, built UI, vendored skills, PTY worker) must
+// material (evals/, planning docs, artifacts) stays out, and the
+// runtime essentials (CLI entry, built UI, PTY worker) must
 // all be present. Runs with scripts ignored so prepack does not rebuild here.
 
 const repoRoot = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
@@ -29,7 +29,6 @@ assert.ok(files.length > 0, "npm pack reported an empty tarball");
 
 const forbidden = [
   { pattern: /\.env/, label: "env file (secrets must never ship)" },
-  { pattern: /^caveman\//, label: "caveman/ nested repo" },
   { pattern: /^evals\//, label: "evals/ internal evaluation data" },
   { pattern: /^(artifacts|design-mocks)\//, label: "internal artifacts/design docs" },
   {
@@ -46,11 +45,10 @@ for (const file of files) {
 const required = [
   "dist/node/cli/main.js",
   "dist/client/index.html",
-  "skills/mortic-voice-output/SKILL.md",
   "scripts/codex_pty_worker.py"
 ];
 for (const file of required) {
   assert.ok(files.includes(file), `Tarball is missing required file: ${file}\nPacked files:\n${files.join("\n")}`);
 }
 
-console.log(`Pack contents check passed (${files.length} files; no env files, caveman/, evals/, or internal docs).`);
+console.log(`Pack contents check passed (${files.length} files; no env files, evals/, or internal docs).`);

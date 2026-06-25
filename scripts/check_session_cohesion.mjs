@@ -77,6 +77,22 @@ try {
   const address = app.server.address();
   assert(address && typeof address !== "string");
   const base = `http://127.0.0.1:${address.port}`;
+
+  const preferencePreflight = await fetch(`${base}/api/preferences`, {
+    method: "OPTIONS",
+    headers: {
+      Origin: "http://127.0.0.1:5173",
+      "Access-Control-Request-Method": "PATCH",
+      "Access-Control-Request-Headers": "content-type"
+    }
+  });
+  assert.equal(preferencePreflight.status, 204);
+  assert.match(
+    preferencePreflight.headers.get("access-control-allow-methods") ?? "",
+    /\bPATCH\b/,
+    "preference PATCH must be allowed by browser CORS preflight"
+  );
+
   const firstController = new AbortController();
   const secondController = new AbortController();
   const [firstResponse, secondResponse] = await Promise.all([
@@ -104,12 +120,12 @@ try {
   const preferences = await fetch(`${base}/api/preferences`, {
     method: "PATCH",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ shortSpokenReplies: true })
+    body: JSON.stringify({ overlayHintDismissed: true })
   });
   assert.equal(preferences.status, 200);
   const [firstPreferences, secondPreferences] = await Promise.all([firstEvent(), secondEvent()]);
-  assert.equal(firstPreferences.snapshot.preferences.shortSpokenReplies, true);
-  assert.equal(secondPreferences.snapshot.preferences.shortSpokenReplies, true);
+  assert.equal(firstPreferences.snapshot.preferences.overlayHintDismissed, true);
+  assert.equal(secondPreferences.snapshot.preferences.overlayHintDismissed, true);
 
   const invalidPreferences = await fetch(`${base}/api/preferences`, {
     method: "PATCH",

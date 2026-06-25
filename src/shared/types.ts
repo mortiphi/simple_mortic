@@ -221,7 +221,6 @@ export type TurnRun = {
   serviceTier?: string | null;
   codexRuntimePolicy?: CodexRuntimePolicy;
   scratchMode: ScratchMode;
-  voiceCaveman?: boolean;
   createdAt: string;
   updatedAt: string;
   logs: TurnLogEntry[];
@@ -407,7 +406,6 @@ export type MorticPreferences = {
   serviceTier?: string | null;
   codexAccessPreset: CodexAccessPreset;
   scratchMode: ScratchMode;
-  shortSpokenReplies: boolean;
   transportProvider: TransportProvider;
   sttProvider: SttProvider;
   ttsProvider: TtsProvider;
@@ -594,7 +592,6 @@ export type SparkContextCompactRequest = {
   reasoningEffort?: ReasoningEffort;
   codexModel?: string;
   scratchMode?: ScratchMode;
-  voiceCaveman?: boolean;
 };
 
 export type SparkContextCompactResponse = {
@@ -627,7 +624,6 @@ export type TurnRequest = {
   serviceTier?: string | null;
   codexRuntimePolicy?: CodexRuntimePolicy;
   scratchMode?: ScratchMode;
-  voiceCaveman?: boolean;
   allowModelContextRisk?: boolean;
   allowSparkContextRisk?: boolean;
   sttMetrics?: SttTurnMetrics;
@@ -653,7 +649,6 @@ export type PrewarmRequest = {
   serviceTier?: string | null;
   codexRuntimePolicy?: CodexRuntimePolicy;
   scratchMode: ScratchMode;
-  voiceCaveman?: boolean;
   allowModelContextRisk?: boolean;
   allowSparkContextRisk?: boolean;
 };
@@ -664,7 +659,6 @@ export type PrewarmResponse = {
   reasoningEffort: ReasoningEffort;
   codexModel: string;
   serviceTier?: string | null;
-  voiceCaveman?: boolean;
   prewarmConfirmation?: string;
   prewarmMs: number;
   logs: Array<{
@@ -919,6 +913,5 @@ export type SkillSyncStatus = {
 
 export type OnboardingStatusResponse = {
   provider: ProviderAdapterStatus;
-  skills: SkillSyncStatus[];
   ready: boolean;
 };

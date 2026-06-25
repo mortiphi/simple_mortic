@@ -1,7 +1,4 @@
-import { readFileSync } from "node:fs";
 import type { ChildProcess } from "node:child_process";
-import { homedir } from "node:os";
-import path from "node:path";
 import net from "node:net";
 
 import type {
@@ -21,6 +18,7 @@ import {
   normalizeAppServerNotification
 } from "./appServerEvents.js";
 import { codexProviderAdapter } from "./providerAdapters.js";
+import { VOICE_DEVELOPER_INSTRUCTIONS } from "./voiceContract.js";
 
 type JsonMessage = {
   id?: number | string;
@@ -149,7 +147,6 @@ type ScratchState = {
   serviceTier?: string | null;
   reasoningEffort: ReasoningEffort;
   scratchMode: ScratchMode;
-  voiceCaveman: boolean;
   developerInstructions?: string;
   ephemeral: boolean;
   confirmationPrompt?: string;
@@ -180,7 +177,6 @@ type CompactedSparkBaseState = {
   compactionModel: string;
   reasoningEffort: ReasoningEffort;
   scratchMode: ScratchMode;
-  voiceCaveman: boolean;
   tokenUsage?: TokenUsageSnapshot;
   createdAt: string;
   confirmationPrompt?: string;
@@ -190,51 +186,6 @@ type CompactedSparkBaseState = {
 type ScratchStateKey = string;
 
 const HOST = "127.0.0.1";
-const MORTIC_VOICE_SKILL_PATH = path.join(homedir(), ".codex", "skills", "mortic-voice-output", "SKILL.md");
-const VOICE_DEVELOPER_INSTRUCTIONS = `This is a disposable Mortic voice scratch fork. Use the $mortic-voice-output skill for every response in this voice scratch fork.
-If the active Codex app-server turn provides an output schema, obey that schema exactly.
-Otherwise, output exactly two newline-delimited JSON records and nothing else.
-The first record must have type "speak" and string field "text"; its text must be the complete conversational answer to the user's latest message.
-The second record must have type "read" and string field "markdown"; its markdown must be the readable screen version of the same answer plus exact artifacts.
-Do not output legacy labels, XML tags, Markdown fences, wrapper prose, examples, or placeholder text.
-Keep spoken text conversational, concise, useful on its own, and safe for text to speech, but do not reduce it to a preamble for the read markdown.
-Spoken text should carry the answer, motivation, recommendation, tradeoff, and next step when those matter.
-No silent caveats: if the read markdown mentions risks, blockers, proof still needed, uncertainty, objections, tradeoffs, recommendations, or next steps, the spoken text must mention those same points in natural spoken language.
-For planning, diagnosis, or status answers, spoken text must include the verdict, key reasons, what still needs proof, and the recommended next action.
-Before emitting, run a coverage check: a listener who never sees the screen must still know the verdict, reason, caveat, proof still needed, and next action.
-For Mortic voice diagnosis, spoken text should name the relevant layer: model output contract, parser, monotonic speech ledger or chunking, text-to-speech provider/playback, UI rendering/logging, source-thread fork safety, or Text-mode isolation.
-Put bullets, code, exact paths, URLs, logs, source links, exact prices, line numbers, and implementation detail in the read markdown.
-Never write code unless the user explicitly asks for code. Never read code aloud.
-In spoken text, say "characters", "per million characters", and "per thousand characters"; do not say "chars", "1M chars", "1K chars", or slash pricing such as "$0.05/1K chars".
-If something is unclear, ask one short clarifying question in spoken text. Otherwise answer directly and help the user plan a useful handoff back to the original thread.
-The contract has no exceptions: even for greetings, acknowledgements, or one-word answers, emit both records.
-Example of the only acceptable output shape (two lines, nothing else):
-{"type":"speak","text":"Yes, the fix is ready and the checks pass."}
-{"type":"read","markdown":"- Fix: ready\\n- Checks: pass"}
-A minimal acknowledgement must still be: {"type":"speak","text":"Ok."} on line one and {"type":"read","markdown":"Ok."} on line two.`;
-
-const VOICE_CAVEMAN_INSTRUCTIONS = `Mortic Caveman speech toggle is ON.
-Use $caveman lite behavior inside the first record's spoken text only: remove filler, hedging, pleasantries, and repeated setup; keep technical terms exact; keep sentences short and easy to hear aloud.
-Do not use ultra compression, joke dialect, or broken wording if it would sound awkward in speech.
-Do not apply caveman style to the second record's read markdown; keep it precise, skimmable, and normal enough to paste into another Codex thread.`;
-
-function morticVoiceSkillBody(): string {
-  try {
-    const skill = readFileSync(MORTIC_VOICE_SKILL_PATH, "utf8");
-    return skill.replace(/^---[\s\S]*?---\s*/, "").trim();
-  } catch {
-    return "";
-  }
-}
-
-function voiceDeveloperInstructions(voiceCaveman: boolean): string {
-  const skillBody = morticVoiceSkillBody();
-  const skillInstructions = skillBody
-    ? `\n\nFull $mortic-voice-output skill instructions loaded from ${MORTIC_VOICE_SKILL_PATH}:\n\n${skillBody}`
-    : "\n\nThe $mortic-voice-output skill file was not readable; follow the explicit NDJSON contract above.";
-  const base = `${VOICE_DEVELOPER_INSTRUCTIONS}${skillInstructions}`;
-  return voiceCaveman ? `${base}\n\n${VOICE_CAVEMAN_INSTRUCTIONS}` : base;
-}
 
 function chooseCompletedText(pending: PendingTurn): CompletedTextChoice {
   const streamText = pending.text.trim();
@@ -679,7 +630,6 @@ export class CodexAppServerBridge {
     codexRuntimePolicy?: CodexRuntimePolicy;
     reasoningEffort: ReasoningEffort;
     scratchMode: ScratchMode;
-    voiceCaveman?: boolean;
     developerInstructions?: string;
     onDelta?: (delta: string, text: string) => void | Promise<void>;
     onEvent?: (label: string, detail?: string) => void | Promise<void>;
@@ -697,8 +647,7 @@ export class CodexAppServerBridge {
             params.model,
             params.serviceTier,
             params.reasoningEffort,
-            params.scratchMode,
-            Boolean(params.voiceCaveman)
+            params.scratchMode
           );
       const scratchThreadId = compacted
         ? compacted.compactedThreadId
@@ -708,7 +657,6 @@ export class CodexAppServerBridge {
             params.serviceTier,
             params.reasoningEffort,
             params.scratchMode,
-            Boolean(params.voiceCaveman),
             params.cwd,
             params.developerInstructions,
             params.onEvent
@@ -747,22 +695,19 @@ export class CodexAppServerBridge {
     codexRuntimePolicy?: CodexRuntimePolicy;
     reasoningEffort: ReasoningEffort;
     scratchMode?: ScratchMode;
-    voiceCaveman?: boolean;
     confirmationPrompt?: string;
     onEvent?: (label: string, detail?: string) => void | Promise<void>;
   }): Promise<{ confirmation?: string }> {
     return await this.withOperationLock(async () => {
       await this.ensureReady(params.model, params.reasoningEffort, params.onEvent);
       const scratchMode = params.scratchMode ?? "text";
-      const voiceCaveman = Boolean(params.voiceCaveman);
       const compacted = this.getCompactedSparkBaseFor(
         params.sourceThreadId,
         params.cwd,
         params.model,
         params.serviceTier,
         params.reasoningEffort,
-        scratchMode,
-        voiceCaveman
+        scratchMode
       );
       const scratchThreadId = compacted
         ? compacted.compactedThreadId
@@ -772,7 +717,6 @@ export class CodexAppServerBridge {
             params.serviceTier,
             params.reasoningEffort,
             scratchMode,
-            voiceCaveman,
             params.cwd,
             undefined,
             params.onEvent
@@ -790,7 +734,6 @@ export class CodexAppServerBridge {
         params.serviceTier,
         params.reasoningEffort,
         scratchMode,
-        voiceCaveman,
         undefined
       );
       const cached = this.scratches.get(scratchConfigKey);
@@ -844,7 +787,6 @@ export class CodexAppServerBridge {
     cwd: string;
     reasoningEffort: ReasoningEffort;
     scratchMode: ScratchMode;
-    voiceCaveman?: boolean;
     onEvent?: (label: string, detail?: string) => void | Promise<void>;
   }): Promise<{ scratchThreadId: string; tokenUsage?: TokenUsageSnapshot }> {
     return await this.withOperationLock(async () => {
@@ -855,7 +797,6 @@ export class CodexAppServerBridge {
         null,
         params.reasoningEffort,
         params.scratchMode,
-        Boolean(params.voiceCaveman),
         params.cwd,
         undefined,
         params.onEvent
@@ -910,7 +851,6 @@ export class CodexAppServerBridge {
     compactionModel: string;
     reasoningEffort: ReasoningEffort;
     scratchMode: ScratchMode;
-    voiceCaveman?: boolean;
     onEvent?: (label: string, detail?: string) => void | Promise<void>;
   }): Promise<{ turnId: string; compactedThreadId: string; tokenUsage?: TokenUsageSnapshot }> {
     return await this.withOperationLock(async () => {
@@ -928,7 +868,6 @@ export class CodexAppServerBridge {
         null,
         params.reasoningEffort,
         params.scratchMode,
-        Boolean(params.voiceCaveman),
         params.cwd,
         params.onEvent
       );
@@ -953,8 +892,7 @@ export class CodexAppServerBridge {
             params.targetModel,
             null,
             params.reasoningEffort,
-            params.scratchMode,
-            Boolean(params.voiceCaveman)
+            params.scratchMode
           ),
           {
             sourceThreadId: params.sourceThreadId,
@@ -965,7 +903,6 @@ export class CodexAppServerBridge {
             compactionModel: params.compactionModel,
             reasoningEffort: params.reasoningEffort,
             scratchMode: params.scratchMode,
-            voiceCaveman: Boolean(params.voiceCaveman),
             tokenUsage,
             createdAt: new Date().toISOString()
           }
@@ -992,7 +929,6 @@ export class CodexAppServerBridge {
     model: string;
     reasoningEffort: ReasoningEffort;
     scratchMode: ScratchMode;
-    voiceCaveman?: boolean;
   }): CompactedSparkBaseState | null {
     return this.getCompactedSparkBaseFor(
       params.sourceThreadId,
@@ -1000,8 +936,7 @@ export class CodexAppServerBridge {
       params.model,
       null,
       params.reasoningEffort,
-      params.scratchMode,
-      Boolean(params.voiceCaveman)
+      params.scratchMode
     );
   }
 
@@ -1248,10 +1183,9 @@ export class CodexAppServerBridge {
     serviceTier: string | null | undefined,
     effort: ReasoningEffort,
     scratchMode: ScratchMode,
-    voiceCaveman: boolean,
     developerInstructions?: string
   ): ScratchStateKey {
-    return `${sourceThreadId}|${cwd}|${model}|tier:${serviceTier ?? "default"}|${effort}|${scratchMode}|${voiceCaveman ? "1" : "0"}|${scratchForkAccessKey()}|${developerInstructions ?? ""}`;
+    return `${sourceThreadId}|${cwd}|${model}|tier:${serviceTier ?? "default"}|${effort}|${scratchMode}|${scratchForkAccessKey()}|${developerInstructions ?? ""}`;
   }
 
   private compactedSparkBaseKey(
@@ -1260,10 +1194,9 @@ export class CodexAppServerBridge {
     model: string,
     serviceTier: string | null | undefined,
     effort: ReasoningEffort,
-    scratchMode: ScratchMode,
-    voiceCaveman: boolean
+    scratchMode: ScratchMode
   ): string {
-    return this.scratchKey(sourceThreadId, cwd, model, serviceTier, effort, scratchMode, voiceCaveman);
+    return this.scratchKey(sourceThreadId, cwd, model, serviceTier, effort, scratchMode);
   }
 
   private getCompactedSparkBaseFor(
@@ -1272,11 +1205,10 @@ export class CodexAppServerBridge {
     model: string,
     serviceTier: string | null | undefined,
     effort: ReasoningEffort,
-    scratchMode: ScratchMode,
-    voiceCaveman: boolean
+    scratchMode: ScratchMode
   ): CompactedSparkBaseState | null {
     return this.compactedSparkBases.get(
-      this.compactedSparkBaseKey(sourceThreadId, cwd, model, serviceTier, effort, scratchMode, voiceCaveman)
+      this.compactedSparkBaseKey(sourceThreadId, cwd, model, serviceTier, effort, scratchMode)
     ) ?? null;
   }
 
@@ -1286,7 +1218,6 @@ export class CodexAppServerBridge {
     serviceTier: string | null | undefined,
     effort: ReasoningEffort,
     scratchMode: ScratchMode,
-    voiceCaveman: boolean,
     cwd: string,
     onEvent?: (label: string, detail?: string) => void | Promise<void>
   ): Promise<string> {
@@ -1307,7 +1238,7 @@ export class CodexAppServerBridge {
         model_reasoning_effort: effort
       },
       baseInstructions: null,
-      developerInstructions: scratchMode === "voice" ? voiceDeveloperInstructions(voiceCaveman) : null,
+      developerInstructions: scratchMode === "voice" ? VOICE_DEVELOPER_INSTRUCTIONS : null,
       ephemeral: true,
       persistExtendedHistory: false
     });
@@ -1388,12 +1319,11 @@ export class CodexAppServerBridge {
     serviceTier: string | null | undefined,
     effort: ReasoningEffort,
     scratchMode: ScratchMode,
-    voiceCaveman: boolean,
     cwd: string,
     developerInstructions?: string,
     onEvent?: (label: string, detail?: string) => void | Promise<void>
   ): Promise<string> {
-    const key = this.scratchKey(sourceThreadId, cwd, model, serviceTier, effort, scratchMode, voiceCaveman, developerInstructions);
+    const key = this.scratchKey(sourceThreadId, cwd, model, serviceTier, effort, scratchMode, developerInstructions);
     const existing = this.scratches.get(key);
     if (existing?.scratchThreadId) {
       return existing.scratchThreadId;
@@ -1416,7 +1346,7 @@ export class CodexAppServerBridge {
         model_reasoning_effort: effort
       },
       baseInstructions: null,
-      developerInstructions: developerInstructions ?? (scratchMode === "voice" ? voiceDeveloperInstructions(voiceCaveman) : null),
+      developerInstructions: developerInstructions ?? (scratchMode === "voice" ? VOICE_DEVELOPER_INSTRUCTIONS : null),
       ephemeral: true,
       persistExtendedHistory: false
     });
@@ -1440,7 +1370,6 @@ export class CodexAppServerBridge {
       serviceTier: serviceTier ?? null,
       reasoningEffort: effort,
       scratchMode,
-      voiceCaveman,
       developerInstructions,
       ephemeral: true
     };

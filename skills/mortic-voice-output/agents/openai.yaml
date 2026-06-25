@@ -1,4 +1,0 @@
-interface:
-  display_name: "Mortic Voice Output"
-  short_description: "Complete spoken answer plus readable detail"
-  default_prompt: "Use $mortic-voice-output to format this Mortic voice response as speak/read NDJSON."

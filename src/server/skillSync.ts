@@ -89,7 +89,7 @@ export function findVendoredSkillsDir(): string | null {
   let current = path.dirname(fileURLToPath(import.meta.url));
   for (let depth = 0; depth < 8; depth += 1) {
     const candidate = path.join(current, "skills");
-    if (existsSync(path.join(candidate, "mortic-voice-output", "SKILL.md"))) {
+    if (existsSync(candidate)) {
       return candidate;
     }
     const parent = path.dirname(current);

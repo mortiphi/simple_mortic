@@ -60,11 +60,6 @@ export function readStoredScratchMode(defaultMode: ScratchMode): ScratchMode {
   return scratchModes.includes(stored as ScratchMode) ? (stored as ScratchMode) : defaultMode;
 }
 
-export function readStoredVoiceCaveman(): boolean {
-  if (storedSetting("mortic.settingsVersion") !== SETTINGS_VERSION) return false;
-  return storedSetting("mortic.voiceCaveman") === "true";
-}
-
 export function readStoredTtsProvider(defaultProvider: TtsProvider, availableProviders: TtsProvider[]): TtsProvider {
   if (storedSetting("mortic.settingsVersion") !== SETTINGS_VERSION) return defaultProvider;
   const stored = storedSetting("mortic.ttsProvider");

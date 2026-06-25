@@ -45,7 +45,7 @@ import { MarkdownContent } from "./components/Markdown.js";
 import { ClipboardFallbackDialog, ConfirmDialog, HandoffReviewModal, TranscriptDrawer } from "./components/SessionModals.js";
 import { HandoffPanel } from "./components/HandoffPanel.js";
 import { ThreadPicker } from "./components/ThreadPicker.js";
-import { apiBase, readStoredCodexAccess, readStoredEffort, readStoredModel, readStoredScratchMode, readStoredServiceTier, readStoredSttProvider, readStoredTransportProvider, readStoredTtsProvider, readStoredVoiceCaveman } from "./lib/api.js";
+import { apiBase, readStoredCodexAccess, readStoredEffort, readStoredModel, readStoredScratchMode, readStoredServiceTier, readStoredSttProvider, readStoredTransportProvider, readStoredTtsProvider } from "./lib/api.js";
 import { ApiState, PrewarmState } from "./lib/clientTypes.js";
 import { desktopBridge, type MorticDesktopState } from "./desktopBridge.js";
 import { formatMs, formatSignedMs } from "./lib/format.js";
@@ -356,6 +356,7 @@ export function App() {
   const clientId = useMemo(rendererClientId, []);
   const latestSessionRevisionRef = useRef(-1);
   const preferencePatchRef = useRef("");
+  const pendingPreferencePatchRef = useRef<string | null>(null);
   const draftPatchRef = useRef("");
   const [desktopState, setDesktopState] = useState<MorticDesktopState | null>(null);
   const [state, setState] = useState<ApiState>({ session: null, loading: true, error: null });
@@ -365,7 +366,6 @@ export function App() {
   const [onboarding, setOnboarding] = useState<OnboardingStatusResponse | null>(null);
   const [onboardingBusy, setOnboardingBusy] = useState(false);
   const [scratchMode, setScratchMode] = useState<ScratchMode>("voice");
-  const [voiceCaveman, setVoiceCaveman] = useState(false);
   const [reasoningEffort, setReasoningEffort] = useState<ReasoningEffort>("none");
   const [codexModel, setCodexModel] = useState("default");
   const [serviceTier, setServiceTier] = useState<string | null>(null);
@@ -469,7 +469,6 @@ export function App() {
     () => runtimePolicyForPreset(codexAccessPreset),
     [codexAccessPreset]
   );
-  const effectiveVoiceCaveman = scratchMode === "voice" && voiceCaveman;
   const session = state.session;
   const sessionRef = useRef<MorticSession | null>(null);
   const threadRequired = isPlaceholderSession(session);
@@ -498,7 +497,6 @@ export function App() {
       effectiveCodexModel,
       effectiveReasoningEffort,
       scratchMode,
-      effectiveVoiceCaveman ? "caveman-on" : "caveman-off",
       currentSparkPreflight?.status ?? "hard-block",
       currentSparkPreflight?.inputTokens ?? "unknown",
       currentSparkPreflight?.updatedAt ?? "no-timestamp"
@@ -516,7 +514,6 @@ export function App() {
     currentSparkPreflight,
     effectiveCodexModel,
     effectiveReasoningEffort,
-    effectiveVoiceCaveman,
     scratchMode,
     session?.threadId,
     sparkPreflightPending
@@ -582,7 +579,6 @@ export function App() {
     effectiveServiceTier,
     effectiveCodexRuntimePolicy,
     effectiveReasoningEffort,
-    effectiveVoiceCaveman,
     sparkApproved,
     sparkBlocked,
     sparkPreflightPending,
@@ -765,7 +761,6 @@ export function App() {
       serviceTier: readStoredServiceTier(modelOption?.defaultServiceTier ?? config?.selectedServiceTier ?? null),
       codexAccessPreset: readStoredCodexAccess(defaultAccessPreset(config ?? null)),
       scratchMode: readStoredScratchMode((payload.defaultScratchMode ?? "voice") as ScratchMode),
-      shortSpokenReplies: readStoredVoiceCaveman(),
       transportProvider: readStoredTransportProvider(payload.livekit?.defaultTransport ?? "local-browser", payload.livekit?.availableTransports ?? ["local-browser"]),
       sttProvider: readStoredSttProvider(payload.stt.defaultProvider, payload.stt.availableProviders),
       ttsProvider: readStoredTtsProvider(payload.tts.defaultProvider, payload.tts.availableProviders),
@@ -788,26 +783,33 @@ export function App() {
     }
 
     const preferences = payload.preferences.initialized ? payload.preferences : legacyPreferences(payload);
-    setServerPreferences(preferences);
+    const serializedPreferences = JSON.stringify(preferences);
+    const pendingPreferencePatch = pendingPreferencePatchRef.current;
+    const shouldApplyPreferences = !pendingPreferencePatch || pendingPreferencePatch === serializedPreferences;
+    if (shouldApplyPreferences) {
+      if (pendingPreferencePatch === serializedPreferences) pendingPreferencePatchRef.current = null;
+      setServerPreferences(preferences);
+      preferencePatchRef.current = serializedPreferences;
+    }
     setAudioLease(payload.audioLease);
-    preferencePatchRef.current = JSON.stringify(preferences);
     setSourceIdentity(payload.sourceIdentity);
     setSpeechProjectionEnabled(payload.features?.speechProjection ?? true);
     setProgressSoundsEnabled(payload.features?.progressSounds ?? false);
     setProgressSpeechEnabled(payload.features?.progressSpeech ?? false);
     setAppServerConfig(payload.appServerConfig ?? null);
-    setScratchMode(preferences.scratchMode);
-    setVoiceCaveman(preferences.shortSpokenReplies);
-    setReasoningEffort(preferences.reasoningEffort);
-    setCodexModel(preferences.codexModel);
-    setServiceTier(preferences.serviceTier ?? null);
-    setCodexAccessPreset(preferences.codexAccessPreset);
     setTtsStatus(payload.tts);
-    setTtsProvider(preferences.ttsProvider);
     setSttStatus(payload.stt);
-    setSttProvider(preferences.sttProvider);
     if (payload.livekit) setLiveKitStatus(payload.livekit);
-    setTransportProvider(preferences.transportProvider);
+    if (shouldApplyPreferences) {
+      setScratchMode(preferences.scratchMode);
+      setReasoningEffort(preferences.reasoningEffort);
+      setCodexModel(preferences.codexModel);
+      setServiceTier(preferences.serviceTier ?? null);
+      setCodexAccessPreset(preferences.codexAccessPreset);
+      setTtsProvider(preferences.ttsProvider);
+      setSttProvider(preferences.sttProvider);
+      setTransportProvider(preferences.transportProvider);
+    }
     setState({ session: payload.session, loading: false, error: null });
     sessionRef.current = payload.session;
     setSourceDraft(payload.session.sourceUri);
@@ -919,7 +921,6 @@ export function App() {
       serviceTier,
       codexAccessPreset,
       scratchMode,
-      shortSpokenReplies: voiceCaveman,
       transportProvider,
       sttProvider,
       ttsProvider,
@@ -927,16 +928,39 @@ export function App() {
     };
     const serialized = JSON.stringify(preferences);
     if (serialized === preferencePatchRef.current) return;
+    if (serialized === pendingPreferencePatchRef.current) return;
+    pendingPreferencePatchRef.current = serialized;
     const timer = window.setTimeout(() => {
-      preferencePatchRef.current = serialized;
-      void fetch(`${api}/api/preferences`, {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: serialized
-      });
+      void (async () => {
+        try {
+          const response = await fetch(`${api}/api/preferences`, {
+            method: "PATCH",
+            headers: { "Content-Type": "application/json" },
+            body: serialized
+          });
+          const payload = (await response.json().catch(() => null)) as { preferences?: MorticPreferences; error?: string } | null;
+          if (!response.ok) throw new Error(payload?.error ?? `Preferences request failed: ${response.status}`);
+          if (payload?.preferences) {
+            preferencePatchRef.current = JSON.stringify(payload.preferences);
+            setServerPreferences(payload.preferences);
+          } else {
+            preferencePatchRef.current = serialized;
+          }
+          if (pendingPreferencePatchRef.current === serialized) pendingPreferencePatchRef.current = null;
+        } catch (error) {
+          if (pendingPreferencePatchRef.current === serialized) pendingPreferencePatchRef.current = null;
+          setState((current) => ({
+            ...current,
+            error: error instanceof Error ? error.message : String(error)
+          }));
+        }
+      })();
     }, 250);
-    return () => window.clearTimeout(timer);
-  }, [api, codexAccessPreset, codexModel, effectiveReasoningEffort, scratchMode, serverPreferences, serviceTier, settingsHydrated, sttProvider, transportProvider, ttsProvider, voiceCaveman]);
+    return () => {
+      window.clearTimeout(timer);
+      if (pendingPreferencePatchRef.current === serialized) pendingPreferencePatchRef.current = null;
+    };
+  }, [api, codexAccessPreset, codexModel, effectiveReasoningEffort, scratchMode, serverPreferences, serviceTier, settingsHydrated, sttProvider, transportProvider, ttsProvider]);
 
   useEffect(() => {
     if (!settingsHydrated || draft === draftPatchRef.current) return;
@@ -971,8 +995,7 @@ export function App() {
         const query = new URLSearchParams({
           codexModel: effectiveCodexModel,
           reasoningEffort: effectiveReasoningEffort,
-          scratchMode,
-          voiceCaveman: String(effectiveVoiceCaveman)
+          scratchMode
         });
         const response = await fetch(`${api}/api/session/spark-context?${query.toString()}`, {
           signal: controller.signal
@@ -1004,7 +1027,7 @@ export function App() {
       cancelled = true;
       controller.abort();
     };
-  }, [api, effectiveCodexModel, effectiveReasoningEffort, effectiveServiceTier, effectiveVoiceCaveman, scratchMode, state.session?.threadId, threadRequired]);
+  }, [api, effectiveCodexModel, effectiveReasoningEffort, effectiveServiceTier, scratchMode, state.session?.threadId, threadRequired]);
 
   useEffect(() => {
     const session = state.session;
@@ -1021,7 +1044,7 @@ export function App() {
     }
 
     const runtimeKey = `access:${codexAccessPreset}`;
-    const key = `${session.threadId}|${scratchMode}|${effectiveCodexModel}|tier:${effectiveServiceTier ?? "default"}|${effectiveReasoningEffort}|${runtimeKey}|caveman:${effectiveVoiceCaveman ? "on" : "off"}`;
+    const key = `${session.threadId}|${scratchMode}|${effectiveCodexModel}|tier:${effectiveServiceTier ?? "default"}|${effectiveReasoningEffort}|${runtimeKey}`;
     if (prewarmKeyRef.current === key) return;
 
     const controller = new AbortController();
@@ -1033,8 +1056,6 @@ export function App() {
         key,
         detail: `${modeLabels[scratchMode]} · ${configModelLabel(selectedModelOption, effectiveCodexModel)} · ${effortLabels[effectiveReasoningEffort]}${
           effectiveServiceTier ? ` · ${selectedServiceTierOption?.name ?? effectiveServiceTier}` : ""
-        }${
-          scratchMode === "voice" ? ` · Caveman ${effectiveVoiceCaveman ? "on" : "off"}` : ""
         }`
       });
 
@@ -1050,7 +1071,6 @@ export function App() {
             codexModel: effectiveCodexModel,
             serviceTier: effectiveServiceTier,
             codexRuntimePolicy: effectiveCodexRuntimePolicy,
-            voiceCaveman: effectiveVoiceCaveman,
             allowModelContextRisk: sparkApproved,
             allowSparkContextRisk: sparkApproved
           }),
@@ -1081,8 +1101,6 @@ export function App() {
           key,
           detail: `${modeLabels[payload.scratchMode]} · ${configModelLabel(selectedModelOption, payload.codexModel)} · ${effortLabels[payload.reasoningEffort]}${
             payload.serviceTier ? ` · ${selectedServiceTierOption?.name ?? payload.serviceTier}` : ""
-          }${
-            payload.scratchMode === "voice" ? ` · Caveman ${payload.voiceCaveman ? "on" : "off"}` : ""
           }${payload.prewarmConfirmation ? ` · ${payload.prewarmConfirmation}` : ""}`,
           confirmation: payload.prewarmConfirmation,
           elapsedMs: payload.prewarmMs
@@ -1114,7 +1132,6 @@ export function App() {
     effectiveCodexModel,
     effectiveCodexRuntimePolicy,
     effectiveReasoningEffort,
-    effectiveVoiceCaveman,
     sparkApproved,
     sparkCompactionPending,
     sparkContext.label,
@@ -1170,8 +1187,7 @@ export function App() {
           confirm: true,
           reasoningEffort: effectiveReasoningEffort,
           codexModel: effectiveCodexModel,
-          scratchMode,
-          voiceCaveman: effectiveVoiceCaveman
+          scratchMode
         })
       });
       const payload = (await response.json()) as SparkContextCompactResponse & { error?: string };
@@ -1925,10 +1941,6 @@ export function App() {
                     </button>
                   ))}
                 </div>
-                <label className="toggle-control" title="Keep spoken answers concise while preserving full screen notes">
-                  <input type="checkbox" checked={voiceCaveman} onChange={(event) => setVoiceCaveman(event.target.checked)} disabled={scratchMode !== "voice" || pending} />
-                  Short spoken replies
-                </label>
                 <label className="control-select">
                   <span>Transport</span>
                   <select value={transportProvider} onChange={(event) => setTransportProvider(event.target.value as TransportProvider)} disabled={pending}>

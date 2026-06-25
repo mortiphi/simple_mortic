@@ -2,9 +2,10 @@ import assert from "node:assert/strict";
 
 import { modelProfile } from "../dist/node/shared/modelProfiles.js";
 import { parseMorticVoice, partialSpokenText } from "../dist/node/shared/voiceResponse.js";
+import { codexTurnPrompt, createHandoffPrompt } from "../dist/node/server/codex.js";
 import { getLiveKitStatus } from "../dist/node/server/livekit.js";
 import { configuredMaxSttPayloadBytes, getSttStatus, transcribeAudioWithFallback } from "../dist/node/server/stt.js";
-import { createHandoffPrompt } from "../dist/node/server/codex.js";
+import { VOICE_DEVELOPER_INSTRUCTIONS, voicePrompt } from "../dist/node/server/voiceContract.js";
 
 const validVoice = [
   JSON.stringify({ type: "speak", text: "Deepgram Nova-2 should be the first STT path, with Inworld, Whisper, and Browser available as fallbacks." }),
@@ -15,13 +16,43 @@ const parsed = parseMorticVoice(validVoice);
 assert.equal(parsed.ok, true);
 assert.equal(parsed.ok ? parsed.parts.spokenText.includes("Deepgram") : false, true);
 assert.equal(parsed.ok ? parsed.parts.notesText.includes("Primary STT") : false, true);
+
+const validSchemaVoice = JSON.stringify({
+  speak: {
+    text: "The voice schema is working, and the listener can understand the answer without the screen."
+  },
+  read: {
+    markdown: "- File: `/Users/aeroknight/Downloads/as/Codex Voice/src/server/codex.ts`\n- Command: `npm run typecheck`"
+  }
+});
+const parsedSchema = parseMorticVoice(validSchemaVoice);
+assert.equal(parsedSchema.ok, true);
+assert.equal(parsedSchema.ok ? parsedSchema.parts.parserMode : undefined, "schema");
+assert.equal(
+  parsedSchema.ok ? parsedSchema.parts.spokenText : "",
+  "The voice schema is working, and the listener can understand the answer without the screen."
+);
+assert.match(parsedSchema.ok ? parsedSchema.parts.notesText ?? "" : "", /src\/server\/codex\.ts/);
+assert.match(parsedSchema.ok ? parsedSchema.parts.notesText ?? "" : "", /npm run typecheck/);
+
 assert.equal(parseMorticVoice(validVoice.split("\n")[0]).ok, false, "final voice output must include read record");
 assert.equal(parseMorticVoice(`${validVoice}\n${JSON.stringify({ type: "read", markdown: "extra" })}`).ok, false, "final voice output must contain exactly two records");
+assert.equal(parseMorticVoice(JSON.stringify({ speak: { text: "" }, read: { markdown: "missing spoken text" } })).ok, false, "schema output must require speak.text");
+assert.equal(parseMorticVoice("plain malformed assistant text").ok, false, "malformed voice output must fail safely");
 assert.equal(partialSpokenText(`${validVoice.split("\n")[0]}\n`), "Deepgram Nova-2 should be the first STT path, with Inworld, Whisper, and Browser available as fallbacks.");
 assert.equal(partialSpokenText('{"type":"speak","text":"Deepgram can start speaking before the JSON line closes.'), "Deepgram can start speaking before the JSON line closes.");
 assert.equal(partialSpokenText('{"type":"speak","text":"Escaped newline:\\nnext phrase'), "Escaped newline:\nnext phrase");
 assert.equal(partialSpokenText('{"type":"read","text":"This must not be spoken.'), "");
 assert.equal(partialSpokenText('{"type":"speak","text":"Do not include a half escape: \\'), "Do not include a half escape:");
+
+const userText = "Please inspect src/server/codex.ts and explain the result.";
+assert.equal(codexTurnPrompt(userText, "voice"), userText, "voice mode must send the raw user text");
+assert.equal(codexTurnPrompt(userText, "text"), userText, "text mode must send the raw user text");
+assert.equal(voicePrompt(userText), userText, "voice prompt helper must not prepend a per-turn wrapper");
+assert.equal(
+  VOICE_DEVELOPER_INSTRUCTIONS,
+  "Use speak.text for the complete spoken answer and read.markdown for the readable screen version."
+);
 
 const browserOnly = getSttStatus({});
 assert.equal(browserOnly.defaultProvider, "browser");
