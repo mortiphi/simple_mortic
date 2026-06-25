@@ -168,9 +168,22 @@ export function useVoiceEngine(params: VoiceEngineParams) {
     turnsDisabled
   } = params;
   const isAudioOwnerRef = useRef(isAudioOwner);
+  const previousAudioOwnerRef = useRef(isAudioOwner);
+  const audioOwnerHydratedRef = useRef(false);
 
   useEffect(() => {
+    const wasOwner = previousAudioOwnerRef.current;
     isAudioOwnerRef.current = isAudioOwner;
+    previousAudioOwnerRef.current = isAudioOwner;
+    if (!audioOwnerHydratedRef.current) {
+      audioOwnerHydratedRef.current = true;
+      return;
+    }
+    if (wasOwner && !isAudioOwner) {
+      cancelSpeechAudio();
+      if (recognizingRef.current || sttPhaseRef.current !== "idle") discardCapture(false);
+      setTtsProviderNotice("Audio moved to another Mortic window.");
+    }
   }, [isAudioOwner]);
 
   const [transportState, setTransportState] = useState<TransportState>("disconnected");

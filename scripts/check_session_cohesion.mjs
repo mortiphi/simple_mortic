@@ -202,6 +202,20 @@ assert(coordinatorEvents.some((event) => event.type === "audio-command" && event
 coordinator.command({ clientId: "app", surface: "app", command: "hide" });
 assert.equal(coordinator.state().ownerClientId, undefined, "explicit hide must release an idle lease");
 
+const visibleIdleCoordinatorEvents = [];
+const visibleIdleCoordinator = new SessionCoordinator(() => undefined);
+visibleIdleCoordinator.subscribe((event) => visibleIdleCoordinatorEvents.push(event));
+visibleIdleCoordinator.presence({ clientId: "overlay", surface: "overlay", focused: true, visible: true, audioPhase: "idle" });
+visibleIdleCoordinator.presence({ clientId: "app", surface: "app", focused: true, visible: true, audioPhase: "idle" });
+assert.equal(visibleIdleCoordinator.state().ownerClientId, "overlay", "passive focus must not silently steal a visible owner");
+assert.equal(visibleIdleCoordinator.state().pendingClientId, "app");
+visibleIdleCoordinator.command({ clientId: "app", surface: "app", command: "barge-in" });
+assert.equal(visibleIdleCoordinator.state().ownerClientId, "app", "explicit barge-in should transfer ownership");
+assert(
+  visibleIdleCoordinatorEvents.some((event) => event.type === "audio-command" && event.targetClientId === "overlay"),
+  "explicit barge-in should tell the previous owner to stop local audio"
+);
+
 const expiringCoordinator = new SessionCoordinator(() => undefined);
 expiringCoordinator.presence({ clientId: "abandoned", surface: "browser", focused: true, visible: true, audioPhase: "idle" });
 await new Promise((resolve) => setTimeout(resolve, 2));

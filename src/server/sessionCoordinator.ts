@@ -54,7 +54,9 @@ export class SessionCoordinator {
       changed = true;
     }
 
-    if (this.lease.phase === "idle" && this.lease.pendingClientId) {
+    const currentOwner = this.lease.ownerClientId ? this.clients.get(this.lease.ownerClientId) : undefined;
+    const currentOwnerCanYield = !this.lease.ownerClientId || !currentOwner || !currentOwner.visible;
+    if (this.lease.phase === "idle" && this.lease.pendingClientId && currentOwnerCanYield) {
       this.lease = this.promotePending({ ...this.lease, epoch: this.lease.epoch + 1 });
       changed = true;
     }
@@ -107,7 +109,10 @@ export class SessionCoordinator {
   }
 
   private requestOwnership(clientId: string, surface: ClientSurface): boolean {
-    if (!this.lease.ownerClientId || this.lease.ownerClientId === clientId || this.lease.phase === "idle") {
+    const ownerClientId = this.lease.ownerClientId;
+    const owner = ownerClientId ? this.clients.get(ownerClientId) : undefined;
+    const ownerCanYield = !ownerClientId || !owner || !owner.visible;
+    if (!ownerClientId || ownerClientId === clientId || (this.lease.phase === "idle" && ownerCanYield)) {
       const changed = this.lease.ownerClientId !== clientId || this.lease.pendingClientId !== undefined;
       this.lease = {
         ownerClientId: clientId,
