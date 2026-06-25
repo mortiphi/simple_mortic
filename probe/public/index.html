@@ -1,0 +1,142 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Mercury Probe</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <div class="container">
+    <header>
+      <h1>Mercury Probe</h1>
+      <p class="subtitle">Compare Mercury-led generation vs main-model-only generation</p>
+      <div id="status" class="status"></div>
+    </header>
+
+    <section class="controls">
+      <textarea id="question" placeholder="Ask a question that a reasoning model would take time on..." rows="3"></textarea>
+      <div class="row">
+        <label>Mode:
+          <select id="mode">
+            <option value="main-only">Main only (baseline)</option>
+            <option value="mercury-first">Mercury first → Main (sequential)</option>
+            <option value="race">Race (both parallel, no abort)</option>
+            <option value="race-resend">Race + resend (real architecture)</option>
+          </select>
+        </label>
+        <label>Provider:
+          <select id="provider">
+            <option value="codex">Codex app-server (real)</option>
+            <option value="openrouter">OpenRouter (proxy)</option>
+            <option value="openai">OpenAI (direct)</option>
+          </select>
+        </label>
+        <label>Main model:
+          <input list="models" id="model" value="gpt-5.5" autocomplete="off">
+          <datalist id="models">
+            <option value="gpt-5.5">
+            <option value="gpt-5">
+            <option value="gpt-5-mini">
+            <option value="gpt-4o">
+            <option value="gpt-4o-mini">
+            <option value="gpt-4.1">
+            <option value="gpt-4.1-mini">
+            <option value="o1-mini">
+            <option value="o1">
+            <option value="o3-mini">
+            <option value="default">
+            <option value="openai/gpt-5.5">
+            <option value="openai/gpt-4o">
+            <option value="anthropic/claude-3.5-sonnet">
+            <option value="google/gemini-2.0-flash-exp">
+          </datalist>
+        </label>
+        <label>Effort:
+          <select id="effort">
+            <option value="medium">medium</option>
+            <option value="low">low</option>
+            <option value="high">high</option>
+          </select>
+        </label>
+        <label>Mercury max_tokens:
+          <input type="range" id="mercuryMaxTokens" min="5" max="500" value="450" step="5" oninput="document.getElementById('mercuryMaxTokensVal').textContent = this.value" style="vertical-align: middle; width: 100px;">
+          <span id="mercuryMaxTokensVal">450</span>
+        </label>
+        <label>Mercury ctx (K tokens):
+          <input type="range" id="mercuryCtxK" min="5" max="50" value="25" step="5" oninput="document.getElementById('mercuryCtxKVal').textContent = this.value" style="vertical-align: middle; width: 100px;">
+          <span id="mercuryCtxKVal">25</span>K
+        </label>
+        <label>Source thread (Codex fork):
+          <input id="sourceThread" value="019e6f5e-627d-7150-abf1-d34356bbbfdc" placeholder="thread UUID (blank = fresh thread)" style="width:280px">
+        </label>
+        <label title="Use production voice contract: dev instructions at fork + output schema at turn">
+          <input type="checkbox" id="voiceMode" checked> Voice schema
+        </label>
+        <label title="Sandbox policy for Codex tools (read-only = can run commands + read files; workspace-write = can also write files in cwd)">
+          Sandbox:
+          <select id="sandboxMode">
+            <option value="readOnly">read-only</option>
+            <option value="workspaceWrite">workspace-write</option>
+          </select>
+        </label>
+        <label title="Working directory for Codex (used for sandbox writable roots)">
+          cwd:
+          <input id="cwd" value="/Users/aeroknight/Downloads/as/simple_mortic" style="width:220px">
+        </label>
+        <button id="run">Run</button>
+        <button id="clearCache" title="Force a fresh fork on next run ( clears the cached scratch thread)">Clear fork cache</button>
+        <button id="togglePrompts" title="Show/hide system prompt editors">Edit prompts</button>
+      </div>
+    </section>
+
+    <section id="promptEditors" class="prompts" style="display:none">
+      <details open>
+        <summary>Mercury system prompt <span style="color:#888; font-weight:normal">(sent as first message in every Mercury call)</span></summary>
+        <textarea id="mercuryPrompt" rows="10" spellcheck="false"></textarea>
+      </details>
+      <details>
+        <summary>Codex developer instructions (lean, schema-active) <span style="color:#888; font-weight:normal">(sent once per scratch fork, cached)</span></summary>
+        <textarea id="codexPrompt" rows="10" spellcheck="false"></textarea>
+      </details>
+      <button id="resetPrompts">Reset to defaults</button>
+    </section>
+
+    <section class="results">
+      <div class="panel mercury">
+        <div class="panel-header">
+          <h2>Mercury <span class="tag">preliminary</span></h2>
+          <div class="timing" id="mercury-timing"></div>
+        </div>
+        <div class="text" id="mercury-text"></div>
+      </div>
+      <div class="panel main">
+        <div class="panel-header">
+          <h2>Main <span class="tag" id="main-tag">definitive</span></h2>
+          <div class="timing" id="main-timing"></div>
+        </div>
+        <div class="text" id="main-text"></div>
+      </div>
+    </section>
+
+    <section class="summary" id="summary">
+      <div class="placeholder">Run a query to see timing comparison.</div>
+    </section>
+
+    <section class="history">
+      <h3>History</h3>
+      <table>
+        <thead>
+          <tr>
+            <th>Time</th><th>Question</th><th>Mode</th><th>Model</th>
+            <th>Mercury 1st byte</th><th>Main 1st byte</th>
+            <th>Perceived 1st content</th><th>Total</th>
+          </tr>
+        </thead>
+        <tbody id="history-body"></tbody>
+      </table>
+    </section>
+  </div>
+  <script type="module" src="app.mjs"></script>
+</body>
+</html>

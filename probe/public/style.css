@@ -1,0 +1,73 @@
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  background: #0f0f0f; color: #e0e0e0; padding: 20px; line-height: 1.5;
+}
+.container { max-width: 1200px; margin: 0 auto; }
+header { margin-bottom: 20px; }
+h1 { font-size: 24px; margin-bottom: 2px; }
+.subtitle { color: #888; font-size: 14px; margin-bottom: 8px; }
+.status { font-size: 12px; }
+.status .ok { color: #22c55e; }
+.status .missing { color: #ef4444; }
+.controls { background: #1a1a1a; padding: 16px; border-radius: 8px; margin-bottom: 20px; }
+textarea {
+  width: 100%; padding: 10px; background: #0f0f0f; color: #e0e0e0;
+  border: 1px solid #333; border-radius: 4px; font-size: 14px; margin-bottom: 12px;
+  resize: vertical; font-family: inherit;
+}
+.row { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
+label { display: flex; align-items: center; gap: 6px; font-size: 13px; color: #aaa; }
+select, input[list], button {
+  padding: 8px 12px; background: #222; color: #e0e0e0;
+  border: 1px solid #444; border-radius: 4px; font-size: 13px; font-family: inherit;
+}
+input[list] { width: 180px; }
+button { cursor: pointer; background: #2563eb; border-color: #2563eb; font-weight: 600; padding: 8px 24px; }
+button:disabled { opacity: 0.5; cursor: not-allowed; }
+button:not(:disabled):hover { background: #1d4ed8; }
+.results { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-bottom: 20px; }
+.panel { background: #1a1a1a; padding: 16px; border-radius: 8px; min-height: 160px; }
+.panel.mercury { border-left: 3px solid #f59e0b; }
+.panel.main { border-left: 3px solid #3b82f6; }
+.panel-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; }
+.panel h2 { font-size: 13px; color: #ccc; text-transform: uppercase; letter-spacing: 0.5px; }
+.tag { font-size: 10px; padding: 2px 6px; border-radius: 3px; background: #333; color: #888; margin-left: 6px; text-transform: none; }
+.timing { font-size: 11px; color: #888; text-align: right; }
+.timing .metric { display: inline-block; margin-left: 8px; }
+.timing .metric strong { color: #ccc; }
+.text { white-space: pre-wrap; font-size: 14px; min-height: 80px; }
+.text .aborted { color: #888; font-style: italic; font-size: 12px; }
+.text .resend-label { color: #3b82f6; font-size: 12px; margin-bottom: 4px; }
+.text .error { color: #ef4444; }
+.summary { background: #1a1a1a; padding: 16px; border-radius: 8px; margin-bottom: 20px; min-height: 60px; }
+.summary .placeholder { color: #666; font-size: 14px; }
+.summary .winner-badge { display: inline-block; padding: 4px 12px; border-radius: 4px; font-weight: 600; margin: 4px 4px 4px 0; }
+.summary .winner-badge.mercury { background: #f59e0b22; color: #f59e0b; border: 1px solid #f59e0b55; }
+.summary .winner-badge.main { background: #3b82f622; color: #3b82f6; border: 1px solid #3b82f655; }
+.summary .metric-row { display: flex; gap: 24px; flex-wrap: wrap; margin-top: 8px; }
+.summary .metric-item { font-size: 13px; }
+.summary .metric-item .label { color: #888; }
+.summary .metric-item .value { font-size: 20px; font-weight: 700; }
+.summary .metric-item .unit { font-size: 12px; color: #888; }
+.history { background: #1a1a1a; padding: 16px; border-radius: 8px; }
+.history h3 { margin-bottom: 12px; font-size: 13px; color: #888; text-transform: uppercase; letter-spacing: 0.5px; }
+table { width: 100%; border-collapse: collapse; font-size: 12px; }
+th, td { padding: 6px 8px; text-align: left; border-bottom: 1px solid #222; }
+th { color: #666; font-weight: normal; text-transform: uppercase; font-size: 10px; letter-spacing: 0.5px; }
+td { color: #aaa; }
+td .m { color: #f59e0b; }
+td .c { color: #3b82f6; }
+
+.prompts { background: #1a1a1a; padding: 16px; border-radius: 8px; margin-bottom: 20px; }
+.prompts details { margin-bottom: 12px; }
+.prompts summary { font-size: 12px; color: #ccc; text-transform: uppercase; letter-spacing: 0.5px; cursor: pointer; margin-bottom: 6px; }
+.prompts summary span { text-transform: none; letter-spacing: 0; }
+.prompts textarea {
+  width: 100%; padding: 10px; background: #0f0f0f; color: #e0e0e0;
+  border: 1px solid #333; border-radius: 4px; font-size: 12px; line-height: 1.4;
+  font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace; resize: vertical;
+  white-space: pre; overflow-wrap: normal; overflow-x: auto;
+}
+.prompts textarea.changed { border-color: #f59e0b; }
+.prompts button { margin-top: 4px; }

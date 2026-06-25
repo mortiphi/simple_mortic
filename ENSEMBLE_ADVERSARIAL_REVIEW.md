@@ -1209,9 +1209,74 @@ opencode HTTP server (`opencode serve`, default port 4096) exposes:
 
 ### 12.10 Probe results
 
-*(Probes to be run live after this section is written. Results appended here.)*
+**Environment:** codex-cli 0.142.0-alpha.1, opencode 1.17.8, macOS. Probes ran live against real Codex/opencode binaries. No Mortic code changed. The user's real `~/.codex/auth.json` was never modified — the refresh test used a copy.
 
-### 12.11 File-by-file change surface (for execution pass, not this pass)
+#### Probe 1 — symlinked auth across scoped home: **PASS**
+
+Setup: `~/.mortic/codex-home/` with `auth.json` → symlink `~/.codex/auth.json`, minimal `config.toml` (model + reasoning effort, no `CODEX_HOME` line), skills copied.
+
+- **1a (read):** `CODEX_HOME=~/.mortic/codex-home codex exec "reply with exactly: pong"` → responded "pong". Auth read via symlink works.
+- **1b (refresh write-back):** Copied auth.json, corrupted `access_token` in the copy, re-symlinked to the copy, ran `codex exec`. Codex got 401, refreshed via `refresh_token`, wrote new tokens back **through the symlink** (copy mtime advanced, `access_token` became a valid JWT again), turn succeeded ("refreshed"). Real `~/.codex/auth.json` untouched.
+- **Scoped session isolation:** the 1a session was written to `~/.mortic/codex-home/sessions/2026/06/20/rollout-...jsonl` — NOT to `~/.codex/sessions/`.
+- **CLI invisibility:** the scoped session ID (`019ee3f1-...`) is absent from `~/.codex/session_index.jsonl`.
+
+**Conclusion: scoped home + symlinked auth is viable.** No separate OpenAI login needed. Design 1/2 cleared.
+
+#### Probe 2 — cross-home path-fork + persistence: **PASS**
+
+From a scoped-home app-server (`CODEX_HOME=~/.mortic/codex-home codex app-server --listen ws://127.0.0.1:6190`), called `thread/fork` against a real personal thread:
+
+```json
+{ "threadId": "019ee35a-e7ee-7742-bfd9-0e82fb4c65e5",
+  "path": "~/.codex/sessions/2026/06/20/rollout-...-019ee35a-....jsonl",
+  "model": "gpt-5.5", "ephemeral": false }
+```
+
+- **2a (fork):** returned new `thread.id: 019ee3f8-312a-7093-949b-a71daa39327d`, `thread.ephemeral: false`, `thread.forkedFromId: 019ee35a-...` (the source). Cross-home path-fork works; the typed `ThreadForkParams` omits `path` (ts-rs codegen gap) but the runtime accepts it — current Mortic code already passes `path: null` via `params: any` at `appServerBridge.ts:1405`.
+- **2b (persistence across restart):** killed the app-server, started a **fresh** process, `thread/read({ threadId: fork, includeTurns: true })` → returned the fork with `turns.length: 111`, `ephemeral: false`, `forkedFromId` = source, `status: { type: "notLoaded" }` (loadable, not yet active). **The persisted fork survived the restart.**
+- **On-disk:** fork written to `~/.mortic/codex-home/sessions/2026/06/20/rollout-...-019ee3f8-....jsonl`.
+- **CLI invisibility:** fork ID absent from `~/.codex/session_index.jsonl`.
+- **2c (turn on persisted fork):** `turn/start` failed with `"Invalid request: missing field 'type'"` — a `sandboxPolicy` shape bug in the probe script, not a persistence finding. `thread/read` already proved the fork is fully loaded and resumable; Mortic's bridge has the correct `sandboxPolicy` shape (`scratchTurnSandboxPolicy`).
+
+**Conclusion: Design 1 (scoped home + path-fork + ephemeral:false) is the path.** Cross-home fork, persisted, restart-surviving, CLI-invisible, source-context-carrying — all confirmed. Probes 3 and 5 not needed.
+
+#### Probe 4 — opencode fork + isolation: **PARTIAL (portability concern)**
+
+opencode 1.17.8, `opencode serve --port 4097` in a temp project.
+
+- **Fork-at-message works:** `POST /session/:id/fork` body `{ messageID }` → new session `ses_...` titled `"probe (fork #1)"`. opencode's fork is **more capable** than Codex's (fork at a specific message, not just thread-level).
+- **Fork history:** the forked session has 0 messages in its own list — opencode forks create a branch point, not a history copy. Context is implicit via parent linkage (though `parentID` came back `None` in the probe — may need further investigation). This differs from Codex's `thread/fork` which copies turns.
+- **Isolation: FAILS.** opencode stores sessions in a **shared global db** (`~/.local/share/opencode/opencode.db`, confirmed via sqlite — both probe sessions appeared in the `session` table). A separate `opencode serve` instance does **NOT** isolate sessions — Mortic-created forks would be **visible in the user's primary opencode TUI session list**.
+
+**Portability implication:** Design 1's isolation approach (separate `CODEX_HOME`) does not map to opencode. opencode has no per-home concept; sessions are global. Options for the opencode path (future pass): (a) accept visibility + use naming markers `[mortic]`, (b) find an opencode storage-override option (not found in docs this pass), (c) accept that opencode scratches are visible and lean on the fork-at-message + naming convention. This does not block the Codex path this pass.
+
+#### Probes 3 and 5 — not run
+
+Probe 3 (copy-then-fork) was the fallback for Design 2 only if Probe 2 failed. Probe 2 passed, so Design 2 is unnecessary. Probe 5 (`thread/inject_items` replay fidelity) was only needed for Design 3 (fallback if scoped-home auth failed). Probe 1 passed, so Design 3 is unnecessary. Both deferred unless a future need arises.
+
+#### Cleanup
+
+- Probe test sessions removed from `~/.mortic/codex-home/sessions/`.
+- Probe sessions deleted from opencode global db via `DELETE /session/:id` (confirmed 0 remaining).
+- opencode probe server killed.
+- `~/.codex/auth.json` verified intact (unmodified throughout).
+- `~/.mortic/codex-home/` left in place (clean: auth symlink → `~/.codex/auth.json`, minimal config.toml, skills copied) — ready for the implementation pass.
+- Temp probe scripts and logs removed.
+
+### 12.11 Design decision (confirmed by probes)
+
+**Design 1 is the path for the Codex implementation pass:**
+
+1. Scoped home `~/.mortic/codex-home/` with symlinked `auth.json` (Probe 1 ✓).
+2. `thread/fork({ threadId, path: "<~/.codex session file>", ephemeral: false })` from the scoped app-server (Probe 2 ✓).
+3. Persisted forks survive restart, are CLI-invisible, and carry source context (Probe 2 ✓).
+4. Divergence check via `thread/read({ threadId: source, includeTurns: true })` comparing `updatedAt`/`turns.length` to baseline (protocol confirmed, no app-server changes needed).
+5. Resume via `thread/resume({ threadId: <persisted-fork> })` in the scoped home.
+6. opencode portability is a follow-up pass (isolation needs a different mechanism — naming marker or storage override).
+
+**No fallback build needed this pass** (per user instruction — if probes had failed, report and stop; no shared-home fallback to build).
+
+### 12.12 File-by-file change surface (for execution pass, not this pass)
 
 | File | Change |
 |---|---|
@@ -1225,8 +1290,1433 @@ opencode HTTP server (`opencode serve`, default port 4096) exposes:
 | `src/client/components/DivergencePrompt.tsx` (new) | Refresh/Retain/Skip/Auto prompt |
 | `~/.mortic/codex-home/` (runtime, one-time) | Scoped home setup on first run/prewarm |
 
-### 12.12 Sources
+### 12.13 Sources
 
 - OpenClaw docs: `docs.openclaw.ai/` (overview, features, nodes, agent, agent-runtimes, experimental-features, codex-harness, codex-harness-reference, codex-harness-runtime, streaming, voice-call plugin, talk mode).
 - opencode docs: `opencode.ai/docs/server/` (HTTP API surface).
 - Mortic source: `src/server/appServerBridge.ts`, `src/server/codex.ts`, `src/server/app.ts`, `src/server/storage.ts`, `src/server/codexAppServerProtocol/` (generated protocol types).
+
+---
+
+## 13. PRD: Persisted CLI-Invisible Scratch Forks + Divergence UX + Send to Main Thread
+
+**Review label:** GLM 5.2 Review (PRD + Adversarial Implementation Plan)
+**Date:** 2026-06-21
+**Method:** PRD refined from user direction; implementation plan adversarially vetted by 4 parallel subagents (Phase 1 edges, Phase 2 edges, storage/abstraction, UX minimality). All findings synthesized below with `file:line` evidence. No code changed in this pass — this is the plan.
+
+### 13.1 Overview
+
+Make Mortic's scratch forks **persisted** (survive restart), **CLI-invisible** (don't clutter `codex threads`), and **resumable** through Mortic — with a live divergence indicator, manual sync, scratch history, an expandable source-when-forked bubble, and a **repo divergence indicator** ("+32,-11 from main repo state"). Phase 2 adds approval-gated **Send to Main Thread (Codex)** with delta handoffs, a handoff confirmation bubble (sent ✓ / responded ✓ only — no response content), and diff reporting on handoff send.
+
+### 13.2 Goals & non-goals
+
+**Goals — Phase 1:**
+- Scratches persisted in scoped `~/.mortic/codex-home/`, invisible to `codex` CLI.
+- Survive restart; resumable through Mortic.
+- Live divergence counter ("fresh" / "N behind"), polled every 3s.
+- **Repo divergence indicator** — "+32,-11" diff summary from fork-time repo state, alongside message staleness (in the divergence pill's tooltip).
+- Manual Sync (click the stale pill → "Keep / Catch up" confirm).
+- Scratch history (browsable + resumable) via transcript-header dropdown.
+- Expandable "source when forked" bubble (last 2 source messages, drawer-only, collapsed).
+- Scoped home setup as onboarding step (first run).
+- One Codex login shared across CLI + Mortic via symlinked auth.
+
+**Goals — Phase 2:**
+- Send to Main Thread (Codex) — approval-gated direct-send. Modular terminology: "Main Thread" + "(Codex)" provider variable.
+- Handoff confirmation: pill flips to "sent ✓" → "responded ✓". **No response content, no expandable response.** User continues work as usual.
+- Diff reporting on handoff send — the diff the scratch introduced, in the "sent ✓" pill's tooltip.
+- Delta handoffs (non-repetitive carry-forward, "what's new since H1").
+- Handoff generation on ephemeral fork-of-scratch (not fork-of-source).
+
+**Non-goals (this PRD):**
+- opencode portability (separate probe — export+move idea; shared global db is the blocker).
+- Auto-refresh (removed — would be destructive to user intent if they haven't handed off yet; revisit after Phase 2's handoff logging exists).
+- Realtime voice mode (OpenClaw's native audio; different architecture).
+- Showing the Main Thread's response content in the scratch (user explicitly rejected — the scratch is stale, can't speak a response it didn't generate).
+
+### 13.3 User stories
+
+- *As a user, I want my voice conversations to survive a Mortic restart so I can resume them tomorrow.*
+- *As a user, I want my scratch forks to not clutter my `codex threads` list.*
+- *As a user, I want to log in to Codex once — not separately for the CLI and for Mortic's scoped home.*
+- *As a user, I want to see if my Main Thread has moved on since I forked, so I know if my scratch is stale — both messages and repo state.*
+- *As a user, I want one click to catch up from the latest Main Thread, so I don't have to think about staleness.*
+- *As a user, I want to browse and resume old voice conversations per source thread.*
+- *As a user, I want to see what the Main Thread looked like when I forked, so I have context for an old scratch.*
+- *(Phase 2) As a user, I want to send my handoff directly to my Main Thread (Codex) after reviewing it, instead of copy-pasting.*
+- *(Phase 2) As a user, I want to see that my handoff was sent and that the Main Thread responded — without leaving my scratch or seeing the response content.*
+- *(Phase 2) As a user, I want subsequent handoffs from the same scratch to not repeat what I already sent.*
+
+### 13.4 Phase 1 — Persisted forks + divergence + history
+
+#### 13.4.1 Persisted CLI-invisible forks (Probe-confirmed Design 1)
+- Scoped home `~/.mortic/codex-home/` with `auth.json` → symlink `~/.codex/auth.json` (Probe 1 ✓).
+- `thread/fork({ threadId: source, path: "<~/.codex session file>", ephemeral: false })` from scoped app-server (Probe 2 ✓).
+- Survives restart; `thread/resume({ threadId: <persisted-fork> })` to resume.
+- **Critical (subagent finding 0.1):** set `CODEX_HOME` **only in the spawned child env** at `appServerBridge.ts:1072`. **Never** mutate `process.env.CODEX_HOME` — four modules read it (`providerAdapters.ts:103,107`, `skillSync.ts:83`, `sparkContext.ts:184`, `runtimeContext.ts:61`) and would break (source listing, skills, spark preflight, runtime context).
+
+#### 13.4.2 Divergence detection (message + repo staleness)
+- **Message staleness:** poll every 3s. **Primary path: Mortic-side JSONL tail-parse** of the source session file (subagent finding Q6 — cheaper, app-server-independent). `thread/read` is the fallback if JSONL is unreadable.
+- **Repo staleness:** `git diff --numstat <baselineSha>..HEAD` shell-out (subagent finding 0.4 — `gitDiffToRemote` has wrong semantics; it diffs against origin, not fork-time baseline). Throttle to every 3rd poll or on `messagesBehind` advance.
+- **Baseline capture at fork:** `repoShaAtFork = response.thread.gitInfo?.sha` (`Thread.ts:79`); `sourceUpdatedAtAtFork`, `sourceTurnCountAtFork` from the fork response.
+- **UX:** one divergence pill (see §13.7).
+
+#### 13.4.3 Manual Sync (click stale pill)
+- Click the stale divergence pill → inline 2-choice confirm: "Catch up from <thread>? · Keep / Catch up."
+- `POST /api/session/refork`: archive current scratch (set-aside in registry, **not** `thread/archive` — see finding 0.6), fork from current source, reset baselines.
+- **No auto-refresh** (removed).
+
+#### 13.4.4 Scratch history + resume
+- Fork handler registry at `~/.mortic/fork-handlers/<sourceThreadId>.json` (see §13.8.2).
+- UI: transcript-header dropdown (no new modal), list past scratches, click → resume.
+
+#### 13.4.5 Expandable "source when forked" bubble
+- Drawer-only, collapsed `<details>`. Summary: "Snapshot from <thread> · 2 msgs." Body: the 2 messages verbatim.
+- **Never use "fork"/"scratch" in user-facing copy** (§11 cognitive-load finding).
+
+#### 13.4.6 Repo divergence indicator
+- In the divergence pill's tooltip: "repo +32/−11 lines since fork" (units mandatory).
+- Computed via `git diff --numstat <baselineSha>..HEAD` (Mortic-side, not via app-server protocol).
+- Hidden when both insertions=0 and deletions=0 and messagesBehind=0.
+
+### 13.5 Phase 2 — Send to Main Thread + delta handoffs + diff reporting
+
+#### 13.5.1 Send to Main Thread (Codex)
+- **Modular terminology:** "Main Thread" + "(Codex)" provider variable. `MainThreadProvider` interface (see §13.8.1).
+- **Flow:** generate handoff → click "Send to Codex" (replaces Copy-full as primary; Copy-full to kebab) → approval modal → `turn/start({ threadId: sourceThreadId, input: [handoff prompt] })`.
+- **Blocking probe needed (subagent finding Q1):** cross-home `turn/start` on a `~/.codex` source thread from the `~/.mortic/codex-home` app-server is **unverified**. Probe 2 verified cross-home `thread/fork` + `thread/read` but NOT `turn/start`. If it fails, Feature 1's shape changes materially.
+
+#### 13.5.2 Handoff confirmation (no response content)
+- The divergence pill transitions: **fresh → (send) → sent ✓ → (main responds) → responded ✓**.
+- **No response content, no expandable response** (user explicitly rejected).
+- "responded ✓" is a link: click → open the Codex thread (`sourceUri`).
+- Drawer gets one one-line affordance: "Sent to Codex · <time> ›" (link, no body).
+- **Self-caused divergence (subagent UX finding §6):** Mortic attributes correctly — it advances its baseline to include its own sent message, so its own send never counts as divergence. Main's *response* is real new content → "1 behind" is correct and useful.
+
+#### 13.5.3 Continue working; manual sync when ready
+- After send, the scratch stays active. User continues talking. No auto-refresh, no archive.
+- User manually Syncs (clicks the stale pill) when they want fresh source context.
+
+#### 13.5.4 Handoff generation — ephemeral fork-of-scratch
+- **Current (wrong):** `runCodexTurn({ threadId: source })` forks the *source* and re-feeds the scratch transcript as a string (`app.ts:2415`).
+- **New:** `createEphemeralFork(scratchThreadId)` → fork-of-scratch inherits source context + voice conversation natively. No re-feeding.
+- **Ephemeral:** Codex implements `createEphemeralFork` as `thread/fork({ ephemeral: true })` (app-server cleans up). opencode will implement as "fork + delete session" (deferred).
+
+#### 13.5.5 Delta handoffs (unified for both providers)
+- **Handoff log per scratch:** `handoffHistory` in the fork handler record.
+- **On each handoff generation:** fork the whole scratch (ephemeral) → inject: *"Previous handoff sent to Main Thread: [H1]. Conversation since last handoff checkpoint: [turns after checkpoint]. Generate the next handoff — what to carry forward, avoiding repetition of H1."*
+- **Model generates a delta** ("what's new since H1").
+- **Unified fork-whole + prompt-delta** for both Codex and opencode (no fork-granularity divergence).
+
+#### 13.5.6 Diff reporting on handoff send
+- When handoff is sent, compute the diff the scratch introduced: `git diff --numstat <headAtFork>..HEAD` in the scratch's cwd.
+- Displayed in the "sent ✓" pill's tooltip: "Your scratch changed +4/−1 files; 3 turns kept."
+- **Mortic-only metadata** — does NOT accompany the handoff prompt to Main Thread.
+
+### 13.6 Code/diff staleness (in this pass)
+
+The user's directive: "I want to see the diff summary (+32,-11 from main repo state). If code is written by the scratch, then the diff introduced by the thread is to be reported when handoff is sent back."
+
+**Two surfaces:**
+1. **Phase 1 — repo divergence indicator:** "+32,-11" in the stale pill's tooltip, showing how far the repo has moved since fork-time baseline. Computed via `git diff --numstat <baselineSha>..HEAD`.
+2. **Phase 2 — diff reporting on handoff send:** the diff the scratch thread itself introduced, shown in the "sent ✓" pill's tooltip. Computed via `git diff --numstat <headAtFork>..HEAD` in the scratch's cwd at send time.
+
+**Future (recorded, not this pass):** per-file diff tracking (which files the scratch touched), `turn/diff/updated` notification parsing, Codex `gitDiffToRemote` protocol surface — all deferred. The `git diff --numstat` shell-out is the cheapest correct approach for this pass.
+
+### 13.7 UX design (minimal, merged from UX subagent)
+
+**Headline:** eight features collapse into **3 always-visible elements** (one divergence pill, reused; +1 Send action replacing Copy-full; +2 collapsed transcript drawer items) by exploiting three observations: (i) divergence/repo-diff/sync are one concept in three clothes; (ii) the handoff confirmation "sent ✓" *is* the divergence pill's post-send state — no separate bubble; (iii) scratch history is recoverable, so it's a dropdown, not a modal.
+
+**The divergence pill — one element, four states:**
+| State | Copy | When |
+|---|---|---|
+| fresh | *(hidden)* | N=0, not just sent |
+| stale | `» 3 behind` | source advanced; tooltip: "3 new messages in <thread> · repo +32/−11 lines since fork" |
+| just sent | `sent ✓` | handoff sent; tooltip: "Handoff sent to <thread>; waiting for response · your scratch changed +4/−1 files" |
+| responded | `responded ✓` | main responded; click → open Codex thread; tooltip: "Codex replied ~2m ago" |
+
+**Key UX decisions:**
+- **No 4-button Refresh/Retain/Skip/Auto prompt.** Click stale pill → 2-choice inline confirm ("Keep / Catch up"). "Skip" = doing nothing (close). "Auto" = advanced setting toggle, default off.
+- **Sync = click the stale pill**, not a persistent button.
+- **Scratch history = transcript-header dropdown**, no new modal.
+- **"Source when forked" = drawer-only collapsed `<details>`**, not in compact 1-turn view.
+- **Send replaces Copy-full as primary**; Copy-full to kebab/overflow. Net handoff actions: +0.
+- **Never use "fork"/"scratch" in user-facing copy** (§11 cognitive-load finding). Use "your copy" / "main" / "thread" / "note."
+- **Divergence is a parallel channel, never a 6th orb state.** The orb stays the §11 5-state surface (Pick a thread / Ready / Listening / Thinking / Speaking + Codex offline / Error).
+- **Self-caused divergence: option (d)** — attribute correctly. Mortic advances its baseline to include its own sent message, so its own send never counts as divergence. Main's response is real new content → "1 behind" is correct. No transient mutating label (avoids §11 E2 anti-pattern).
+
+**Net clutter delta:** overlay HUD +1 element (the pill, only when not fresh); full-app orb +0; handoff card +0 net actions; transcript compact view +0; transcript drawer +2 collapsed lines; new modals/panels 0.
+
+### 13.8 Technical architecture
+
+#### 13.8.1 MainThreadProvider abstraction
+New `src/server/mainThreadProvider.ts` — provider-neutral interface:
+```
+interface MainThreadProvider {
+  readonly name: "codex" | "opencode";
+  readonly label: string;  // "Codex"
+  forkFromSource(opts): Promise<PersistedFork>;
+  createEphemeralFork(threadId, opts): Promise<EphemeralFork>;
+  sendTurn(threadId, input, opts): Promise<{ turnId }>;
+  readThread(threadId, opts?): Promise<ProviderThread>;
+  resumeThread(threadId, opts?): Promise<ProviderThread>;
+  archiveThread(threadId): Promise<void>;
+  computeDiff(threadId, baselineRepoState): Promise<ProviderDiff>;
+}
+```
+- Codex is the first implementation (`src/server/codexMainThreadProvider.ts`), wrapping `CodexAppServerBridge`.
+- opencode deferred (shared global db — `UnsupportedProviderError` until isolation is solved).
+- The bridge stays as the Codex WebSocket transport; the provider wraps it, doesn't extract it.
+
+#### 13.8.2 Fork handler registry
+`~/.mortic/fork-handlers/<sourceThreadId>.json`:
+```json
+{
+  "schemaVersion": 1,
+  "sourceThreadId": "...",
+  "mainThreadProvider": "codex",
+  "currentScratchId": "...|null",
+  "baseline": {
+    "sourceUpdatedAt": <unix>,
+    "sourceTurnCount": <n>,
+    "lastTwoMessages": [{ "role": "user|assistant", "text": "..." }],
+    "repoState": { "branch": "...|null", "headCommit": "...|null", "dirty": false, "capturedAt": "..." }
+  },
+  "scratchSessions": [
+    { "id": "...", "morticSessionDir": "sessions/...", "persistedThreadId": "...",
+      "forkedAt": "...", "baselineSourceUpdatedAt": <unix>, "baselineSourceTurnCount": <n>,
+      "status": "active|archived", "archivedAt": "..." }
+  ],
+  "createdAt": "...", "updatedAt": "..."
+}
+```
+- Phase 2 adds `handoffHistory: [{ generatedAt, scratchId, scratchTurnCount, shortPrompt, fullPrompt, sentToMain, mainTurnId, mainResponseStatus, diffSummary }]`.
+- **Forward-compat contract:** all writes go through `updateHandler(sourceThreadId, mutator)` with spread-based RMW. Never reconstruct a full object — that drops unknown fields a future version wrote.
+- **Relative paths** for portability: `morticSessionDir` stored relative to `~/.mortic/`.
+- Atomic writes via `writeTextAtomic` pattern (`storage.ts:138-145`).
+- Per-handler `serializeOperations()` queue (`fsio.ts:24`) — different sources don't block each other.
+
+#### 13.8.3 Raw rollout sidecar — DROPPED (YAGNI)
+Subagent finding: the persisted Codex fork already writes the authoritative rollout to `~/.mortic/codex-home/sessions/`. A Mortic sidecar is redundant, lossy, and can't be fed back to Codex for resume. Drop it. Keep `transcript.md` (human-readable) + `session.json` (Mortic transcript) as today.
+
+#### 13.8.4 `~/.mortic/` directory layout
+```
+~/.mortic/
+├── sessions/              # existing — Mortic session storage
+├── codex-home/            # new — scoped CODEX_HOME
+│   ├── auth.json          #   symlink → ~/.codex/auth.json
+│   ├── config.toml        #   minimal (model + reasoning effort)
+│   ├── skills/            #   vendored (mortic-voice-output, mortic-canonical-state)
+│   ├── sessions/          #   Codex-managed rollouts (persisted scratches)
+│   └── session_index.jsonl
+├── fork-handlers/         # new — registry
+│   └── <sourceThreadId>.json
+└── projects/              # existing — per-workspace
+```
+
+#### 13.8.5 Server routes
+Phase 1: `GET /api/session/divergence`, `POST /api/session/refork`, `POST /api/session/resume-scratch/:id`, `GET /api/session/scratches`.
+Phase 2: `POST /api/handoff/send-to-main`, `GET /api/session/handoff-history/:scratchId`.
+
+### 13.9 Adversarial implementation plan (synthesized from 4 subagents)
+
+#### 13.9.1 Critical findings (shape every feature)
+
+| # | Finding | Impact | Mitigation |
+|---|---|---|---|
+| 0.1 | **`CODEX_HOME` process-wide footgun.** Four modules read `process.env.CODEX_HOME` (`providerAdapters.ts:103,107`, `skillSync.ts:83`, `sparkContext.ts:184`, `runtimeContext.ts:61`). Setting it globally breaks source listing, skills, spark preflight, runtime context. | High — silent total breakage | Set `CODEX_HOME` **only in the spawned child env** at `appServerBridge.ts:1072`. Never mutate `process.env.CODEX_HOME`. |
+| 0.2 | **Boot archive path destroys persisted forks.** `archiveQueuedScratchThreads` (`appServerBridge.ts:1137`) runs on every `start()` and archives all `this.scratches`. Today safe (ephemeral). With persisted forks, restart would archive resumable scratches. | High — data loss on restart | Persisted scratches must **never** go into `scratchArchives`. Separate `persistedScratches` map, rehydrated from registry on boot, excluded from archive paths. |
+| 0.3 | **`gitDiffToRemote` has wrong semantics.** Diffs against origin HEAD, not fork-time baseline. Overcounts unpushed commits; fails without remote. | Medium — wrong divergence numbers | Use `git diff --numstat <baselineSha>..HEAD` shell-out (Mortic-side). |
+| 0.4 | **`thread/read` cross-home is unverified.** Probe 2 verified `thread/fork` + `thread/read` same-home (the fork in scoped home). It did NOT verify `thread/read({ threadId: source })` from scoped app-server where source lives in `~/.codex`. | Medium — divergence polling may fail | **Primary: Mortic-side JSONL tail-parse** of source session file (cheaper, app-server-independent). `thread/read` as fallback. |
+| 0.5 | **`thread/archive` may make persisted fork unresumable.** Whether `thread/resume` can find an archived thread is unverified. | High — refork may permanently break resume-old | **Blocking probe before coding.** If archive breaks resume, refork must set-aside (registry-only, no `thread/archive`) rather than archive. |
+| 0.6 | **`error` notification broadcasts to ALL pending turns** (`appServerBridge.ts:1736-1748`). A scratch-turn error would reject an in-flight main-thread turn. | High — send-to-main killed by scratch errors | Add `kind: "scratch" | "main"` field to `PendingTurn`; scope `error` broadcasts by `threadId` or `kind`. |
+| 0.7 | **`PendingTurn` has no timeout** (`appServerBridge.ts:1493-1509` waits forever). A hung main turn hangs the bubble forever. | Medium — 3am hang | Add 10-min timeout to `sendToMainThread`. On timeout, bubble → "sent ✓ (no response yet)" with warning. |
+| 0.8 | **`ws.onclose` doesn't reject pending** (`appServerBridge.ts:1379-1381`). In-flight requests hang forever on websocket close. | Medium — silent hang | In `ws.onclose`, reject all `this.pending` + `this.pendingTurns` with "websocket closed." |
+| 0.9 | **`interrupt` rejects ALL `pendingTurns`** (`appServerBridge.ts:895-904`). Interrupting a scratch turn would also reject an in-flight main turn — but the main turn keeps running server-side (Mortic only rejected its local promise). | High — false "failed" on main turn | `interrupt` must filter by `kind: "scratch"`. Main turns are immune to scratch interrupts. |
+
+#### 13.9.2 Race conditions + mitigations
+
+| Race | Mitigation |
+|---|---|
+| Poll racing with refork | **Epoch token** — `reforkEpoch` incremented on refork; poll closure captures epoch; discard result if epoch changed. |
+| Two surfaces (overlay + full app) polling same source | **Server-side dedupe** — cache last `readSourceThread` result for 2.5s; both surfaces' requests return cached value. One app-server RPC per 3s. |
+| Refork while scratch turn is running | 409 (same pattern as `app.ts:1465`). User must interrupt first. |
+| Send-to-main while scratch turn is running | `sendToMainThread` uses a **separate `mainThreadOpLock`** (not `withOperationLock`) so main-thread ops serialize among themselves but don't block scratch ops. Two concurrent `PendingTurn`s route correctly by `turnId`. |
+| Two sends in quick succession | Client `sendPending` guard + 409 backstop. Do NOT queue main-thread turns (would spam the user's main thread). |
+| Handoff-gen while refork is happening | **`checkpointLock`** (per-session mutex) held during refork's `setForkCheckpoint` AND during `/api/handoff`'s read+fork. |
+| Registry concurrent RMW (same process) | Per-handler `serializeOperations` queue (`fsio.ts:24`). |
+| Registry concurrent RMW (two Mortic instances) | `writeAtomic` prevents corruption (last-writer-wins). Document single-instance-per-machine as supported. Optional `MORTIC_SCOPED_HOME_OVERRIDE` env for dev. |
+| Boot rehydration racing with user-triggered prewarm | `withOperationLock` serializes; prewarm waits for rehydration. |
+| Ephemeral fork cleanup racing with `turn/completed` | Cleanup only AFTER `runScratchTurn`'s promise resolves (in a `finally` block). |
+
+#### 13.9.3 Failure-mode matrix (top entries)
+
+| Failure | User-visible | Auto-recovery | Manual action |
+|---|---|---|---|
+| Scoped home mkdir fails (disk/perms) | Onboarding blocks | Retry on "Check again" | Free disk / fix perms |
+| `auth.json` symlink fails | Onboarding blocks | None (block, don't copy — copy causes stale-auth) | Fix filesystem |
+| `~/.codex/auth.json` deleted after setup | First scoped turn 401s | Re-run `ensureScopedHome()`, retry once | `codex login` |
+| `thread/fork` returns `ephemeral:true` (server ignored flag) | Turn fails: "scratch was not persisted" | None | Upgrade Codex CLI |
+| Source session file not found | Turn/prewarm fails: "source session file for <id> not found" | None | Open thread in Codex CLI once |
+| `thread/read` cross-home fails | Divergence shows "?" | JSONL fallback (Mortic-side) | None |
+| App-server restarts mid-poll | "Reconnecting…" badge | `ensureReady` auto-restarts on next turn | None |
+| App-server restarts mid-fork | Turn fails "app-server exited" | Retry creates new fork; orphan swept at boot | None |
+| Registry JSON corrupt | "Scratch history for <thread> reset" notice | Move to `.corrupt-<ts>`, start fresh | None |
+| `thread/resume` fails (file pruned / archived-unresumable) | "Scratch file no longer exists" | Mark registry entry `missing` | None |
+| Refork while turn running | 409 "A turn is running" | None | Interrupt first |
+| `git` not on PATH | Repo badge: "Git not found" | None | Install git |
+| Not a git repo | Repo badge hidden / "Not a git repo" | None | None |
+| Source thread rolled back (CLI `thread/rollback`) | "Source rolled back — consider catching up" | `messagesBehind` clamped to 0, `rollback` flag set | Catch up |
+| Source thread deleted/archived in CLI | "Source thread no longer exists locally" | Disable turn input | Pick a different thread |
+| Send-to-main 409 (main busy) | "Main Thread busy — retry" | None (no auto-retry) | Click Retry, or wait for CLI turn |
+| Send-to-main — source thread not found | "Main Thread not found — copy instead" | None | Copy handoff manually |
+| Main turn hangs (no `turn/completed`) | Pill "sent ✓" + warning "no response yet" after 10m | None | Check Codex CLI |
+| Mortic restart with bubble in "sending" | Pill → "failed" "Mortic restarted before response" | Boot sweep (mirror `sweepStaleActiveTurn`, `app.ts:726`) | None |
+| `interrupt` during in-flight main turn | Main turn NOT cancelled (still runs on source); pill stays "sent ✓" | None | None (filter by `kind:"scratch"`) |
+| `CODEX_HOME` env leak (regression) | Source list empty / skills in wrong home | Boot assertion: `~/.mortic/codex-home/sessions/` must exist post-spawn | Remove the `process.env` mutation |
+
+#### 13.9.4 Handoff confirmation state machine (Phase 2)
+
+```
+sending → sent ✓ → responded ✓
+  │         │
+  │         │ turn/completed with error → responded ✓ (warning tooltip)
+  │         │ 10m timeout → sent ✓ (warning "no response yet")
+  │         │ Mortic restart → failed
+  │         │ websocket close → failed
+  │
+  │ turn/start rejected (409/error) → failed
+  │ websocket close → failed
+  │ Mortic restart → failed (boot sweep)
+```
+**States:** `sending` (turn/start sent, waiting for ack) → `sent ✓` (turn accepted, waiting for completion) → `responded ✓` (turn/completed, terminal). Failure: `failed` (terminal, user may Send again → new bubble).
+
+#### 13.9.5 Delta handoff prompt (exact shape, Phase 2)
+
+```
+Convert the NEW scratch conversation since the last handoff into a paste-ready
+instruction prompt for the user's original Codex chat. This is a DELTA handoff —
+a previous handoff was already sent; do not repeat it.
+
+Previous handoff sent to Main Thread (H1):
+# Short Prompt
+${previousHandoff.shortPrompt}
+
+# Full Prompt
+${previousHandoff.fullPrompt}
+
+Conversation since the last handoff checkpoint (turns ${previousHandoff.scratchTurnCount}..now):
+${turnsSinceCheckpointMarkdown}    // = transcript.slice(previousHandoff.scratchTurnCount), or "(no new turns since H1)"
+
+${checkpointInstruction}
+
+Generate the NEXT handoff — what to carry forward now, avoiding repetition of H1.
+Rules:
+- Do NOT repeat instructions or context that were already in H1.
+- Focus only on what is NEW since H1: new decisions, actionables, risks, corrections, completed work.
+- If nothing material has changed, output a Short Prompt that says so and an empty Full Prompt.
+
+Return markdown with exactly these headings:
+# Short Prompt
+# Full Prompt
+```
+
+### 13.10 Blocking probes (before coding)
+
+| # | Probe | Blocks | Status |
+|---|---|---|---|
+| 1 | Symlinked auth across scoped home | Design 1 viability | **PASS** (§12.10) |
+| 2 | Cross-home `thread/fork` + persistence | Phase 1 fork | **PASS** (§12.10) |
+| 3 | `thread/resume` on archived threads | Phase 1 refork + resume-old | **NEEDED** — if archive breaks resume, refork must set-aside (registry-only), not `thread/archive` |
+| 4 | Cross-home `turn/start` on `~/.codex` source thread | Phase 2 send-to-main | **NEEDED** — if it fails, send-to-main must talk to the user's primary app-server (discovery needed) or shell out to `codex exec` |
+| 5 | `thread/read` cross-home on source thread | Phase 1 divergence | **NEEDED** — if it fails, JSONL fallback is the primary path (already planned) |
+| 6 | opencode fork + isolation | opencode portability | **DONE** (§12.10 — shared global db, isolation fails) |
+
+Probes 3, 4, 5 are quick (10-15 min each against a real Codex app-server). Run before coding the features they gate.
+
+### 13.11 Open implementation questions (resolved)
+
+| # | Question | Resolution |
+|---|---|---|
+| Q1 | Compacted-spark-base forks stay ephemeral? | **Yes — keep ephemeral.** Only the main scratch path flips to persisted; compaction bases are transient by design. |
+| Q2 | Symlink vs copy for auth (if symlink impossible)? | **Symlink primary (one login); separate-auth fallback (two logins, only if symlink fails); never copy-without-refresh.** If symlink is impossible (Windows dev-mode off, restricted perms), the scoped home gets its own `auth.json` (real file) and the user logs in separately. Token refresh in each is independent — no silent drift. Cost is two logins, only on systems where symlink is impossible (not macOS). |
+| Q3 | Scoped `config.toml` — minimal or copy-and-strip? | **Replicate the Codex home (copy-and-strip).** The vision: the fork is essentially the same in ability. Copy the user's `config.toml` and strip the `CODEX_HOME` line. Scratches inherit marketplaces, MCP servers, plugins, notify — full user config minus the home path. |
+| Q4 | Orphan recovery (fork on disk, registry write failed)? | **Prune silently, note the failure mode, don't over-index.** Orphan recovery adds complexity for a rare edge; the voice transcript is still in `~/.mortic/sessions/` (Mortic's storage), so only the Codex thread mapping is lost. |
+| Q5 | Divergence polling primary path? | **JSONL primary; probe to confirm rollout schema.** `thread/read` fallback if JSONL unreadable. Run a quick probe to inspect a real rollout file's line schema (what `type` field marks a turn boundary). |
+| Q6 | Refork clears transcript? | **Yes — "Re-Sync to Main" starts afresh.** Refork button is labeled "Re-Sync to Main" (not "Catch up"). Clears the Mortic transcript, archives the old scratch to history, forks fresh from current source. |
+| Q7 | Registry retention cap? | **Storage unbounded; list UX shows last 20.** Text/JSONL is cheap — store everything. The history dropdown shows the 20 most recent scratches per source (scrollable for more). Reconciles "store everything" (user's earlier instinct) with list UX. |
+| Q8 | Repo badge when clean? | **Hide when both zero AND messagesBehind=0; show "+0,-0" when messagesBehind>0.** Agree with subagent. |
+| Q9 | Repo diff scope? | **"fork-time HEAD → current working tree" with label "from fork-time repo state."** Agree with subagent. Accept overcount as a known limitation. |
+| Q10 | `/api/session/clear` semantics with persisted forks? | **clear == refork (Re-Sync). AND: if the scratch had no turns (nothing said), delete the scratch entirely — don't archive an empty conversation.** Clear with turns → archive + refork; clear with 0 turns → delete scratch + no fork (user is done). |
+| Q11 | Concurrent Mortic instances? | **Document single-instance-per-machine as supported. Optional `MORTIC_SCOPED_HOME_OVERRIDE` env for dev.** Agree with subagent. |
+| Q12 | Should scratches see user-installed Codex skills/marketplaces? | **Replicate the source environment.** Scratches inherit user-installed skills and marketplaces (via the copy-and-strip config.toml from Q3). The fork is "the same in ability" — scratches see what the CLI sees. |
+| Q13 | opencode provider — implement stub now or defer? | **Defer.** Registry is Codex-only until opencode isolation is solved (separate probe). Agree with subagent. |
+| Q14 | "Auto" button for divergence? | **No auto at all for now.** Revisit after Phase 2's handoff logging exists. Removed entirely (not even an advanced toggle this pass). |
+| Q15 | "responded ✓" timeout? | **Just leave "sent ✓" if reply doesn't come.** No "(no reply yet)" warning, no auto-fail. The pill stays "sent ✓" indefinitely; the user checks their CLI. Honest, simplest. |
+| Q16 | Send-to-Codex vs Copy-only (Phase 2)? | **Send is in Phase 2.** The user's Codex CLI/app being closed doesn't matter — Mortic spawns its own app-server (in the scoped home) which runs the turn independently. The result is written to the source thread's rollout file in `~/.codex/sessions/`; the user sees it when they next resume that thread in their CLI. The only failure is if Codex auth is expired (401 → surface re-login). |
+| Q17 | Does diff summary accompany handoff prompt to Main Thread? | **Yes — include the diff in the handoff prompt.** Otherwise Main has no idea what the scratch changed. Append the diff summary (e.g., "Files changed by the scratch: +4/−1 — fileA.ts, fileB.ts") to the handoff prompt sent to Main. Main gets context for what the voice session did. |
+
+**Key shifts from subagent recommendations:**
+- **Q3 + Q12:** scratches *replicate* the source environment (config + skills + marketplaces), not hermetic isolation. The fork is "same in ability."
+- **Q6:** Re-Sync button (not "Catch up"), starts afresh.
+- **Q10:** clear == Re-Sync, AND empty scratches are deleted (not archived).
+- **Q14:** no auto at all (not even an advanced toggle).
+- **Q15:** sent ✓ stays forever if no reply (no soft warning).
+- **Q17:** diff is included in the handoff prompt to Main (not Mortic-only metadata).
+
+### 13.12 Phasing
+
+**Phase 1 (this pass):** §13.4 + §13.6 (repo divergence indicator). Persisted CLI-invisible forks, divergence counter (message + repo) + manual sync, history + resume, expandable source-when-forked bubble, onboarding, one-login. Run blocking probes 3 + 5 first.
+
+**Phase 2 (follow-on):** §13.5 + §13.6 (diff reporting on handoff send). Send to Main Thread, handoff confirmation (sent ✓ / responded ✓, no response content), fork-of-scratch handoff generation, delta handoffs with handoff logging. Run blocking probe 4 first.
+
+**Deferred:** opencode portability (separate probe), auto-refresh (revisit after Phase 2), realtime voice, interrupt-semantics fix, per-file diff tracking, `gitDiffToRemote` protocol surface.
+
+### 13.13 Success metrics (informal)
+
+**Phase 1:**
+- Scratch survives Mortic restart (talk, quit, reopen, resume).
+- Scratch absent from `codex threads`.
+- Divergence counter updates within ~3s of Main Thread advancing (messages) and on poll (repo).
+- Manual Sync re-forks without touching the Main Thread.
+- Resume-old loads a persisted scratch with full history.
+- One login works for both CLI and Mortic.
+- Repo divergence tooltip shows correct "+N,-M" against fork-time baseline.
+
+**Phase 2:**
+- Send to Main Thread (Codex) writes a turn to the source; user sees it in `codex` CLI.
+- Pill transitions: sent ✓ → responded ✓ (no response content shown).
+- Scratch stays active after send; user continues talking.
+- Second handoff from the same scratch is a delta (doesn't repeat H1).
+- Diff reporting shows the scratch's introduced diff in the "sent ✓" tooltip.
+
+### 13.14 Subagent contributions
+
+- **Phase 1 adversarial planner:** 11 open questions + critical findings 0.1-0.6 + failure-mode matrix + repo divergence computation (shell-out, not `gitDiffToRemote`) + JSONL primary for polling + epoch token for poll/refork race + boot archive path conflict.
+- **Phase 2 adversarial planner:** cross-home `turn/start` blocking probe + `kind:"scratch"|"main"` field for `PendingTurn` + `mainThreadOpLock` separation + `checkpointLock` for refork/handoff-gen race + bubble state machine + boot sweep for "sending" bubbles + reject-on-close for ws + delta handoff prompt shape + `createEphemeralFork` abstraction.
+- **Storage/abstraction planner:** DROP raw rollout sidecar (YAGNI) + fork handler schema with `schemaVersion` + `updateHandler` spread-based RMW contract for forward-compat + `MainThreadProvider` interface signatures + relative paths for portability + two-Mortic-instances risk + `thread/read` cross-home likely fails (JSONL fallback) + opencode `UnsupportedProviderError`.
+- **UX minimality auditor:** merged divergence pill (4 states: fresh/behind/sent ✓/responded ✓) + drop 4-button prompt (2-choice Keep/Catch up) + Sync = click stale pill + history = dropdown + source-when-forked = drawer-only + Send replaces Copy-full + self-caused divergence option (d) + never use "fork"/"scratch" in copy + divergence is a parallel channel not a 6th orb state + net clutter delta (+1 overlay element, +0 orb, +0 handoff actions, +2 drawer lines).
+
+---
+
+## 14. Manual QA Test Suite — End-to-End Conversation Flows
+
+**Purpose:** This is a human-run QA suite for product managers/QA. It covers full conversation flows, subjective visual/audio-latency checks, and granular regression checks for the recent Kimi/GLM visual-and-voice review changes. It is intentionally non-automated because many issues are subjective (timing feel, audio glitches, visual hierarchy) and are missed by static eval harnesses.
+
+**How to use:**
+1. Run each test in order or pick a section.
+2. Capture telemetry as described in §14.3.
+3. Record result in the Issue Log (§14.6) with severity, evidence, and pasted telemetry.
+4. If a test fails, paste the relevant `POST /api/turn/:id/audio-health` body, SSE frame, or server log line into the issue.
+
+**Current tree note (2026-06-19, later refactor):** The app has been simplified since §5 was written. `ChartModal.tsx`, `ProjectPanels.tsx`, `TelemetryPanel.tsx`, `ForkActionSheet.tsx`, and the extraction-review UI are no longer present. `HandoffPanel.tsx` is the new handoff surface. Live mode toggle is no longer in the dock. Copy-handoff feedback, Clear confirmation, clipboard fallback, modal focus traps, provider-notice rendering, Codex-offline input disabling, and `threadRequired` CTA are now implemented. Use the regression checklist in §14.5.Q to verify those changes granularly.
+
+### 14.1 Environment & startup commands
+
+- Node >= 20, Codex CLI installed and logged in (`codex login`).
+- Recommended browser: Chrome (browser STT works best there). Use a real Codex thread id.
+- Optional voice keys in `~/.mortic/.env`: `DEEPGRAM_API_KEY`, `INWORLD_API_KEY`, `OPENAI_API_KEY`, `ELEVENLABS_API_KEY`, `LIVEKIT_*`.
+
+**Dev (web):**
+```bash
+npm install
+npm run dev -- codex://threads/<thread-id> --api-port 5152 --ui-port 5173 --no-open
+# open http://127.0.0.1:5173/?api=http://127.0.0.1:5152
+```
+
+**Dev (desktop overlay):**
+```bash
+npm run build:desktop
+npm run desktop:dev
+# or: npm run desktop:dev -- codex://threads/<thread-id>
+```
+
+**Packaged-style:**
+```bash
+npm run build
+npm start -- codex://threads/<thread-id> --api-port 5152 --no-open
+```
+
+**Doctor:**
+```bash
+npm run build && node dist/node/cli/main.js doctor
+```
+
+**Static UX harness (sanity):**
+```bash
+node scripts/eval_desktop_ux.mjs
+```
+
+### 14.2 Surfaces under test
+
+- **Full app:** browser tab or Electron full window (`?api=...`, no `surface` param).
+- **Overlay:** Electron overlay (`?surface=overlay`). Collapsed HUD and expanded panel.
+- **Both can run at once** in desktop mode; use this for surface-cohesion tests.
+
+### 14.3 Telemetry observation guide
+
+Open these before starting:
+
+1. **Terminal running the server** — startup block, prewarm lines, warnings. Per-turn logs are normally not printed; watch for `Mortic queued turn failed to start` and project-store warnings.
+2. **Browser DevTools → Network tab** — filter by `api`. Key requests:
+   - `GET /api/session` (session snapshot)
+   - `GET /api/session/stream` (SSE snapshot/audio-command channel)
+   - `POST /api/turn` (returns `turnId`, `serverAcceptMs`)
+   - `GET /api/turn/:turnId/stream` (SSE: `snapshot`, `log`, `delta`, `voiceActivity`, `status`, `completed`, `failed`, `interrupted`)
+   - `POST /api/turn/:turnId/audio-health` (full audio timing ledger)
+   - `POST /api/session/prewarm` (`prewarmMs`, `logs`)
+   - `POST /api/handoff` (`handoff`, `shortPrompt`, `fullPrompt`, `generatedBy`)
+   - `POST /api/session/clear`, `POST /api/session/source`
+   - `POST /api/session/presence` (5s heartbeat)
+3. **DevTools → EventStream pane** — select the `/api/turn/:id/stream` request to see SSE frame timing. The first `log` with `"App-server first model delta"` marks time-to-first-token.
+4. **DevTools → Console** — warnings like `[Mortic] audio health update failed`, `[Mortic] text-to-speech stopped`, provider notices.
+5. **In-app debug surfaces:**
+   - **Codex working buffer** — appears while pending and no assistant text yet; shows latest activity label and up to 6 activity updates.
+   - **Codex debug trace** (`<details>` "Codex debug trace") — last 32 lifecycle lines, spoken statuses, verdict.
+   - **Agent orb** — `interactionState` (Select thread / Ready / Listening / Thinking / Speaking / Codex offline / Error) and `codexStateLabel` (Idle / Warming / Scratch ready / Warm failed / Thinking).
+   - **Voice provider notices** — `transportNotice`, `sttProviderNotice`, `ttsProviderNotice` rendered below the dock/overlay when non-null.
+   - **Clear button** — shows `Ready <ms>` / `Warming` / `Reset` to reflect prewarm.
+6. **React DevTools** — inspect `App` hook state for `audioHealth`, `sttPhase`, `speechPhase`, `recognizing`, `queuedTurnPreview`, `prewarm`. `audioHealth` is only non-null for voice turns.
+7. **Manual endpoint probes (optional):**
+   - `GET /api/onboarding` — re-runs skill sync.
+   - `GET /api/tts/elevenlabs/health` / `GET /api/tts/deepgram/health` — TTS round-trip latency.
+   - `POST /api/stt/transcribe` — STT provider fallback chain.
+   - `GET /api/provider/threads?limit=40&cwd=<path>&searchTerm=<term>` — thread list.
+
+**Key audio-latency fields to capture from `POST /api/turn/:id/audio-health`:**
+`firstDeltaMs`, `firstClientDeltaMs`, `firstVisibleTextMs`, `firstSpeakableTextMs`, `firstSpeechQueuedMs`, `firstTtsRequestMs`, `firstTtsResolvedMs`, `firstSpeechStartMs`, `firstSpeechEndMs`, `ttsConnectMs`, `firstAudioChunkMs`, `firstAudioPlayMs`, `audioBufferUnderruns`, `finalTextMs`, `speechAfterFinalMs`, `streamedChars`, `spokenChars`, `spokenChunks`, `ttsError`, `ttsProviderStatus`, `bargeInStartedMs`, `interruptionLatencyMs`.
+
+### 14.4 Test case index
+
+| ID | Area | Surface |
+|---|---|---|
+| A1–A4 | Cold start & onboarding | Both |
+| B1–B8 | Thread selection | Both |
+| C1–C9 | Overlay shell & windowing | Overlay |
+| D1–D6 | Config & settings | Full app |
+| E1–E8 | Voice turn E2E | Both |
+| F1–F3 | Text turn E2E | Both |
+| G1–G5 | Streaming & latency | Both |
+| H1–H5 | TTS audio quality & latency | Both |
+| I1–I5 | Barge-in & interrupt | Both |
+| J1–J7 | Handoff generate/preview/copy | Both |
+| K1–K4 | Clear scratch & confirmations | Both |
+| L1–L6 | Surface switching & cohesion | Both |
+| M1–M8 | Error & edge cases | Both |
+| N1–N6 | Accessibility & keyboard | Both |
+| O1–O5 | Visual & density | Overlay |
+| P1–P5 | Remnant/dead-feature verification | Both |
+| Q1–Q12 | Recent Kimi/GLM change regression | Both |
+
+### 14.5 Test cases
+
+Each test: **Steps → Expected → Telemetry to capture → Pass/Fail/Notes.**
+
+---
+
+#### A. Cold start & onboarding
+
+**A1. First launch with Codex available**
+1. `npm run dev -- codex://threads/<id> --no-open`; open browser.
+2. Watch terminal startup block and `/api/onboarding`.
+- **Expected:** Startup logs show `Mortic is running`, `Codex: <version> at <path>`, `Voice scratch prewarmed: …`. No onboarding modal. Topbar status dot green. Orb shows `Ready` / `Scratch ready` after prewarm.
+- **Telemetry:** terminal startup block; `GET /api/session` `session.codex.available`; `POST /api/session/prewarm` `prewarmMs`.
+- **Pass/Fail/Notes:**
+
+**A2. Launch with Codex missing/logged out**
+1. Temporarily rename `codex` on PATH or `codex logout` (only if safe).
+2. Launch.
+- **Expected:** Onboarding screen or inline warning “Codex is unavailable. Transcript and handoff remain available; turns are paused.” Voice/text controls disabled. Recheck button works.
+- **Telemetry:** `GET /api/onboarding` `provider.available=false`; `GET /api/session` `session.codex.available=false`.
+- **Pass/Fail/Notes:**
+
+**A3. Onboarding screen readability**
+1. Trigger A2.
+2. Read each step text and error.
+- **Expected:** Steps are plain-language; errors are readable (not faint italic). “Check again” shows busy state.
+- **Pass/Fail/Notes:**
+
+**A4. Prewarm confirmation**
+1. Launch with a valid thread.
+2. Watch terminal and orb.
+- **Expected:** Terminal `Voice scratch primed: confirmation turn completed`; orb moves `Warming → Scratch ready`; Clear button shows `Ready <ms>`.
+- **Telemetry:** `POST /api/session/prewarm` `prewarmConfirmation`.
+- **Pass/Fail/Notes:**
+
+---
+
+#### B. Thread selection
+
+**B1. Open Finder from full app**
+1. Click “Finder” button in topbar.
+- **Expected:** Picker opens with search input focused, workspace scope toggle, list of recent threads. Trigger button label toggles to “Close”.
+- **Telemetry:** `GET /api/provider/threads?limit=40&cwd=…`.
+- **Pass/Fail/Notes:**
+
+**B2. Search threads**
+1. Open picker. Type a project/thread fragment.
+- **Expected:** List updates after ~160ms debounce; empty state offers “Search all projects” when scoped.
+- **Telemetry:** Network requests with `searchTerm`.
+- **Pass/Fail/Notes:**
+
+**B3. Workspace scope toggle**
+1. Open picker. Toggle “All projects” / “This project”.
+- **Expected:** Scope label changes; list filters by `cwd` when scoped.
+- **Telemetry:** Requests include/omit `cwd`.
+- **Pass/Fail/Notes:**
+
+**B4. Preview then open**
+1. Click a thread row.
+2. Click “Open this thread” in preview.
+- **Expected:** Single click highlights + fills preview; double-click or preview button commits; picker closes; focus returns to trigger; topbar updates.
+- **Pass/Fail/Notes:**
+
+**B5. Keyboard navigation**
+1. Open picker. Type query, then Arrow Down/Up, Enter, Escape.
+- **Expected:** Arrow keys move focus and preview; Enter commits preview; Escape closes and returns focus to trigger.
+- **Pass/Fail/Notes:**
+
+**B6. No threads / empty state**
+1. Use a workspace with no Codex sessions.
+- **Expected:** Empty state names the workspace; “Search all projects” button appears.
+- **Pass/Fail/Notes:**
+
+**B7. Switch thread with non-empty transcript**
+1. Have at least 2 turns in current scratch.
+2. Open Finder and select a different thread.
+- **Expected:** Warning/confirm? Currently no confirm — note whether transcript/handoff clears without warning. Check for stale project state.
+- **Telemetry:** `POST /api/session/source`; subsequent `GET /api/session` and `GET /api/project` (if present).
+- **Pass/Fail/Notes:** (Regression candidate — switching should warn if content exists.)
+
+**B8. No-thread placeholder state**
+1. Launch with placeholder/empty thread.
+- **Expected:** Full app shows “Thread required” card with “Open Finder” CTA; orb hidden; mic/textarea/Send disabled with tooltip “Select a Codex thread first.” Overlay collapsed HUD shows warn dot and “Select thread”.
+- **Pass/Fail/Notes:**
+
+---
+
+#### C. Overlay shell & windowing
+
+**C1. Global shortcut show/hide**
+1. In desktop mode, press `Cmd/Ctrl+Shift+M`.
+- **Expected:** Overlay hides and shows. Hide button tooltip shows the shortcut. Shortcut error appears if registration failed.
+- **Pass/Fail/Notes:**
+
+**C2. Collapsed → expanded**
+1. Click identity or state button; press Enter while collapsed.
+- **Expected:** Panel expands. Escape collapses; Escape again hides.
+- **Pass/Fail/Notes:**
+
+**C3. No-thread click in collapsed HUD**
+1. With no thread, click the warn-dot state button.
+- **Expected:** Panel expands and Finder opens automatically.
+- **Pass/Fail/Notes:**
+
+**C4. Open full app from overlay**
+1. Click “App”/“Open app”.
+- **Expected:** Full window opens; overlay hides.
+- **Pass/Fail/Notes:**
+
+**C5. Close full app restores overlay**
+1. Open full app, then close it.
+- **Expected:** Overlay reappears automatically.
+- **Telemetry:** `revealOverlay` on full-window close (`src/desktop/main.ts`).
+- **Pass/Fail/Notes:**
+
+**C6. Audio cancel on hide**
+1. Start a voice turn; while TTS is speaking, hide overlay (shortcut or Hide button).
+- **Expected:** Audio stops immediately in hidden overlay.
+- **Telemetry:** `POST /api/session/audio-command {command:"interrupt"}` or `mortic-desktop:audio-cancel` IPC; `audioHealth` final fields.
+- **Pass/Fail/Notes:**
+
+**C7. Resize to micro density**
+1. Resize overlay to minimum scale.
+- **Expected:** Controls remain legible; mic still visible; if functionality is hidden (handoff/config), there is still a path to expand/open full app. Note any unreadable text.
+- **Pass/Fail/Notes:**
+
+**C8. Always-on-top / all workspaces**
+1. Switch macOS spaces/fullscreen apps.
+- **Expected:** Overlay appears on all workspaces by default. Note if this is jarring or conflicts with full app.
+- **Pass/Fail/Notes:**
+
+**C9. Overlay hint dismiss**
+1. Fresh overlay; read hint; click ×.
+- **Expected:** Hint disappears and does not return next launch (preference persisted).
+- **Telemetry:** `PATCH /api/preferences` `overlayHintDismissed`.
+- **Pass/Fail/Notes:**
+
+---
+
+#### D. Config & settings
+
+**D1. Open config panel**
+1. Click `Config` summary in full app.
+- **Expected:** Panel expands; model/reasoning/access/voice sections visible.
+- **Pass/Fail/Notes:**
+
+**D2. Change model**
+1. Select a different model.
+- **Expected:** Reasoning options update; prewarm re-runs; config summary updates.
+- **Telemetry:** `PATCH /api/preferences`; `POST /api/session/prewarm`.
+- **Pass/Fail/Notes:**
+
+**D3. Change access preset**
+1. Switch between Ask / Approve / Full.
+- **Expected:** Warning shows for Full; prewarm invalidated.
+- **Pass/Fail/Notes:**
+
+**D4. Scratch mode + Short spoken replies**
+1. Toggle “Short spoken replies” (formerly Caveman).
+- **Expected:** Label is plain language; tooltip explains concise spoken answers; disabled when not voice mode.
+- **Pass/Fail/Notes:**
+
+**D5. Voice provider selection**
+1. Change STT/TTS/Transport.
+- **Expected:** Unavailable providers disabled with reason (“Missing … key”); notices appear if provider issues.
+- **Telemetry:** `GET /api/stt`, `GET /api/tts`, `GET /api/livekit/status`.
+- **Pass/Fail/Notes:**
+
+**D6. Config summary in overlay**
+1. Expand overlay; read config footer.
+- **Expected:** Read-only summary line; note whether it is clear you must open full app to edit.
+- **Pass/Fail/Notes:**
+
+---
+
+#### E. Voice turn end-to-end
+
+**E1. First voice turn (push-to-talk)**
+1. Hold `M` (or dock mic button) for ~3s; speak a simple prompt; release.
+2. Wait for transcript + TTS.
+- **Expected:** Orb transitions `Ready → Listening → Transcribing → Thinking → Speaking → Ready`. User text appears; assistant text streams; TTS plays. No echo of your own voice.
+- **Telemetry:** `POST /api/turn`; SSE `delta` frames; `POST /api/turn/:id/audio-health`.
+- **Pass/Fail/Notes:**
+
+**E2. Subsequent voice turn**
+1. After E1, hold M and speak again.
+- **Expected:** Reuses scratch fork; no re-prewarm delay; transcript appends.
+- **Telemetry:** `POST /api/turn` `serverAcceptMs`; no new `thread/fork` in trace.
+- **Pass/Fail/Notes:**
+
+**E3. Voice turn while Codex offline**
+1. With Codex unavailable, hold M.
+- **Expected:** Mic disabled with tooltip “Codex is offline.”; no turn sent.
+- **Pass/Fail/Notes:**
+
+**E4. Voice turn with no thread**
+1. Placeholder state; hold M.
+- **Expected:** Mic disabled; tooltip “Select a Codex thread first.”
+- **Pass/Fail/Notes:**
+
+**E5. Browser STT privacy**
+1. Use browser STT in Chrome.
+- **Expected:** Note whether any privacy notice is shown about audio going to Google. (Currently likely missing — log as finding.)
+- **Pass/Fail/Notes:**
+
+**E6. STT fallback**
+1. Configure a remote STT key that is invalid/exhausted; speak.
+- **Expected:** Notice explains fallback to browser STT; user can choose to keep or switch back. Note if silent.
+- **Telemetry:** `POST /api/stt/transcribe` `failures`, `fallbackReason`; `sttProviderNotice`.
+- **Pass/Fail/Notes:**
+
+**E7. Mic permission denied**
+1. Deny mic in browser; hold M.
+- **Expected:** Persistent guidance to re-enable or use text; not just a transient toast.
+- **Pass/Fail/Notes:**
+
+**E8. Queued turn**
+1. While assistant is speaking, hold M and speak a follow-up.
+- **Expected:** Queued turn preview appears with Cancel button; after current turn ends, queued turn sends.
+- **Telemetry:** `DELETE /api/session/queued-turn` on cancel; SSE `snapshot` with `queuedTurn`.
+- **Pass/Fail/Notes:**
+
+---
+
+#### F. Text turn end-to-end
+
+**F1. Type and send**
+1. Type in composer; click Send (or press Enter? note behavior).
+- **Expected:** Turn sends; assistant responds; transcript updates. Note that Enter inserts newline (no Enter-to-send).
+- **Telemetry:** `POST /api/turn`.
+- **Pass/Fail/Notes:**
+
+**F2. Empty/whitespace send**
+1. Type spaces only.
+- **Expected:** Send disabled.
+- **Pass/Fail/Notes:**
+
+**F3. Text turn while voice pending**
+1. Send text while a voice turn is running.
+- **Expected:** Turn is queued or blocked gracefully; UI explains state.
+- **Pass/Fail/Notes:**
+
+---
+
+#### G. Streaming & latency
+
+**G1. Time-to-first-text**
+1. Send a voice/text turn; watch assistant text and SSE.
+- **Expected:** Text starts streaming before turn completes. Capture `firstDeltaMs` and `firstVisibleTextMs`.
+- **Telemetry:** SSE first `delta`; `audio-health` `firstClientDeltaMs`, `firstVisibleTextMs`.
+- **Pass/Fail/Notes:**
+
+**G2. Time-to-first-audio**
+1. Voice turn; measure when speech starts.
+- **Expected:** TTS begins as soon as first speakable chunk is ready, not after full response. Capture `firstSpeechStartMs`, `firstAudioPlayMs`.
+- **Pass/Fail/Notes:**
+
+**G3. Working buffer visibility**
+1. During a long turn, watch Codex working buffer.
+- **Expected:** Shows current activity label and detail; updates as Codex works.
+- **Pass/Fail/Notes:**
+
+**G4. Latent trace**
+1. Expand “Codex debug trace”.
+- **Expected:** Up to 32 lifecycle lines sorted by elapsed; spoken statuses and verdict visible.
+- **Pass/Fail/Notes:**
+
+**G5. Long turn stability**
+1. Ask a question that produces a long answer.
+- **Expected:** No freezing, no dropped text, no TTS underruns. Capture `audioBufferUnderruns`, `speechAfterFinalMs`.
+- **Pass/Fail/Notes:**
+
+---
+
+#### H. TTS audio quality & latency
+
+**H1. Browser TTS**
+1. Use browser TTS; send a turn.
+- **Expected:** Speech plays; note quality and latency. `firstSpeechStartMs` captured.
+- **Pass/Fail/Notes:**
+
+**H2. ElevenLabs/Deepgram/Inworld TTS**
+1. Configure a provider; send a turn.
+- **Expected:** Audio streams; `ttsConnectMs`, `firstAudioChunkMs`, `firstAudioPlayMs` captured. No underruns.
+- **Telemetry:** `audio-health` fields; `GET /api/tts/<provider>/health` for baseline.
+- **Pass/Fail/Notes:**
+
+**H3. TTS failure**
+1. Use an invalid TTS key; send a voice turn.
+- **Expected:** `ttsProviderNotice` appears; speech phase resets; user can retry/switch.
+- **Telemetry:** `audio-health` `ttsError`, `ttsCloseCode/Reason`.
+- **Pass/Fail/Notes:**
+
+**H4. Speech after final text**
+1. Send a turn; observe if speech outlives visible final text.
+- **Expected:** `speechAfterFinalMs` near 0; no orphaned audio.
+- **Pass/Fail/Notes:**
+
+**H5. Audio continuity across surfaces**
+1. Start TTS in overlay; hide overlay; reveal overlay.
+- **Expected:** Audio cancels on hide; no double playback on reveal.
+- **Pass/Fail/Notes:**
+
+---
+
+#### I. Barge-in & interrupt
+
+**I1. Interrupt while speaking**
+1. While TTS is speaking, click “Stop”/“Stop audio”.
+- **Expected:** Audio stops immediately; orb returns to Ready/Thinking.
+- **Telemetry:** `POST /api/session/audio-command {command:"interrupt"}`; `audio-health` `interruptionLatencyMs`.
+- **Pass/Fail/Notes:**
+
+**I2. Push-to-talk during speech (barge-in)**
+1. While TTS is speaking, hold M and speak.
+- **Expected:** Audio stops; your speech is captured; new turn sends when safe. Visual feedback “Interrupting… speak now” or similar.
+- **Telemetry:** `bargeInStartedMs`, `bargeInAudioStopMs`, `bargeInCaptureStartMs`, `bargeInFirstSpeechDetectedMs`, `bargeInQueuedMs`.
+- **Pass/Fail/Notes:**
+
+**I3. Interrupt with no pending/speaking**
+1. Click Stop when idle.
+- **Expected:** Button disabled; no effect.
+- **Pass/Fail/Notes:**
+
+**I4. Queued turn cancel**
+1. Queue a turn during speech; click “Cancel queued”.
+- **Expected:** Queued preview disappears; no turn sent.
+- **Telemetry:** `DELETE /api/session/queued-turn`.
+- **Pass/Fail/Notes:**
+
+**I5. Barge-in across surfaces**
+1. Barge-in in overlay; immediately hide overlay.
+- **Expected:** Capture stops; no orphaned recognition; audio canceled.
+- **Pass/Fail/Notes:**
+
+---
+
+#### J. Handoff generate / preview / copy
+
+**J1. Generate handoff**
+1. After 2+ turns, click Generate.
+- **Expected:** Header shows “Generating” then “Ready”; preview text appears; `generatedBy` indicates codex/local.
+- **Telemetry:** `POST /api/handoff`.
+- **Pass/Fail/Notes:**
+
+**J2. Copy short / copy full feedback**
+1. Click “Copy short” then “Copy full”.
+- **Expected:** Button changes to “Copied” for ~1.6s; clipboard contains the prompt.
+- **Pass/Fail/Notes:**
+
+**J3. Clipboard fallback**
+1. In an insecure context or with clipboard blocked, click copy.
+- **Expected:** Clipboard fallback dialog opens with selectable text.
+- **Pass/Fail/Notes:**
+
+**J4. Handoff preview/review modal**
+1. Click “Preview”.
+- **Expected:** Modal opens with focus in first control; short/full editors; Escape closes and returns focus to trigger.
+- **Pass/Fail/Notes:**
+
+**J5. Edit handoff**
+1. In review modal, edit short/full.
+- **Expected:** Edits persist; copy uses edited text.
+- **Pass/Fail/Notes:**
+
+**J6. Generate with no turns**
+1. With empty transcript, click Generate.
+- **Expected:** Disabled; or clear disabled reason.
+- **Pass/Fail/Notes:**
+
+**J7. Handoff in overlay**
+1. In overlay, generate and copy.
+- **Expected:** Handoff card works; copy feedback shows; note if micro density hides the card.
+- **Pass/Fail/Notes:**
+
+---
+
+#### K. Clear scratch & confirmations
+
+**K1. Clear with content**
+1. After turns/handoff, click Clear.
+- **Expected:** Confirm dialog appears; Cancel returns focus to Clear button; Confirm clears transcript, handoff, draft, queued.
+- **Telemetry:** `POST /api/session/clear`.
+- **Pass/Fail/Notes:**
+
+**K2. Clear with no content**
+1. Empty scratch; click Clear.
+- **Expected:** No confirm; clears immediately (or disabled).
+- **Pass/Fail/Notes:**
+
+**K3. Clear while pending**
+1. While a turn is running, click Clear.
+- **Expected:** Disabled or warns; no silent loss.
+- **Pass/Fail/Notes:**
+
+**K4. Clear across surfaces**
+1. Clear in full app; check overlay.
+- **Expected:** Overlay transcript/handoff also clear within ~1.2s (session sync) or immediately if same renderer.
+- **Pass/Fail/Notes:**
+
+---
+
+#### L. Surface switching & cohesion
+
+**L1. Start turn in overlay, switch to full app**
+1. Hold M in overlay; while thinking, open full app.
+- **Expected:** Turn continues in full app; overlay hides; audio cancels in overlay.
+- **Pass/Fail/Notes:**
+
+**L2. Full app and overlay state agreement**
+1. Make changes in full app (thread switch, clear, handoff).
+2. Reveal overlay.
+- **Expected:** Overlay reflects same session within sync interval; no stale transcript/handoff.
+- **Telemetry:** `GET /api/session` polling; `GET /api/session/stream` events.
+- **Pass/Fail/Notes:**
+
+**L3. Audio lease arbitration**
+1. Start TTS in both surfaces (if possible).
+- **Expected:** Only one surface owns audio; other shows notice “Audio moved to another Mortic window.”
+- **Telemetry:** `POST /api/session/presence` `audioLease`; `POST /api/session/audio-command`.
+- **Pass/Fail/Notes:**
+
+**L4. Blur/visibility during recognition**
+1. Hold M; switch browser tab/window.
+- **Expected:** Recognition stops cleanly; no orphaned mic.
+- **Pass/Fail/Notes:**
+
+**L5. Reattach to running turn**
+1. Start a turn; reload the page.
+- **Expected:** App reconnects and shows the running turn; no duplicate turn.
+- **Telemetry:** `GET /api/turn/:id/stream` reopens.
+- **Pass/Fail/Notes:**
+
+**L6. Multiple renderers**
+1. Open full app in two browser tabs.
+- **Expected:** State stays roughly in sync; note races or duplicate turns.
+- **Pass/Fail/Notes:**
+
+---
+
+#### M. Error & edge cases
+
+**M1. Server unreachable**
+1. Stop server while app open; attempt a turn.
+- **Expected:** Error notice; controls disabled; no silent failure.
+- **Pass/Fail/Notes:**
+
+**M2. SSE stream error**
+1. Kill SSE connection mid-turn.
+- **Expected:** Fallback to polling or clear error; user notified.
+- **Pass/Fail/Notes:**
+
+**M3. Codex logout mid-session**
+1. `codex logout` after launch; attempt a turn.
+- **Expected:** Input disabled; topbar red; notice explains.
+- **Pass/Fail/Notes:**
+
+**M4. Handoff generation failure**
+1. Make handoff fail (e.g., Codex unavailable); click Generate.
+- **Expected:** Error notice; local fallback handoff may appear (`generatedBy: "local"`).
+- **Telemetry:** `POST /api/handoff` response.
+- **Pass/Fail/Notes:**
+
+**M5. Thread switch race**
+1. Rapidly switch threads multiple times.
+- **Expected:** Final state matches last selected thread; no stale project data; no duplicate forks.
+- **Pass/Fail/Notes:**
+
+**M6. Long idle then turn**
+1. Leave app idle 10 min; send a turn.
+- **Expected:** Scratch fork still valid or re-prewarmed; no errors.
+- **Pass/Fail/Notes:**
+
+**M7. Invalid thread URI**
+1. Pass an invalid URI via dev or source switch.
+- **Expected:** Clear error; no crash.
+- **Pass/Fail/Notes:**
+
+**M8. Project store write failure**
+1. Make `~/.mortic` read-only (if safe); run a turn.
+- **Expected:** Turn still works; project bookkeeping failure logged but not blocking.
+- **Telemetry:** terminal `Mortic project store … failed`.
+- **Pass/Fail/Notes:**
+
+---
+
+#### N. Accessibility & keyboard
+
+**N1. Push-to-talk keyboard**
+1. Focus dock mic button with Tab; press Space/Enter down, release.
+- **Expected:** Capture starts on keydown, stops on keyup; `aria-pressed` reflects state.
+- **Pass/Fail/Notes:**
+
+**N2. Modal focus trap**
+1. Open Transcript Drawer / Handoff Review / Clear Confirm.
+2. Tab through; Shift+Tab; Escape.
+- **Expected:** Focus cycles inside; Escape closes; focus returns to trigger.
+- **Pass/Fail/Notes:**
+
+**N3. Error announcements**
+1. Trigger an error.
+- **Expected:** `aria-live` region announces it (provider notices box is live; runtime error row should be too).
+- **Pass/Fail/Notes:**
+
+**N4. Contrast check**
+1. Inspect disabled buttons, muted labels, status dots.
+- **Expected:** Disabled text readable; status not color-only.
+- **Pass/Fail/Notes:**
+
+**N5. Reduced motion**
+1. Enable OS reduced motion; watch orb.
+- **Expected:** Orb pulse/halo minimized or stopped.
+- **Pass/Fail/Notes:**
+
+**N6. Thread picker keyboard** (covered in B5; re-check focus return)
+
+---
+
+#### O. Visual & density
+
+**O1. Normal density overlay**
+1. Default scale.
+- **Expected:** Transcript/mic/handoff/config visible; hierarchy clear.
+- **Pass/Fail/Notes:**
+
+**O2. Compact density**
+1. Resize to ~0.7 scale.
+- **Expected:** Labels shrink but remain readable; window controls icon-only.
+- **Pass/Fail/Notes:**
+
+**O3. Micro density**
+1. Resize to min.
+- **Expected:** No illegible text; core mic remains; path to expand/open app exists.
+- **Pass/Fail/Notes:**
+
+**O4. Full app visual hierarchy**
+1. Open full app.
+- **Expected:** Orb/transcript/composer are focal; handoff panel secondary; config collapsible.
+- **Pass/Fail/Notes:**
+
+**O5. Monospace readability**
+1. Read a long assistant answer and handoff.
+- **Expected:** Note any fatigue; consider proportional font for longform.
+- **Pass/Fail/Notes:**
+
+---
+
+#### P. Remnant / dead-feature verification
+
+**P1. Chart/Canonical UI absent**
+1. Search full app for “Chart”, “Canonical”, “Open State”, “Deltas”.
+- **Expected:** No UI; components removed.
+- **Pass/Fail/Notes:**
+
+**P2. Extraction/Compile UI absent**
+1. Search for “Compile”, “Project updates”, “Extraction”, “Approve all”.
+- **Expected:** No UI.
+- **Pass/Fail/Notes:**
+
+**P3. Fork action sheet absent**
+1. Search for “Resume in Main”, fork continuation.
+- **Expected:** No UI.
+- **Pass/Fail/Notes:**
+
+**P4. Live mode toggle absent**
+1. Look in dock/overlay for Live On/Off.
+- **Expected:** No toggle visible; `LIVE_MODE_RUNTIME_ENABLED` still false. Note any live-related labels still referenced.
+- **Pass/Fail/Notes:**
+
+**P5. Spark context UI not shown**
+1. Switch models.
+- **Expected:** No “Compact Then Retry / Start Anyway” panel; `needsModelTransitionPreflight` hardcoded false.
+- **Pass/Fail/Notes:**
+
+---
+
+#### Q. Recent Kimi/GLM change regression checklist
+
+**Q1. ThreadPicker search + preview + workspace filter**
+- Verify B1–B6. Confirm single-click preview, double-click/Enter commit, keyboard nav, scope toggle, empty-state “Search all projects”.
+- **Pass/Fail/Notes:**
+
+**Q2. Overlay audio cancel on hide**
+- Verify C6. Confirm TTS stops when overlay hidden via shortcut/Hide/full-app open.
+- **Pass/Fail/Notes:**
+
+**Q3. Full-app close restores overlay**
+- Verify C5. Confirm overlay reappears after full window closed.
+- **Pass/Fail/Notes:**
+
+**Q4. `threadRequired` gating across both surfaces**
+- Verify B8, E4, F1. Confirm orb hidden, CTA present, mic/textarea/Send disabled with tooltips in full app and overlay.
+- **Pass/Fail/Notes:**
+
+**Q5. PTT labels normalized**
+- Confirm mic button says “Hold M” / “Live on” only; no “Mute + talk”, “M ready”, “Click M”.
+- **Pass/Fail/Notes:**
+
+**Q6. `resetQueuedTurn` on clear/source/audio cancel**
+- Queue a turn (E8); clear scratch or switch thread; confirm queued preview clears in UI and `DELETE /api/session/queued-turn` or reset happens.
+- **Pass/Fail/Notes:**
+
+**Q7. Copy handoff feedback**
+- Verify J2. Confirm “Copied” state for ~1.6s.
+- **Pass/Fail/Notes:**
+
+**Q8. Clear confirmation dialog**
+- Verify K1. Confirm dialog only when content exists.
+- **Pass/Fail/Notes:**
+
+**Q9. Clipboard fallback dialog**
+- Verify J3. Confirm fallback opens when clipboard blocked.
+- **Pass/Fail/Notes:**
+
+**Q10. Modal focus traps**
+- Verify N2. Confirm focus moved in, trapped, returned on close.
+- **Pass/Fail/Notes:**
+
+**Q11. Provider notices rendered**
+- Trigger STT/TTS/transport issues; confirm notices appear below dock and in overlay (unless micro density hides them).
+- **Pass/Fail/Notes:**
+
+**Q12. Codex-offline input disabling**
+- Verify E3/M3. Confirm `codexUnavailable` disables mic and Send with tooltip.
+- **Pass/Fail/Notes:**
+
+### 14.6 Issue log template
+
+Copy per issue found:
+
+```
+### Issue <n>
+- Test ID: (e.g. E1)
+- Title:
+- Severity: critical / high / medium / low
+- Surface: overlay / full app / both
+- Steps to reproduce:
+- Expected:
+- Actual:
+- Telemetry paste (Network/SSE/audio-health/server log):
+- Screenshot/recording note:
+- Suggested fix:
+```
+
+### 14.7 Sign-off checklist
+
+- [ ] All A–Q sections attempted or explicitly skipped.
+- [ ] No P1 blockers open.
+- [ ] Telemetry captured for any latency/audio issue.
+- [ ] Issue log entries written with severity and evidence.
+- [ ] Regression checklist Q1–Q12 all pass or have issues logged.
+
+---
+
+## 15. Dual-Model Preliminary Reasoning Architecture — Plan as of 2026-06-25
+
+### 15.0 Origin
+
+Source plan reviewed: `~/.gemini/antigravity/brain/50752dca-.../dual_model_handoff.md` (Mercury 2 filler masking for Codex latency). The original plan proposed non-committal filler text injected into Codex history as assistant prefill. After adversarial review, the design evolved into **substantive preliminary reasoning** (not filler), **race + abort + resend** (not prefill injection), using the app-server's **`turn/interrupt`** method (which Mortic's bridge never calls today).
+
+### 15.1 Problem statement
+
+GPT-5.5 via the Codex app-server takes **7–10 seconds** to first byte on complex reasoning questions (measured), and **40+ seconds** when the fork carries real conversation context and an augmented prompt. During this silence the user hears nothing. Mercury (`inception/mercury-2` via OpenRouter) produces a substantive first-principles preliminary in **~1.2 seconds** (measured, 150–450 tokens). The architecture masks Codex's latency with Mercury's engagement.
+
+### 15.2 Probe validation (completed 2026-06-25)
+
+A standalone probe at `probe/` (no Mortic dependencies) verified the architecture against the real Codex app-server and OpenRouter. Key measured results on the question "Analyze the time complexity of merging N sorted lists…":
+
+| Mode | Perceived first content | Total | Notes |
+|---|---|---|---|
+| Main only (gpt-5.5, fresh thread) | 7,567 ms | 15,000 ms | 7.6s of silence |
+| Main only (gpt-5.5, fork from source `019e6f5e…`) | 9,187 ms | 16,709 ms | fork context adds latency |
+| Mercury first (sequential, fork) | 1,244 ms (Mercury) | 55,474 ms | user engaged at 1.2s |
+| Mercury first (with 25K context, fork) | 1,176 ms | — | context fetch ~286 ms overhead |
+
+Mercury's speed retains across forks because Mercury does not use the Codex fork — it goes through OpenRouter with its own sliding-window context (capped at ~25K tokens / 100K chars, built from the source thread's `userMessage` + `final_answer` items via `thread/turns/list`).
+
+### 15.3 Architecture (final design)
+
+```
+Turn start (T=0)
+  ├── Build Mercury context (thread/turns/list on source thread → sliding window)
+  ├── Mercury starts streaming (OpenRouter, inception/mercury-2, 450 max_tokens, ~40s speech)
+  └── Codex starts in parallel (app-server, ephemeral scratch fork of source thread)
+       ↓
+       Race: first speakable chunk wins
+       ↓
+┌──── Mercury wins (~90%+) ────────────┐    ┌──── Codex wins (~10%) ────┐
+│                                      │    │                           │
+│ T~1.2s: Mercury first chunk → TTS    │    │ T~1s: Codex first delta   │
+│        Call turn/interrupt on Codex  │    │        Abort Mercury      │
+│        (app-server STOPS generating) │    │        (clean — Mercury   │
+│        Codex turn settles            │    │         hasn't played)    │
+│        status: "interrupted"         │    │                           │
+│                                      │    │ Codex deltas play to TTS  │
+│ T~3s: Mercury completes (450 tokens) │    │ No resend needed          │
+│        Resend on SAME scratch fork   │    │                           │
+│        turn/start with augmented     │    │                           │
+│        prompt (Mercury text in input)│    │                           │
+│                                      │    │                           │
+│ T~5s: Codex resend first delta       │    │                           │
+│        → TTS queues behind Mercury   │    │                           │
+└──────────────────────────────────────┘    └───────────────────────────┘
+
+Barge-in (any time):
+  Mercury: AbortController.abort()
+  Codex:   turn/interrupt (app-server stops generation immediately — NOT just JS Promise rejection)
+  TTS:     cancelSpeechAudio()
+```
+
+### 15.4 Critical blind spot fixed: `turn/interrupt`
+
+**Finding:** The Codex app-server protocol supports `turn/interrupt` (real server-side cancellation — the model stops generating, turn settles with `status: "interrupted"`). Mortic's generated `ClientRequest.ts` types already include it. But the bridge's `interrupt()` method at `appServerBridge.ts:895-904` **never calls it** — it only rejects the local JS Promise and clears `pendingTurns`. The app-server keeps generating tokens until natural completion, wasting compute and writing orphan turns to the rollout.
+
+**Fix (~5 lines in `appServerBridge.ts:895`):**
+```ts
+async interrupt(onEvent?) {
+  const active = Array.from(this.pendingTurns.values())
+    .map(p => ({ threadId: p.threadId, turnId: p.turnId }));
+  for (const { threadId, turnId } of active) {
+    this.request("turn/interrupt", { threadId, turnId }).catch(() => {});
+  }
+  // ...existing reject + clear...
+}
+```
+
+This **moots the `forceNewFork` debate** — we call `turn/interrupt`, the app-server stops, the turn settles, and we resend on the same scratch thread via `turn/start`. No fork needed to escape the in-flight turn. The `request()` method at `appServerBridge.ts:1512` is generic (takes `string` method), so no type changes are needed.
+
+### 15.5 Other app-server capabilities discovered (unused by Mortic)
+
+| Method | In types? | Wired? | Use for us? |
+|---|---|---|---|
+| `turn/interrupt` | Yes | **No** | **Critical** — enables clean abort + resend |
+| `turn/steer` | Yes | No | **Wrong tool** — appends *user input*, not assistant context. Codex would treat Mercury's text as the user speaking. |
+| `thread/inject_items` | Yes | No | Alternative — injects as assistant context, but pollutes persisted history with synthetic message. Abort+resend is cleaner. |
+| `thread/rollback` | Yes | No | Cleanup tool — drops interrupted turn from history. On ephemeral scratch forks, not needed. |
+| `thread/turns/list` | Not in generated types | No (probe uses it via generic `request()`) | Used by probe to build Mercury context. Production Mortic already has transcript in memory. |
+
+All four are **non-experimental** (Mortic already sets `experimentalApi: true` at `appServerBridge.ts:1132`). Security: the bridge spawns app-server on `ws://127.0.0.1:<port>` with no `--ws-auth`, which the docs explicitly sanction for loopback.
+
+### 15.6 Implementation phases
+
+**Phase 0 — Telemetry instrumentation (prerequisite for measuring)**
+- `src/server/app.ts:1848` — include `metrics` in `turn.log` event detail
+- `src/server/app.ts:2291` — include full audio-health metrics in `turn.audio_health` event detail
+- Currently metrics are stored in-memory only and lost on turn completion.
+
+**Phase 1 — Barge-in abort fix (standalone shippable)**
+- `src/client/App.tsx:618` — add concurrent `POST /api/turn/:turnId/interrupt` to barge-in (client never calls it today)
+- `src/server/appServerBridge.ts:895` — call `turn/interrupt` in `interrupt()` (~5 lines)
+- `src/server/app.ts:2304` — extend `/api/turn/:turnId/interrupt` to also abort Mercury `AbortController`
+- Fixes pre-existing gap where Codex keeps generating after barge-in.
+
+**Phase 2 — Server-side Mercury call**
+- New file `src/server/mercury.ts` — OpenRouter streaming client, mirroring `stt.ts` patterns (`envValue`, `fetchWithTimeout`, `AbortController`)
+- Add `OPENROUTER_API_KEY=` to `.env.example`
+- `src/server/app.ts:2135` — race Mercury + Codex, winner guard, resend logic
+- Mercury: `inception/mercury-2`, `max_tokens: 450` (reasoning model — needs budget for internal reasoning + content), 50K context window (25K cap implemented in probe)
+- Gate behind `MORTIC_FILLER_ENABLED` env flag (default off)
+
+**Phase 3 — Client TTS queue extension**
+- `src/client/lib/clientTypes.ts:60` — add `source: "preliminary" | "answer"` to `SpeechQueueItem`
+- `src/client/voice/useVoiceEngine.ts` — new `pushSpeechItem(text, source)` that bypasses char-offset accounting
+- Handle `{type: "preliminary"}` SSE event: cancel progress speech, push preliminary, suppress canned phrases for rest of turn
+- Preliminary never enters `liveAssistantTextRef` → no transcript pollution, no divergence detection issues
+- Seamless on buffered providers (Deepgram WS, ElevenLabs WS) via shared Web Audio timeline
+
+**Phase 4 — System prompt + telemetry**
+- `src/server/appServerBridge.ts:200` — "concise" → "substantive. Include the reasoning, evidence, and key detail — the user wants to understand your thinking, not just the conclusion."
+- Add "skip preamble" clause: "A preliminary analysis may have been spoken to the user while you were thinking. Skip greetings, pleasantries, and 'let me check' style preamble. Begin with the substantive answer. If your findings differ from what was preliminarily suggested, briefly note the correction."
+- New metrics: `raceWinner`, `mercuryFirstByteMs`, `mercuryTotalMs`, `preliminaryPlayed`, `preliminaryText` (stored for debug, NOT in transcript)
+
+### 15.7 Mercury preliminary — audio-only, logged separately
+
+Mercury's preliminary reasoning is:
+- **Audio-only** — plays via TTS, never enters `session.transcript` or handoff
+- **Stored in `activeTurn.preliminaryText`** for debug/telemetry visibility
+- **Written to event log** as `turn.preliminary` event (not `turn.assistant_appended`)
+- Not visible in transcript drawer, not sent to Codex as history (only as per-turn augmented prompt input)
+
+### 15.8 System prompts (current, editable)
+
+**Codex voice developer instructions — schema-active (lean, 4,020 chars)** — `src/server/appServerBridge.ts`, `VOICE_DEVELOPER_INSTRUCTIONS_SCHEMA_ACTIVE`. Used when `MORTIC_VOICE_OUTPUT_SCHEMA !== "0"` (the default). The output schema structurally enforces the `{speak:{text}, read:{markdown}}` shape, so this prompt only carries content/style rules — no format description, no NDJSON examples, no skill body. Measured 4x first-byte speedup vs the full 31KB prompt.
+```
+This is a Mortic voice scratch fork. The output schema enforces the response shape: {speak: {text}, read: {markdown}}. Follow these rules for what goes in each field.
+
+## speak.text (what the user hears aloud)
+- Conversational, substantive, useful on its own. Include the reasoning, evidence, and key detail — the user wants to understand your thinking, not just the conclusion. Be thorough without reading code, paths, or raw data aloud.
+- Carry the answer, motivation, recommendation, tradeoff, and next step when those matter.
+- No silent caveats: if read.markdown mentions risks, blockers, proof still needed, uncertainty, objections, tradeoffs, recommendations, or next steps, speak.text must mention those same points in natural spoken language.
+- For planning, diagnosis, or status answers, include the verdict, key reasons, what still needs proof, and the recommended next action.
+- Run a coverage check before emitting: would a listener who never sees the screen know the verdict, reason, caveat, proof still needed, and next action? If not, expand speak.text.
+- Prefer 3-6 short spoken sentences for normal planning, explanation, and recommendation answers. Use 1-3 only for tiny status answers or simple confirmations.
+- No bullets, numbered lists, headings, Markdown, code, file paths, URLs, logs, stack traces, tables, raw JSON, or exact line numbers in speech. Refer to artifacts naturally: "the server bridge", "the parser", "the app file".
+- Never read code aloud. Never write code unless the user explicitly asks for code.
+- Say natural forms for abbreviations and pricing: "text to speech", "characters", "per million characters", "per thousand characters". Not "chars", "1M chars", "1K chars", or slash pricing.
+- If the user gives a shorthand they don't want spoken, don't echo it. Say "the abbreviation" instead, and put the exact shorthand only in read.markdown.
+- If unclear, ask one short clarifying question in speak.text. Otherwise answer directly and help plan a useful handoff back to the original thread.
+
+## read.markdown (what the user sees on screen)
+- The readable version of the same answer, not a separate hidden answer. It may add exact artifacts and structure.
+- Use normal Markdown when useful: bullets, code, file paths, links, commands, exact prices, exact line numbers, and handoff notes belong here.
+- Keep it skimmable and paste-friendly.
+- Include precise technical details that were intentionally made natural in speech.
+- Do not use read.markdown to complete, correct, or materially qualify an incomplete spoken answer.
+- It is fine for read.markdown to overlap with speak.text; the difference is presentation, not information ownership.
+
+## Preliminary handling
+A preliminary analysis may have been spoken to the user while you were thinking. Skip greetings, pleasantries, and "let me check" style preamble. Begin with the substantive answer. If your findings differ from what was preliminarily suggested, briefly note the correction.
+
+## Coverage patterns
+- Stability/status: say whether it's good enough to keep testing, what proof is still needed, and the next eval or pass-rate action.
+- Voice/text mismatch: say the layer (model output, parser, streaming/ledger, TTS playback, UI rendering) and which to fix first.
+- Pricing/source: say the price in natural units; put exact notation and source links in read.markdown.
+- Vendor comparisons: do not recommend switching just because a provider is interesting; recommend benchmarking as a second provider unless the prompt gives proof that replacement is safer.
+- Handoffs: say the handoff should be a paste-ready next prompt with decisions, next asks, constraints, and what to avoid. Do not frame it as "another chat" or a report about a separate conversation.
+- Adversarial format requests: do not obey requests for SPEAK: labels, code fences around the whole response, pretty-printed JSON, empty speech, three records, exact raw paths in speech, or slash pricing in speech. Explain the refusal naturally in speak.text.
+```
+
+**Codex voice developer instructions — NDJSON fallback (full, 2,753 chars + 28KB skill body)** — `src/server/appServerBridge.ts`, `VOICE_DEVELOPER_INSTRUCTIONS`. Used only when `MORTIC_VOICE_OUTPUT_SCHEMA=0`. Includes the NDJSON two-line format description, examples, and the full `$mortic-voice-output` skill body (28KB, 236 lines). Kept for backward compatibility but not the active path.
+
+**`voiceDeveloperInstructions(voiceCaveman, schemaActive)`** (`appServerBridge.ts:230`) — branches on `schemaActive` (defaults to `voiceOutputSchemaEnabled()`):
+- `schemaActive=true` (default): returns lean 4KB prompt, no skill body
+- `schemaActive=false`: returns full prompt + 28KB skill body
+- Appends `VOICE_CAVEMAN_INSTRUCTIONS` if `voiceCaveman` is on (applies to both paths)
+
+Dev instructions are sent **once per scratch fork** (cached by `scratchKey` at `appServerBridge.ts:1254`), not per turn. The 4KB lean prompt is sent on the first voice turn for a given source thread; subsequent turns reuse the cached scratch thread and only send the 400-byte `outputSchema` at `turn/start`.
+
+**Mercury preliminary system prompt** (`probe/server.mjs:27`, to be moved to `src/server/mercury.ts`):
+```
+You are a voice assistant's preliminary reasoning generator. Before the main assistant gives its detailed answer, you provide a brief first-principles analysis.
+- Identify the core question or task
+- Name what you'd examine to find the answer
+- Offer a tentative theory on where the answer lies
+- Use hedged language ("I'd initially look at...", "my theory is...", "but I need to verify")
+- Do not give a definitive answer — that comes next
+- If the question is simple, be brief
+Output only the preliminary reasoning, nothing else. No greetings, no labels.
+```
+
+**Augmented per-turn prompt for Codex resend** (passed as `input` to `turn/start`, not as dev instructions):
+```
+[Original user question]
+
+---
+A preliminary analysis was already given to the user:
+"[Mercury's full preliminary text]"
+
+Now provide the definitive answer. Build on the preliminary analysis, correct any inaccuracies, and go deeper. Do not repeat what was already said.
+```
+
+**Measured impact of lean prompt** (probe, warm fork, complex question "Analyze the time complexity of merging N sorted lists…"):
+| Prompt | Size | First byte (warm) |
+|---|---|---|
+| Full 31KB (prompt + skill body) | 31,391 chars (~8K tokens) | 9,187 ms |
+| Lean 4KB (schema-active) | 4,020 chars (~1K tokens) | 2,274 ms |
+| Improvement | 7.8x smaller | **4x faster** |
+
+### 15.9 Risk mitigation
+
+| Risk | Mitigation |
+|---|---|
+| Mercury key not set / disabled | `MORTIC_FILLER_ENABLED` flag, default off. Falls through to Codex-only. |
+| Mercury errors/timeout | `.catch(() => null)` — falls through, no user impact |
+| Mercury is a reasoning model (burns tokens on internal reasoning) | `max_tokens: 450` — enough for ~150 reasoning + ~200 content |
+| Barge-in during preliminary | Phase 1 aborts both Mercury + Codex uniformly via `turn/interrupt` |
+| Double-intro (preliminary + Codex preamble) | "Skip preamble" clause in Codex instructions + augmented prompt |
+| Codex contradicts Mercury | "Acknowledge differences" clause — sounds like honest reasoning ("Correction to the preliminary analysis…") |
+| Preliminary text in transcript | Audio-only, stored in `preliminaryText` field for debug only |
+| Provider seam (Browser/HTTP TTS) | Acceptable degradation; buffered providers (Deepgram WS, ElevenLabs WS) seamless |
+| Concurrent bridge access | Mercury bypasses `withOperationLock` (external HTTP), true concurrency with Codex |
+| `turn/start`-in-flight race (interrupt fires before `pendingTurns.set`) | Track pending `turn/start` request ID so late `turnId` can still be cancelled |
+| App-server orphan turns after JS-only reject | Fixed by `turn/interrupt` — app-server stops generation, no orphan written |
+
+### 15.10 File change summary
+
+**Completed:**
+| File | Change | Status |
+|---|---|---|
+| `src/server/appServerBridge.ts` | Added `VOICE_DEVELOPER_INSTRUCTIONS_SCHEMA_ACTIVE` (4,020 chars). Updated `voiceDeveloperInstructions(voiceCaveman, schemaActive)` to branch on `voiceOutputSchemaEnabled()`. Schema-active path skips 28KB skill body. **Done — 4x first-byte speedup measured.** | ✅ Applied 2026-06-25 |
+
+**Planned (Phases 0–4):**
+| File | Phase | Change |
+|---|---|---|
+| `src/server/app.ts:1848` | 0 | Include metrics in `turn.log` event |
+| `src/server/app.ts:2291` | 0 | Include metrics in `turn.audio_health` event |
+| `src/client/App.tsx:618` | 1 | Add `POST /api/turn/:turnId/interrupt` to barge-in |
+| `src/server/appServerBridge.ts:895` | 1 | **Call `turn/interrupt` in `interrupt()`** (~5 lines) |
+| `src/server/app.ts:2304` | 1 | Extend interrupt endpoint to abort Mercury |
+| `src/server/mercury.ts` | 2 | **New file** — OpenRouter streaming client |
+| `.env.example` | 2 | Add `OPENROUTER_API_KEY=` |
+| `src/server/app.ts:2135` | 2 | Race Mercury + Codex, winner guard, resend logic |
+| `src/client/lib/clientTypes.ts:60` | 3 | Add `source` to `SpeechQueueItem` |
+| `src/client/voice/useVoiceEngine.ts` | 3 | `pushSpeechItem` + `preliminary` SSE event handler |
+| `src/shared/types.ts` | 4 | `preliminaryText`, new metrics, `preliminary` SSE event |
+
+### 15.11 Probe artifacts (reference, not for production)
+
+- `probe/server.mjs` — probe server with 4 modes (main-only, mercury-first, race, race-resend)
+- `probe/codexClient.mjs` — minimal Codex app-server client (spawn, initialize, thread/start, thread/fork, turn/start, turn/interrupt, thread/turns/list)
+- `probe/public/` — UI (index.html, app.mjs, style.css)
+- `probe/.env` — gitignored, contains OpenRouter key
+- Probe Codex app-server runs on port 7167+ (separate from Mortic's 6167-6168)
+- Probe defaults: Provider=Codex app-server, Model=gpt-5.5, Effort=medium, Source thread=019e6f5e-627d-7150-abf1-d34356bbbfdc
+
+### 15.12 Open items before implementation
+
+1. **Edit system prompts** — user reviewing Mercury preliminary prompt and Codex voice instructions (§15.8)
+2. **Decide Mercury context size** — 25K tokens (current probe setting) vs 50K (original plan). Probe shows source thread only has ~5K of user+final_answer content, so cap isn't binding yet.
+3. **Decide Mercury max_tokens** — 450 (current, fits ~40s speech). User originally wanted 150 but Mercury's reasoning overhead requires more.
+4. **Confirm `turn/interrupt` edge case** — handle interrupt firing between `turn/start` send and `pendingTurns.set` (blind spot A from audit).
+
