@@ -1,8 +1,18 @@
 {
   "name": "mortic",
+  "productName": "Mortic",
+  "desktopName": "mortic-desktop",
   "version": "0.1.0",
+  "private": true,
+  "description": "Local voice sidecar for Codex CLI threads.",
+  "homepage": "https://github.com/Aeroknight786/simple_mortic",
+  "author": {
+    "name": "Aeroknight786",
+    "email": "Aeroknight786@users.noreply.github.com"
+  },
   "license": "MIT",
   "type": "module",
+  "main": "dist/desktop/desktop/main.js",
   "bin": {
     "mortic": "dist/node/cli/main.js"
   },
@@ -17,25 +27,118 @@
     "LICENSE"
   ],
   "scripts": {
+    "clean": "node scripts/clean_build.mjs all",
+    "clean:release": "node scripts/clean_build.mjs release",
     "dev": "tsx src/cli/main.ts",
-    "build": "tsc -p tsconfig.node.json && vite build",
-    "build:desktop": "tsc -p tsconfig.desktop.json && node scripts/copy_desktop_assets.mjs",
+    "build": "node scripts/clean_build.mjs node-client && tsc -p tsconfig.node.json && vite build",
+    "build:desktop": "node scripts/clean_build.mjs desktop && tsc -p tsconfig.desktop.json && node scripts/copy_desktop_assets.mjs",
     "desktop:dev": "npm run build:desktop && electron dist/desktop/desktop/main.js --dev",
     "desktop:start": "npm run build && npm run build:desktop && electron dist/desktop/desktop/main.js",
     "desktop:install-launcher": "node scripts/install_macos_desktop_launcher.mjs",
+    "dist:linux": "npm run dist:linux:deb",
+    "dist:linux:all": "npm run clean:release && npm run build && npm run build:desktop && electron-builder --linux deb rpm",
+    "dist:linux:deb": "npm run clean:release && npm run build && npm run build:desktop && electron-builder --linux deb",
+    "dist:linux:rpm": "npm run clean:release && npm run build && npm run build:desktop && electron-builder --linux rpm",
+    "dist:linux:dir": "npm run clean:release && npm run build && npm run build:desktop && electron-builder --linux dir",
+    "dist:mac": "npm run dist:mac:arm64",
+    "dist:mac:arm64": "npm run clean:release && npm run build && npm run build:desktop && electron-builder --mac dmg zip --arm64",
+    "dist:win": "npm run clean:release && npm run build && npm run build:desktop && electron-builder --win nsis --x64 --arm64",
+    "dist:win:x64": "npm run clean:release && npm run build && npm run build:desktop && electron-builder --win nsis --x64",
+    "dist:win:arm64": "npm run clean:release && npm run build && npm run build:desktop && electron-builder --win nsis --arm64",
+    "check:release-artifacts": "node scripts/check_release_artifacts.mjs",
     "prepack": "npm run build",
     "typecheck": "tsc -p tsconfig.node.json --noEmit && tsc -p tsconfig.web.json --noEmit && tsc -p tsconfig.desktop.json --noEmit",
-    "test": "npm run build && npm run build:desktop && node scripts/check_preferences_store.mjs && node scripts/check_session_cohesion.mjs && node scripts/check_voice_pipeline.mjs && node scripts/check_first_turn_warm.mjs && node scripts/check_skill_sync.mjs && node scripts/check_spark_context.mjs && node scripts/check_input_control.mjs && node scripts/check_speech_projection.mjs && node scripts/check_app_server_events.mjs && node scripts/check_provider_adapters.mjs && node scripts/check_project_storage.mjs && node scripts/check_project_api_import.mjs && node scripts/check_canonical_state_skill.mjs && node scripts/check_pack_contents.mjs",
+    "test": "npm run build && npm run build:desktop && node scripts/check_preferences_store.mjs && node scripts/check_session_cohesion.mjs && node scripts/check_voice_pipeline.mjs && node scripts/check_first_turn_warm.mjs && node scripts/check_skill_sync.mjs && node scripts/check_spark_context.mjs && node scripts/check_input_control.mjs && node scripts/check_speech_projection.mjs && node scripts/check_app_server_events.mjs && node scripts/check_provider_adapters.mjs && node scripts/check_pack_contents.mjs",
     "start": "node dist/node/cli/main.js",
     "eval:mortic-voice:generate": "node evals/mortic-voice-output/run.mjs generate",
     "eval:mortic-voice:score": "node evals/mortic-voice-output/run.mjs score",
     "eval:mortic-voice:subagents": "node evals/mortic-voice-output/run.mjs subagent-prompts",
     "eval:models:telemetry": "node evals/model-runtime-telemetry/run.mjs",
-    "eval:canonical:generate": "node evals/canonical-extraction/run.mjs generate",
-    "eval:canonical:score": "node evals/canonical-extraction/run.mjs score",
     "eval:desktop:ux": "node scripts/eval_desktop_ux.mjs",
     "check:spark-context": "node scripts/check_spark_context.mjs",
     "probe:tts": "node scripts/tts_ws_probe.mjs"
+  },
+  "build": {
+    "appId": "app.mortic.desktop",
+    "productName": "Mortic",
+    "executableName": "mortic-desktop",
+    "afterPack": "scripts/electron_after_pack.cjs",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "dist/desktop/**/*",
+      "dist/client/**/*",
+      "skills/**/*",
+      "scripts/codex_pty_worker.py",
+      "README.md",
+      "LICENSE",
+      "package.json"
+    ],
+    "linux": {
+      "syncDesktopName": true,
+      "target": [
+        "deb",
+        "rpm"
+      ],
+      "category": "Development",
+      "synopsis": "Voice sidecar for Codex threads",
+      "maintainer": "Aeroknight786 <Aeroknight786@users.noreply.github.com>",
+      "vendor": "Aeroknight786",
+      "artifactName": "${name}-${version}-${arch}.${ext}",
+      "desktop": {
+        "entry": {
+          "Name": "Mortic",
+          "Comment": "Talk to Codex scratch forks without mutating source threads",
+          "StartupWMClass": "Mortic"
+        }
+      }
+    },
+    "mac": {
+      "target": [
+        {
+          "target": "dmg",
+          "arch": [
+            "arm64"
+          ]
+        },
+        {
+          "target": "zip",
+          "arch": [
+            "arm64"
+          ]
+        }
+      ],
+      "category": "public.app-category.developer-tools",
+      "artifactName": "${name}-${version}-${arch}.${ext}"
+    },
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64",
+            "arm64"
+          ]
+        }
+      ],
+      "artifactName": "${name}-${version}-${arch}-setup.${ext}"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "perMachine": false
+    },
+    "deb": {
+      "packageName": "mortic-desktop",
+      "packageCategory": "devel",
+      "compression": "gz"
+    },
+    "rpm": {
+      "packageName": "mortic-desktop",
+      "packageCategory": "Development/Tools",
+      "compression": "gzip"
+    }
   },
   "dependencies": {
     "@fastify/cors": "^11.1.0",
@@ -53,6 +156,7 @@
     "@types/ws": "^8.18.1",
     "@vitejs/plugin-react": "^5.1.1",
     "electron": "^42.4.1",
+    "electron-builder": "^26.15.5",
     "livekit-client": "^2.18.8",
     "react": "^19.2.1",
     "react-dom": "^19.2.1",

@@ -43,7 +43,7 @@ export const transportLabels: Record<TransportProvider, string> = {
 
 export const progressKeyboardLoopUrl = "/assets/progress-keyboard.ogg";
 
-export function chartDateLabel(value: string | undefined): string {
+export function threadDateLabel(value: string | undefined): string {
   if (!value) return "-";
   const timestamp = Date.parse(value);
   if (Number.isNaN(timestamp)) return value;

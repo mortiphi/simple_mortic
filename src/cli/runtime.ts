@@ -9,7 +9,6 @@ import type { ViteDevServer } from "vite";
 
 import { createMorticServer, defaultMorticPreferences } from "../server/app.js";
 import { getCodexStatus, listCodexRecentThreads, prewarmCodexScratch, shutdownCodexBridges } from "../server/codex.js";
-import { createProjectStore } from "../server/projectStorage.js";
 import { createPreferencesStore } from "../server/preferences.js";
 import { codexProviderAdapter } from "../server/providerAdapters.js";
 import { resolveRuntimeContext } from "../server/runtimeContext.js";
@@ -31,7 +30,6 @@ export type StartedMorticRuntime = {
   threadId: string;
   projectRoot: string;
   sessionDir: string;
-  projectDir?: string;
   close: () => Promise<void>;
 };
 
@@ -188,22 +186,10 @@ export async function startMorticRuntime(options: StartMorticRuntimeOptions): Pr
     codex,
     runtimeContext
   });
-  const initialSession = await storage.read();
-  const canonicalMemoryEnabled = process.env.MORTIC_CANONICAL_MEMORY === "1";
-  const projectStore = canonicalMemoryEnabled
-    ? await createProjectStore({
-        workspacePath: runtimeContext.effectiveCwd,
-        sourceUri: parsed.sourceUri,
-        threadId: parsed.threadId
-      })
-    : undefined;
-  if (projectStore) await projectStore.syncSession(initialSession, { type: "cli.started" });
   const preferencesStore = await createPreferencesStore(defaultMorticPreferences());
 
   const app = await createMorticServer({
     storage,
-    projectStore,
-    canonicalMemoryEnabled,
     preferencesStore,
     staticDir: hasStaticBuild ? staticDir : undefined,
     runtimeContext,
@@ -256,7 +242,6 @@ export async function startMorticRuntime(options: StartMorticRuntimeOptions): Pr
   log(`API:    ${apiBase}`);
   log(`UI:     ${url}`);
   log(`Data:   ${storage.sessionDir}`);
-  log(`Memory: ${projectStore ? `on ${projectStore.projectDir}` : "off"}`);
   log(`Runtime:${runtimeContext.status} cwd ${runtimeContext.effectiveCwd}`);
   if (runtimeContext.recordedCwd && runtimeContext.recordedCwd !== runtimeContext.effectiveCwd) {
     log(`Intended:${runtimeContext.recordedCwd}`);
@@ -322,7 +307,6 @@ export async function startMorticRuntime(options: StartMorticRuntimeOptions): Pr
     threadId: parsed.threadId,
     projectRoot: root,
     sessionDir: storage.sessionDir,
-    projectDir: projectStore?.projectDir,
     close
   };
 }
