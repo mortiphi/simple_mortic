@@ -66,7 +66,6 @@ Mortic doctor
 
 ✓ Codex   codex-cli 0.48.0 (/usr/local/bin/codex)
 ✓ Login   logged in
-✓ Skills  mortic-voice-output current
 ✓ Python3 Python 3.12.4 — Codex CLI PTY fallback available
 ✓ Voice   browser (free, no keys)
 ✓ LiveKit not configured — local transport only

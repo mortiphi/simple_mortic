@@ -90,7 +90,6 @@ export interface VoiceEngineParams {
   effectiveServiceTier?: string | null;
   effectiveCodexRuntimePolicy: CodexRuntimePolicy;
   effectiveReasoningEffort: ReasoningEffort;
-  effectiveVoiceCaveman: boolean;
   sparkApproved: boolean;
   sparkBlocked: boolean;
   sparkPreflightPending: boolean;
@@ -137,7 +136,6 @@ export function useVoiceEngine(params: VoiceEngineParams) {
     effectiveServiceTier,
     effectiveCodexRuntimePolicy,
     effectiveReasoningEffort,
-    effectiveVoiceCaveman,
     sparkApproved,
     sparkBlocked,
     sparkPreflightPending,
@@ -1624,7 +1622,6 @@ export function useVoiceEngine(params: VoiceEngineParams) {
           serviceTier: effectiveServiceTier,
           codexRuntimePolicy: effectiveCodexRuntimePolicy,
           scratchMode: turnScratchMode,
-          voiceCaveman: effectiveVoiceCaveman,
           allowModelContextRisk: sparkApproved,
           allowSparkContextRisk: sparkApproved,
           sttMetrics: options.sttMetrics,

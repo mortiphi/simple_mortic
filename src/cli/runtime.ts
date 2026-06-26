@@ -12,7 +12,6 @@ import { getCodexStatus, listCodexRecentThreads, prewarmCodexScratch, shutdownCo
 import { createPreferencesStore } from "../server/preferences.js";
 import { codexProviderAdapter } from "../server/providerAdapters.js";
 import { resolveRuntimeContext } from "../server/runtimeContext.js";
-import { syncVendoredSkills } from "../server/skillSync.js";
 import { createSessionStorage } from "../server/storage.js";
 import { defaultScratchSettings } from "../shared/scratchDefaults.js";
 import { parseThreadUri } from "../shared/threadUri.js";
@@ -170,10 +169,6 @@ export async function startMorticRuntime(options: StartMorticRuntimeOptions): Pr
     }
   });
   const loadedEnvFiles = loadDotEnv(root);
-  const skillSyncResults = await syncVendoredSkills().catch((error) => {
-    warn(`Skill sync failed: ${error instanceof Error ? error.message : String(error)}`);
-    return [];
-  });
   const staticDir = path.join(root, "dist", "client");
   const hasStaticBuild = !options.preferDevServer && existsSync(path.join(staticDir, "index.html"));
   const apiPort = options.apiPort ?? (await findFreePort(5152));
@@ -248,11 +243,6 @@ export async function startMorticRuntime(options: StartMorticRuntimeOptions): Pr
   }
   if (runtimeContext.prompt) log(`Prompt: ${runtimeContext.prompt}`);
   log(`Env:    ${loadedEnvFiles.length > 0 ? loadedEnvFiles.join(", ") : "no .env files (browser voice only unless keys are exported)"}`);
-  for (const result of skillSyncResults) {
-    if (result.action === "current") continue;
-    const note = result.detail ? ` (${result.detail})` : "";
-    log(`Skill:  ${result.skill} ${result.action}${note}`);
-  }
   log(`Codex:  ${codex.available ? `${codex.version ?? "available"} at ${codex.path}` : codex.error}`);
   log("\nPress Ctrl+C to stop.\n");
 
@@ -268,7 +258,6 @@ export async function startMorticRuntime(options: StartMorticRuntimeOptions): Pr
       codexModel: "default",
       reasoningEffort: defaultScratchSettings.reasoningEffort,
       scratchMode: defaultScratchSettings.scratchMode,
-      voiceCaveman: defaultScratchSettings.voiceCaveman,
       confirmationPrompt: startupConfirmation.prompt,
       onEvent: async (label, detail) => {
         if (label === "App-server scratch fork validated") log(`Voice scratch prewarmed: ${detail}`);

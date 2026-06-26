@@ -16,25 +16,13 @@ import { codexAppServerBridge } from "./appServerBridge.js";
 import type { CodexProgressTraceEvent, CodexTurnProgress, CodexVoiceActivity } from "./appServerBridge.js";
 import { codexCliPtyBridge } from "./cliPtyBridge.js";
 import { codexProviderAdapter } from "./providerAdapters.js";
+import { voicePrompt } from "./voiceContract.js";
 
 const COMMAND_TIMEOUT_MS = 10 * 60 * 1000;
 export const DEFAULT_CODEX_MODEL = process.env.MORTIC_CODEX_MODEL ?? "default";
 const ALLOW_UNVERIFIED_CODEX_FALLBACKS = process.env.MORTIC_ALLOW_UNVERIFIED_CODEX_FALLBACKS === "1";
 
 type ContinueCheck = () => boolean | Promise<boolean>;
-
-function voicePromptWithContract(prompt: string): string {
-  return [
-    "Voice output reminder: if this turn has an output schema, return the schema object with speak.text and read.markdown.",
-    "If no output schema is active, reply with exactly two newline-delimited JSON records and nothing else.",
-    "Fallback line 1: {\"type\":\"speak\",\"text\":\"complete spoken answer\"}",
-    "Fallback line 2: {\"type\":\"read\",\"markdown\":\"screen notes, with newlines escaped as \\\\n\"}",
-    "Do not add prose outside the schema object or the two fallback JSON lines.",
-    "",
-    "User turn:",
-    prompt
-  ].join("\n");
-}
 
 export async function getCodexStatus(): Promise<CodexStatus> {
   const status = await codexProviderAdapter.status();
@@ -44,6 +32,10 @@ export async function getCodexStatus(): Promise<CodexStatus> {
     version: status.version,
     error: status.error
   };
+}
+
+export function codexTurnPrompt(prompt: string, scratchMode: ScratchMode = "text"): string {
+  return scratchMode === "voice" ? voicePrompt(prompt) : prompt;
 }
 
 export async function listCodexRecentThreads(options?: {
@@ -288,7 +280,6 @@ export async function runCodexTurn(params: {
   serviceTier?: string | null;
   codexRuntimePolicy?: CodexRuntimePolicy;
   scratchMode?: ScratchMode;
-  voiceCaveman?: boolean;
   developerInstructions?: string;
   requireAppServer?: boolean;
   shouldContinue?: ContinueCheck;
@@ -301,7 +292,7 @@ export async function runCodexTurn(params: {
   const model = params.codexModel || DEFAULT_CODEX_MODEL;
   const scratchMode = params.scratchMode ?? "text";
   const cwd = params.runtimeContext?.effectiveCwd ?? process.cwd();
-  const prompt = scratchMode === "voice" ? voicePromptWithContract(params.prompt) : params.prompt;
+  const prompt = codexTurnPrompt(params.prompt, scratchMode);
   const shouldContinue = async () => (params.shouldContinue ? await params.shouldContinue() : true);
 
   if (!(await shouldContinue())) {
@@ -320,7 +311,6 @@ export async function runCodexTurn(params: {
       serviceTier: params.serviceTier,
       codexRuntimePolicy: params.codexRuntimePolicy,
       scratchMode,
-      voiceCaveman: params.voiceCaveman,
       developerInstructions: params.developerInstructions,
       onDelta: params.onDelta,
       onEvent: params.onEvent,
@@ -403,7 +393,6 @@ export async function prewarmCodexScratch(params: {
   serviceTier?: string | null;
   codexRuntimePolicy?: CodexRuntimePolicy;
   scratchMode?: ScratchMode;
-  voiceCaveman?: boolean;
   confirmationPrompt?: string;
   onEvent?: (label: string, detail?: string) => void | Promise<void>;
 }): Promise<{ confirmation?: string }> {
@@ -415,7 +404,6 @@ export async function prewarmCodexScratch(params: {
     codexRuntimePolicy: params.codexRuntimePolicy,
     reasoningEffort: params.reasoningEffort,
     scratchMode: params.scratchMode ?? "text",
-    voiceCaveman: params.voiceCaveman,
     confirmationPrompt: params.confirmationPrompt,
     onEvent: params.onEvent
   });
@@ -426,7 +414,6 @@ export async function prepareCodexContextScratch(params: {
   runtimeContext?: RuntimeContextRestore;
   reasoningEffort: ReasoningEffort;
   scratchMode?: ScratchMode;
-  voiceCaveman?: boolean;
   onEvent?: (label: string, detail?: string) => void | Promise<void>;
 }): Promise<{
   scratchThreadId: string;
@@ -443,7 +430,6 @@ export async function prepareCodexContextScratch(params: {
     cwd: params.runtimeContext?.effectiveCwd ?? process.cwd(),
     reasoningEffort: params.reasoningEffort,
     scratchMode: params.scratchMode ?? "text",
-    voiceCaveman: params.voiceCaveman,
     onEvent: params.onEvent
   });
 }
@@ -454,7 +440,6 @@ export async function compactCodexThread(params: {
   reasoningEffort: ReasoningEffort;
   codexModel?: string;
   scratchMode?: ScratchMode;
-  voiceCaveman?: boolean;
   onEvent?: (label: string, detail?: string) => void | Promise<void>;
 }): Promise<{
   turnId: string;
@@ -469,7 +454,6 @@ export async function compactCodexThread(params: {
     compactionModel: DEFAULT_CODEX_MODEL,
     reasoningEffort: params.reasoningEffort,
     scratchMode: params.scratchMode ?? "text",
-    voiceCaveman: params.voiceCaveman,
     onEvent: params.onEvent
   });
   const estimatedInputTokens =
@@ -499,7 +483,6 @@ export function getCodexSparkCompactedBase(params: {
   codexModel: string;
   reasoningEffort: ReasoningEffort;
   scratchMode: ScratchMode;
-  voiceCaveman?: boolean;
 }): {
   compactedThreadId: string;
   estimatedInputTokens?: number;
@@ -510,8 +493,7 @@ export function getCodexSparkCompactedBase(params: {
     cwd: params.runtimeContext?.effectiveCwd ?? process.cwd(),
     model: params.codexModel,
     reasoningEffort: params.reasoningEffort,
-    scratchMode: params.scratchMode,
-    voiceCaveman: params.voiceCaveman
+    scratchMode: params.scratchMode
   });
   if (!state) return null;
   const estimatedInputTokens =

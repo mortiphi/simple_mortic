@@ -26,7 +26,6 @@ import type { SessionStorage } from "./storage.js";
 import { createMemoryPreferencesStore, type PreferencesStore } from "./preferences.js";
 import { SessionCoordinator, isAudioLeasePhase } from "./sessionCoordinator.js";
 import { codexProviderAdapter } from "./providerAdapters.js";
-import { syncVendoredSkills } from "./skillSync.js";
 import { parseThreadUri } from "../shared/threadUri.js";
 import { defaultScratchSettings } from "../shared/scratchDefaults.js";
 import { estimateTextTokens } from "../shared/tokenEstimate.js";
@@ -69,7 +68,6 @@ import {
   type SessionStreamEvent,
   type SessionUiPatch,
   type ScratchMode,
-  type SkillSyncStatus,
   type SparkContextCompactRequest,
   type SttTranscriptionRequest,
   type SourceThreadRequest,
@@ -121,7 +119,6 @@ export function defaultMorticPreferences(): MorticPreferences {
     serviceTier: null,
     codexAccessPreset: "approve",
     scratchMode: defaultScratchSettings.scratchMode,
-    shortSpokenReplies: false,
     transportProvider: getLiveKitStatus().defaultTransport,
     sttProvider: getSttStatus().defaultProvider,
     ttsProvider: getTtsStatus().defaultProvider,
@@ -135,7 +132,6 @@ type EffectiveScratchSettings = {
   codexModel: string;
   serviceTier?: string | null;
   codexRuntimePolicy: CodexRuntimePolicy;
-  voiceCaveman: boolean;
 };
 
 function isReasoningEffort(value: unknown): value is ReasoningEffort {
@@ -208,7 +204,6 @@ function effectiveScratchSettings(params: {
   codexModel?: string;
   serviceTier?: string | null;
   codexRuntimePolicy?: CodexRuntimePolicy;
-  voiceCaveman?: boolean;
 }): EffectiveScratchSettings {
   const codexModel = normalizeCodexModel(params.codexModel);
   const requestedReasoning =
@@ -220,8 +215,7 @@ function effectiveScratchSettings(params: {
     reasoningEffort: effectiveReasoningForModel(codexModel, requestedReasoning),
     codexModel,
     serviceTier: normalizeServiceTier(params.serviceTier),
-    codexRuntimePolicy: normalizeCodexRuntimePolicy(params.codexRuntimePolicy),
-    voiceCaveman: params.scratchMode === "voice" && params.voiceCaveman === true
+    codexRuntimePolicy: normalizeCodexRuntimePolicy(params.codexRuntimePolicy)
   };
 }
 
@@ -237,8 +231,7 @@ async function effectiveSparkPreflight(threadId: string, settings?: EffectiveScr
         runtimeContext,
         codexModel: settings.codexModel,
         reasoningEffort: settings.reasoningEffort,
-        scratchMode: settings.scratchMode,
-        voiceCaveman: settings.voiceCaveman
+        scratchMode: settings.scratchMode
       })
     : null;
   if (compacted) {
@@ -255,8 +248,7 @@ async function effectiveSparkPreflight(threadId: string, settings?: EffectiveScr
       threadId,
       runtimeContext,
       reasoningEffort: settings.reasoningEffort,
-      scratchMode: settings.scratchMode,
-      voiceCaveman: settings.voiceCaveman
+      scratchMode: settings.scratchMode
     });
     const scratchInputTokens = scratch.tokenUsage?.inputTokens ?? scratch.tokenUsage?.totalTokens;
     if (typeof scratchInputTokens === "number" && Number.isFinite(scratchInputTokens) && scratchInputTokens > 0) {
@@ -937,6 +929,7 @@ export async function createMorticServer(options: MorticServerOptions) {
   }
 
   await app.register(cors, {
+    methods: ["GET", "HEAD", "POST", "PATCH", "DELETE", "OPTIONS"],
     origin(origin, callback) {
       if (!origin) return callback(null, true);
       try {
@@ -956,25 +949,9 @@ export async function createMorticServer(options: MorticServerOptions) {
 
   app.get("/api/onboarding", async (): Promise<OnboardingStatusResponse> => {
     const provider = await codexProviderAdapter.status();
-    // Re-running the sync here is idempotent and self-healing: a missing or
-    // stale managed copy is restored on the spot, so the skills step only
-    // blocks when sync itself fails. User-edited copies are reported, never
-    // overwritten.
-    const skills = await syncVendoredSkills().catch((error): SkillSyncStatus[] => [
-      {
-        skill: "vendored-skills",
-        action: "error",
-        detail: error instanceof Error ? error.message : String(error),
-        targetDir: ""
-      }
-    ]);
     return {
       provider,
-      skills,
-      ready:
-        provider.available &&
-        provider.loginStatus !== "logged-out" &&
-        skills.every((skill) => skill.action !== "error")
+      ready: provider.available && provider.loginStatus !== "logged-out"
     };
   });
 
@@ -1079,16 +1056,24 @@ export async function createMorticServer(options: MorticServerOptions) {
     if (body.ttsProvider !== undefined && !getTtsStatus().availableProviders.includes(body.ttsProvider)) {
       return reply.code(400).send({ error: "TTS provider is not configured" });
     }
-    if (body.shortSpokenReplies !== undefined && typeof body.shortSpokenReplies !== "boolean") {
-      return reply.code(400).send({ error: "shortSpokenReplies must be boolean" });
-    }
     if (body.overlayHintDismissed !== undefined && typeof body.overlayHintDismissed !== "boolean") {
       return reply.code(400).send({ error: "overlayHintDismissed must be boolean" });
     }
+    const preferencePatch: MorticPreferencesPatch = {};
+    if (body.initialized !== undefined) preferencePatch.initialized = body.initialized;
+    if (body.codexModel !== undefined) preferencePatch.codexModel = body.codexModel;
+    if (body.reasoningEffort !== undefined) preferencePatch.reasoningEffort = body.reasoningEffort;
+    if (body.serviceTier !== undefined) preferencePatch.serviceTier = body.serviceTier;
+    if (body.codexAccessPreset !== undefined) preferencePatch.codexAccessPreset = body.codexAccessPreset;
+    if (body.scratchMode !== undefined) preferencePatch.scratchMode = body.scratchMode;
+    if (body.transportProvider !== undefined) preferencePatch.transportProvider = body.transportProvider;
+    if (body.sttProvider !== undefined) preferencePatch.sttProvider = body.sttProvider;
+    if (body.ttsProvider !== undefined) preferencePatch.ttsProvider = body.ttsProvider;
+    if (body.overlayHintDismissed !== undefined) preferencePatch.overlayHintDismissed = body.overlayHintDismissed;
     const preferences = await preferencesStore.patch({
-      ...body,
+      ...preferencePatch,
       codexModel: modelOption?.model ?? model,
-      initialized: body.initialized ?? true
+      initialized: preferencePatch.initialized ?? true
     });
     await emitSessionSnapshot("preferences-updated");
     return { preferences, revision: sessionRevision };
@@ -1127,7 +1112,6 @@ export async function createMorticServer(options: MorticServerOptions) {
       codexModel?: string;
       reasoningEffort?: string;
       scratchMode?: string;
-      voiceCaveman?: string;
     };
   }>("/api/session/spark-context", async (request) => {
     const session = await options.storage.read();
@@ -1136,8 +1120,7 @@ export async function createMorticServer(options: MorticServerOptions) {
       reasoningEffort: isReasoningEffort(request.query.reasoningEffort)
         ? request.query.reasoningEffort
         : DEFAULT_REASONING_EFFORT,
-      codexModel: request.query.codexModel,
-      voiceCaveman: request.query.voiceCaveman === "true"
+      codexModel: request.query.codexModel
     });
     return {
       session,
@@ -1153,8 +1136,7 @@ export async function createMorticServer(options: MorticServerOptions) {
     const effective = effectiveScratchSettings({
       scratchMode: isScratchMode(body?.scratchMode) ? body.scratchMode : DEFAULT_SCRATCH_MODE,
       reasoningEffort: isReasoningEffort(body?.reasoningEffort) ? body.reasoningEffort : DEFAULT_REASONING_EFFORT,
-      codexModel: body?.codexModel,
-      voiceCaveman: body?.voiceCaveman
+      codexModel: body?.codexModel
     });
     const before = await effectiveSparkPreflight(session.threadId, effective, currentRuntimeContext(session));
 
@@ -1219,7 +1201,6 @@ export async function createMorticServer(options: MorticServerOptions) {
         codexModel: effective.codexModel,
         reasoningEffort: effective.reasoningEffort,
         scratchMode: effective.scratchMode,
-        voiceCaveman: effective.voiceCaveman,
         onEvent: (label, detail) => {
           logs.push({
             label,
@@ -1421,8 +1402,7 @@ export async function createMorticServer(options: MorticServerOptions) {
       reasoningEffort: body.reasoningEffort,
       codexModel: body.codexModel,
       serviceTier: body.serviceTier,
-      codexRuntimePolicy: body.codexRuntimePolicy,
-      voiceCaveman: body.voiceCaveman
+      codexRuntimePolicy: body.codexRuntimePolicy
     });
     const sparkPreflight = needsModelTransitionPreflight(effective.codexModel)
       ? await effectiveSparkPreflight(session.threadId, effective, currentRuntimeContext(session))
@@ -1449,7 +1429,6 @@ export async function createMorticServer(options: MorticServerOptions) {
         codexModel: effective.codexModel,
         serviceTier: effective.serviceTier,
         codexRuntimePolicy: effective.codexRuntimePolicy,
-        voiceCaveman: effective.voiceCaveman,
         onEvent: (label, detail) => {
           logs.push({
             label,
@@ -1480,7 +1459,6 @@ export async function createMorticServer(options: MorticServerOptions) {
         reasoningEffort: effective.reasoningEffort,
         codexModel: effective.codexModel,
         serviceTier: effective.serviceTier,
-        voiceCaveman: effective.voiceCaveman,
         prewarmConfirmation: effective.scratchMode === "voice" ? readyText : undefined,
         prewarmMs: Date.now() - startedAt,
         logs
@@ -1493,7 +1471,6 @@ export async function createMorticServer(options: MorticServerOptions) {
         reasoningEffort: effective.reasoningEffort,
         codexModel: effective.codexModel,
         serviceTier: effective.serviceTier,
-        voiceCaveman: effective.voiceCaveman,
         prewarmMs: Date.now() - startedAt,
         logs
       });
@@ -1518,8 +1495,7 @@ export async function createMorticServer(options: MorticServerOptions) {
       reasoningEffort: body.reasoningEffort,
       codexModel: body.codexModel,
       serviceTier: body.serviceTier,
-      codexRuntimePolicy: body.codexRuntimePolicy,
-      voiceCaveman: body.voiceCaveman
+      codexRuntimePolicy: body.codexRuntimePolicy
     });
     const sparkPreflight = needsModelTransitionPreflight(effective.codexModel)
       ? await effectiveSparkPreflight(sessionBeforeTurn.threadId, effective, currentRuntimeContext(sessionBeforeTurn))
@@ -1603,7 +1579,6 @@ export async function createMorticServer(options: MorticServerOptions) {
       serviceTier: effectiveServiceTier,
       codexRuntimePolicy: effectiveCodexRuntimePolicy,
       scratchMode: effectiveScratchMode,
-      voiceCaveman: effective.voiceCaveman,
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
       logs: [logEntry(startMs, "Request received", `${Buffer.byteLength(userEntry.text, "utf8")} user-text bytes`)],
@@ -1858,7 +1833,6 @@ export async function createMorticServer(options: MorticServerOptions) {
             serviceTier: effectiveServiceTier,
             codexRuntimePolicy: effectiveCodexRuntimePolicy,
             scratchMode: effectiveScratchMode,
-            voiceCaveman: effective.voiceCaveman,
             shouldContinue: isCurrentTurnRunning,
             onDelta,
             onEvent,
